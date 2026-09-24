@@ -268,6 +268,9 @@ class RiskEngine:
     def band_or_oi(self, view: MarketView, m: Market) -> RiskDecision | None:
         key = (view.venue, view.base)
         why = []
+        status = view.status or (str(m.status).upper() if view.venue is Venue.ARCUS else None)
+        if view.venue is Venue.ARCUS and status and status != "ONLINE":
+            why.append(f"market is {status}")   # halted, delisted, or a new listing not yet trading
         if view.venue is Venue.ARCUS and (view.upper_in_zone or view.lower_in_zone):
             why.append("Arcus off-hours band in expansion zone")
         if view.oi is not None and view.oi_cap and view.mid() is not None:

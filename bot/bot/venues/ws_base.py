@@ -4,7 +4,10 @@
 - proactive rotation before a venue's connection lifetime (Arcus closes after 24 h);
 - application-level keepalive when the venue wants one (Lighter: a frame at least every 2 min);
 - per-key "last message" timestamps for staleness checks and recorder health;
-- close code 1001 (Arcus restart drain) is treated as a normal reconnect.
+- close code 1001 (Arcus restart drain) is treated as a normal reconnect;
+- an exception in the message handler is logged and that message skipped: it never drops the connection (a frame
+  that fails every time, e.g. a snapshot for a market that went offline, used to cause an endless reconnect loop,
+  since every reconnect replays the subscriptions and gets the same frame again).
 """
 
 from __future__ import annotations
@@ -59,6 +62,7 @@ class ReconnectingWS:
         self.resubscribes = 0
         self.connected_at: float = 0.0
         self.msgs = 0
+        self.handler_errors = 0
 
     # ---------------------------------------------------------------- lifecycle
     def start(self) -> None:
@@ -161,9 +165,18 @@ class ReconnectingWS:
                             data = orjson.loads(msg.data)
                         except orjson.JSONDecodeError:
                             continue
-                        r = self._on_message(data, recv)
-                        if asyncio.iscoroutine(r):
-                            await r
+                        try:
+                            r = self._on_message(data, recv)
+                            if asyncio.iscoroutine(r):
+                                await r
+                        except asyncio.CancelledError:
+                            raise
+                        except Exception as e:  # skip this frame, keep the connection (see module docstring)
+                            self.handler_errors += 1
+                            if self.handler_errors <= 5 or self.handler_errors % 1000 == 0:
+                                self.log.error("ws_handler_error", reason=type(e).__name__,
+                                               data={"err": str(e)[:200], "n": self.handler_errors,
+                                                     "frame": str(data)[:300]}, exc_info=self.handler_errors <= 5)
                     elif msg.type in (aiohttp.WSMsgType.CLOSE, aiohttp.WSMsgType.CLOSED, aiohttp.WSMsgType.ERROR):
                         break
                     if self._max_lifetime and time.monotonic() - self.connected_at > self._max_lifetime:

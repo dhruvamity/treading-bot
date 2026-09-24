@@ -308,6 +308,7 @@ class BotRunner:
                     continue
                 v = self.hub.view(Venue.ARCUS, base)
                 v.is_outside_rth = bool(m.get("isOutsideRth"))
+                v.status = str(m["status"]).upper() if m.get("status") else v.status
                 v.upper_bound = D(m["upperTradingBound"]) if m.get("upperTradingBound") else None
                 v.lower_bound = D(m["lowerTradingBound"]) if m.get("lowerTradingBound") else None
                 v.upper_in_zone = bool(m.get("isUpperInExpansionZone"))
@@ -542,8 +543,18 @@ class BotRunner:
                                         f"{rep.position_mismatch}")
 
     async def _reconcile_loop(self) -> None:
+        """Every 5 minutes, and within 5 s of an adapter asking (an account stream went `degraded`)."""
+        last = time.monotonic()
         while not self._stop.is_set():
-            await asyncio.sleep(300)
+            await asyncio.sleep(5)
+            asked = [ad for ad in self.adapters.values() if getattr(ad, "resync_requested", False)]
+            if not asked and time.monotonic() - last < 300:
+                continue
+            for ad in asked:
+                ad.resync_requested = False
+            if asked:
+                log.warning("reconcile_now", reason="an account stream was degraded")
+            last = time.monotonic()
             await self.reconcile_once()
 
     async def _housekeeping(self) -> None:

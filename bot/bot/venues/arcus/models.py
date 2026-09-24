@@ -59,7 +59,8 @@ def parse_market(m: dict[str, Any], *, maker_fee: Decimal, taker_fee: Decimal) -
         mmf=D(m["maintenanceMarginFraction"]),
         offhours_imf=_opt(m.get("offHoursInitialMarginFraction")),
         close_out_mf=None,
-        rth=(int(rth["startSecondsOfDay"]), int(rth["endSecondsOfDay"]), rth["timezone"]) if rth else None,
+        rth=(int(rth["startSecondsOfDay"]), int(rth["endSecondsOfDay"]), rth.get("timezone") or "America/New_York")
+        if rth else None,
         maker_fee=maker_fee,
         taker_fee=taker_fee,
         oi_cap_usd=_opt(m.get("openInterestCapNotional")),
@@ -81,6 +82,7 @@ def parse_market(m: dict[str, Any], *, maker_fee: Decimal, taker_fee: Decimal) -
             "isUpperInExpansionZone": m.get("isUpperInExpansionZone"),
             "isLowerInExpansionZone": m.get("isLowerInExpansionZone"),
             "pythId": m.get("pythId"),
+            "addedTimestamp": m.get("addedTimestamp"),
         },
     )
 

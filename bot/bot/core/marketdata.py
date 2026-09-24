@@ -84,6 +84,7 @@ class MarketView:
     lower_in_zone: bool = False
     oi: Decimal | None = None
     oi_cap: Decimal | None = None
+    status: str | None = None     # Arcus market status from the live markets channel (None: not seen yet)
     # derived
     vol_1s: EwmaVar = field(default_factory=lambda: EwmaVar(60))  # per-second vol, 1-min halflife
     vol_1m: EwmaVar = field(default_factory=lambda: EwmaVar(30))  # per-minute vol, 30-min halflife
