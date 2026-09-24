@@ -65,12 +65,14 @@ class ArcusAdapter:
         self._last_pool_poll = 0.0
         self.errors = 0
         self.actions = 0
+        self.resync_requested = False   # an account stream degraded: the runner reconciles at once
 
     # ---------------------------------------------------------------- lifecycle
     async def connect(self) -> None:
         if self.ws is not None:
             self.ws.on("orders", self._on_orders)
             self.ws.on("userFills", self._on_fills)
+            self.ws.on("degraded", self._on_degraded)
             await self.ws.subscribe_account(self.address, self.account_index, ("orders", "userFills", "positions",
                                                                                "account"))
             self.ws.start()
@@ -81,6 +83,10 @@ class ArcusAdapter:
         if self.ws is not None:
             await self.ws.stop()
         await self.rest.close()
+
+    def _on_degraded(self, channel: str, sid: str, frame: dict[str, Any], recv_us: int) -> None:
+        if channel in ("orders", "userFills", "positions", "account"):
+            self.resync_requested = True   # updates may have been missed: the venue's state wins
 
     async def markets(self) -> Sequence[Market]:
         return list(self._markets.values())

@@ -69,8 +69,6 @@ flowchart LR
 ```
 treading-bot/
   README.md                   this guide
-  arclight-agent-prompts.md   the original build spec (the project's old name is kept in these files)
-  arclight-project-spec       the original project spec
   lighter-rh-docs/            a copy of the Lighter (Robinhood Chain) API docs used while building
   bot/                        the bot (Python 3.12 package `bot`, command `bot`)
     bot/scout/                tape (data store), record (recorder), sim (backtest), scan (menu + ranking), pilot, service
@@ -81,6 +79,7 @@ treading-bot/
     config/                   app.yaml (risk limits), venues/, sessions/, calendars/ (CPI, FOMC, NFP, earnings)
     deploy/                   systemd units and a VPS bootstrap script
     docs/RUNBOOK.md           operations handbook
+    docs/SPEC.md, PROMPT_PACK.md   the original design and build spec (the project's old name is kept there)
     tests/                    offline tests (no network, no keys)
     Dockerfile, docker-compose.yml   the scout for a server
     .env.example              the credentials template (copy to .env)
@@ -241,6 +240,9 @@ Do these in order:
    ([4.6](#46-capital-the-least-and-the-most)); more only adds size once the scout has backtested at the new amount.
 4. Put `BOT_PILOT_LIVE=1` in `.env`, and wait for the next scan: the scout then backtests at the account's equity.
 5. `bot doctor pilot` must end in **READY**. Its `sizing` line shows the order size, cap and stops for your equity.
+   It fails a live start on a market that is not ONLINE, and warns about a market listed in the last 21 days and
+   about a stock with no earnings date in `config/calendars/earnings.csv` (the file ships empty: add the next report
+   date of the stock you trade as `SYMBOL,YYYY-MM-DD,bmo,source` (or `amc`), so the bot pauses around it).
 6. `bot pilot approve 1 --live`, read the summary, and type `LIVE`. From Telegram: **Run #1** → **LIVE**, the bot
    runs `doctor`, then you type back the one-time code it sends.
 
@@ -272,7 +274,7 @@ Per market per UTC day, compact NumPy files under `data/scout/tape/<MARKET>/<YYY
 - **depth** (optional, `--depth`): the top 10 book levels on each side, sampled once a second when the book changed.
   Used later for a queue-position fill model; the Docker setup records it by default.
 
-It uses two WebSocket connections (three with depth), re-reads the market list hourly and pauses recording below 5 GB
+It uses two WebSocket connections (three with depth), re-reads the market list every 10 minutes and pauses recording below 5 GB
 of free disk. `data/scout/recorder.json` shows its health.
 
 ### 4.2 How the backtest works
@@ -331,6 +333,14 @@ A setting is **GO** only when all three windows pass:
 
 The percentages are of the capital the setting uses: −0.25% is −$0.25 a day on $100 and −$2.50 on $1,000.
 
+**New markets.** Arcus pre-lists markets as OFFLINE (September 2026: F, BAC, CCL, VT, SGOV, RVI) and switches them
+on later, and a fresh listing can go back OFFLINE (KBONK did, hours after listing). The scout handles this:
+- a market's first recorded day counts as a full day only if its own data covers 20 hours of it;
+- a market trading for under 21 days (Arcus's listing time, or the recorder first seeing it after it started) needs
+  **3 full days** before it can be GO: listing-week flow is unusual, and new listings start with small open-interest
+  caps ($100k for CPER, GME, QNT, MRNA);
+- a deployment whose market goes offline is paused, and resumes after two GO scans once it trades again.
+
 **Ranking:** GO settings rank by maker volume per day, then PnL. The best setting per market is kept, and the top 3
 markets are offered.
 
@@ -343,7 +353,7 @@ markets are offered.
 | `data/scout/latest.json` | The full latest scan (the pilot reads it) |
 | `data/scout/scans/<time>.json` | Every scan, without the per-setting list |
 | `data/scout/recorder.json` | Recorder health: markets, rows, message age, free disk |
-| `data/scout/markets.json` | Arcus market parameters (ticks, minimums, margins), refreshed hourly |
+| `data/scout/markets.json` | Arcus market parameters (ticks, minimums, margins, status, listing time), refreshed every 10 minutes |
 
 ### 4.6 Capital: the least and the most
 
@@ -387,7 +397,6 @@ recorded days (September 2026: QQQ $11k, GLD $25k, SPY $9k, NVDA $4k, BTC $22k).
 the stops apply to the capital actually used; the rest of the account is margin cushion. QQQ at 20x therefore uses at
 most about $1,375 of capital, and at 2x about $13,750. There is no upper limit on the account, but one deployment on
 one market can only use what that market trades. (Running several markets at once would use more; the bot runs one.)
-
 
 ---
 
@@ -441,6 +450,7 @@ re-computes the dollars from the account's equity at start and at 00:00 UTC ([4.
 | Session loss ≥ `stop_loss_pct` of capital | Cancel quotes, flatten (maker, then IOC) | next session |
 | Event window (CPI, FOMC, NFP ±30 min; earnings ±24 h) | No new quotes | window end |
 | Arcus off-hours price band in its expansion zone, or open-interest cap reached | Stop quoting that market | cleared |
+| The market is not ONLINE (Arcus's live `markets` channel: halted, delisted, a listing switched off) | Stop quoting that market; the exit book closes any position once it trades | ONLINE again |
 | Heartbeat silent 60 s | Dead man's switch and guardian cancel everything | manual, after reconciliation |
 | Order pool < 5% | Cancels only | pool recovered |
 | Dead man's switch refresh fails twice | Safe mode | manual |
@@ -736,14 +746,15 @@ reads Arcus's public market data. Everything runs from `bot/docker-compose.yml`.
 
 ### 11.1 What it records, continuously
 
-For **every online Arcus perp** (58 in September 2026; new listings are picked up within the hour):
+For **every online Arcus perp** (60 in late September 2026; a new listing, or a pre-listed market that turns ONLINE, is
+picked up within 10 minutes and added without interrupting the others):
 
 | Stream | What is stored | What it is used for | Disk per day (all markets) |
 |---|---|---|---|
 | Best bid and offer | Price and size of the best bid and ask: a row whenever a price changes, or sizes change and 1 s has passed | Backtest prices and spreads, the safety pause, the "now" checks | ~50–150 MB (with trades) |
 | Trades | Every trade: price, size, taker side, trade id, and the `sequenceNumber` that groups one taker order's prints | Fills in the backtest (which taker orders reached our price and how much they had left), the flow checks | included above |
 | Depth (`--depth`, on by default in Docker) | The top 10 levels of each side, sampled once a second when the book changed | A queue-position fill model for larger, leveraged orders (the next backtest upgrade); not used by the scan yet | ~150–400 MB |
-| Market parameters | `markets.json`, refreshed hourly: tick, minimum size, margins (so maximum leverage), open-interest caps, session hours | Order sizes, the leverage ladder, the off-hours margin | tiny |
+| Market parameters | `markets.json`, refreshed every 10 minutes: tick, minimum size, margins (so maximum leverage), open-interest caps, session hours | Order sizes, the leverage ladder, the off-hours margin | tiny |
 
 Files: `data/scout/tape/<MARKET>/<YYYY-MM-DD>/{bbo,trades,depth}-*.npz`. Arcus serves no historical order books, so
 **this recording is the only history there will be**: gaps cannot be filled later.
@@ -946,6 +957,10 @@ keys expire after at most 180 days; `doctor` refuses to start within 24 h of exp
 | The pilot refuses to approve | The scan is over 90 minutes old or the top 3 changed: check `bot pilot status` and approve again |
 | Paper differs from the backtest | Expected to some degree: the backtest fill rule is conservative, and a few days are noisy. Compare over several days |
 | A deployment was paused | `/pilot` shows why; it resumes by itself after two GO scans in a row |
+| `make install` fails building `cryptography` on an Intel Mac | `cryptography` 49+ ships no Intel-Mac wheels; `pyproject.toml` pins it below 49 on Intel Macs, so pull the latest code and run `make install` again |
+| The scout or bot log shows `ws_error KeyError` and reconnects every few seconds | An old copy of the code meeting a market that went OFFLINE (its book snapshot is empty). Update the code: it now leaves that book empty and keeps the connection |
+| `ws_degraded` in the log | Arcus marked a stream stale; the bot drops that book, re-subscribes for a fresh snapshot, and reconciles the account if it was an account stream. Occasional is normal; constant means Arcus trouble |
+| `ws_error_frame "Market 'X' is not available"` | X is OFFLINE (pre-listed, halted or delisted). Harmless: recording starts when it turns ONLINE |
 
 ---
 

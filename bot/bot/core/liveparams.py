@@ -103,7 +103,13 @@ class LiveParams:
         for m in await self.arcus.markets():
             if m.get("type", "PERPETUAL") != "PERPETUAL":
                 continue
-            mk = parse_arcus_market(m, maker_fee=maker, taker_fee=taker)
+            try:
+                mk = parse_arcus_market(m, maker_fee=maker, taker_fee=taker)
+            except (KeyError, TypeError, ValueError, ArithmeticError) as e:
+                # A new listing with a field missing or not yet set must not stop every other market from loading
+                log.warning("arcus_market_skipped", market=str(m.get("marketDisplayName")),
+                            reason=f"{type(e).__name__}: {e}"[:200])
+                continue
             out[mk.base] = mk
         return out
 
@@ -115,7 +121,11 @@ class LiveParams:
         for ob in obs:
             if self.perps_only and ob.get("market_type") != "perp":
                 continue
-            mk = parse_lighter_market(ob, details.get(int(ob["market_id"])))
+            try:
+                mk = parse_lighter_market(ob, details.get(int(ob["market_id"])))
+            except (KeyError, TypeError, ValueError, ArithmeticError) as e:
+                log.warning("lighter_market_skipped", market=str(ob.get("symbol")), reason=f"{type(e).__name__}: {e}"[:200])
+                continue
             out[mk.base] = mk
         return out
 

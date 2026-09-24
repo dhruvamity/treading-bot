@@ -95,6 +95,30 @@ def sizing_lines(s: MMSession, m: Market, mid: Decimal) -> tuple[str, str, str]:
     return "PASS", msg, ""
 
 
+NEW_LISTING_DAYS = 21        # Arcus addedTimestamp this recent: a new listing (thin history, small OI cap)
+
+
+def _new_market_checks(r: Report, s: MMSession | DNSession, m: Market, calendar: TradingCalendar, now_us: int,
+                       live: bool) -> None:
+    """What a recently listed market, or any single stock, needs before it is traded."""
+    added = m.extra.get("addedTimestamp") if m.extra else None
+    try:
+        age_d = (now_us / 1e6 - float(str(added))) / 86400 if added else None
+    except (TypeError, ValueError):
+        age_d = None
+    if age_d is not None and 0 <= age_d < NEW_LISTING_DAYS:
+        cap = f", open-interest cap ${float(m.oi_cap_usd):,.0f}" if m.oi_cap_usd else ""
+        r.add("WARN", "market", f"{s.market} was listed {age_d:.0f} days ago{cap}: little history, and listing-week "
+              "flow is unusual", "prefer a setup the scout has passed on 3+ full days")
+    if str(m.category).upper() == "EQUITIES" and "earnings" in set(getattr(getattr(s, "session", None), "skip_events",
+                                                                           []) or []):
+        nxt = calendar.next_event(now_us, {"earnings"}, s.market.upper())
+        if nxt is None:
+            r.add("WARN" if live else "INFO", "calendar", f"no {s.market} earnings date in "
+                  "config/calendars/earnings.csv: the bot will not pause around its earnings",
+                  f"add the next {s.market} report date (symbol,date,session: bmo or amc)")
+
+
 async def run_doctor(sessions: list[MMSession | DNSession], *, mode: RunMode, app: AppConfig, secrets: SecretStore,
                      calendar: TradingCalendar, arcus_rest: Any, lighter_rest: Any | None, markets: dict[Venue, dict[str, Market]],
                      adopt_positions: bool = False, now_us: int | None = None,
@@ -115,7 +139,10 @@ async def run_doctor(sessions: list[MMSession | DNSession], *, mode: RunMode, ap
             if m is None:
                 r.add("FAIL", "market", f"{s.market} is not listed on {v.value}", "fix the market in the session file")
             elif str(m.status).upper() not in ("ONLINE", "ACTIVE", "TRADING", "OPEN", "1"):
-                r.add("WARN", "market", f"{v.value} {s.market} status is {m.status}", "wait until it is trading")
+                r.add("FAIL" if live else "WARN", "market", f"{v.value} {s.market} status is {m.status}: orders "
+                      "would be rejected", "wait until it is trading (new listings start OFFLINE)")
+            else:
+                _new_market_checks(r, s, m, calendar, now, live)
     try:
         idx = account_index if account_index is not None else arcus_account_index(sessions) if sessions else -1
     except ConfigError as e:

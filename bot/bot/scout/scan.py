@@ -13,7 +13,9 @@ the recorded days), past which the sizes stop growing and the stops apply to the
 
 A candidate is GO only when all three checks pass (percentages are of the capital the sizes use):
 - long window (up to the last 7 full days): average PnL/day >= -0.25% (close to breakeven or better), at most one
-  daily stop, never the kill, at least half the days not negative, and at least 5 fills a day;
+  daily stop, never the kill, at least half the days not negative, and at least 5 fills a day; a market trading for
+  under 21 days (listed recently, or first seen after the recorder started) needs 3 full days, and a market's first
+  recorded day counts only if it covers 20 h;
 - short window (the last 24 h, re-run each scan): PnL >= -0.25%, and still at least 30% of its usual fills (the flow is
   still there), with the last 6 h not worse than -0.50%;
 - market now (last 60 minutes of 1-min mids): not trending (efficiency ratio < 0.5), volatility not above 2x its
@@ -62,6 +64,8 @@ MENU: list[Config] = [
 BY_NAME = {c.name: c for c in MENU}
 
 # GO thresholds (see module docstring; the PnL ones are % of capital, in sizing.Pct)
+NEW_LISTING_DAYS = 21      # Arcus addedTimestamp this recent: a new listing ...
+NEW_LISTING_MIN_DAYS = 3   # ... needs this many full days before it can be GO (listing-week flow is unusual)
 MAX_DAY_STOPS = 1
 MIN_FILLS_DAY = 5
 MIN_FLOW_FRAC = 0.30
@@ -72,14 +76,20 @@ MAX_AGE_S = 300
 
 
 def load_markets(path: Path) -> dict[str, MarketInfo]:
+    """The ONLINE markets' trading parameters. A listing with a field missing or not yet set is skipped (and so not
+    scanned) rather than failing the whole scan."""
     data = json.loads(path.read_text())
     out = {}
     for m in data.get("markets", data):
         if m.get("status") != "ONLINE":
             continue
-        out[m["marketDisplayName"]] = MarketInfo(float(m["tickSize"]), float(m["stepSize"]),
-                                                 float(m["minOrderNotional"]), float(m["minOrderSize"]),
-                                                 mmf=float(m.get("maintenanceMarginFraction") or 0))
+        try:
+            out[m["marketDisplayName"]] = MarketInfo(float(m["tickSize"]), float(m["stepSize"]),
+                                                     float(m.get("minOrderNotional") or 5),
+                                                     float(m.get("minOrderSize") or m["stepSize"]),
+                                                     mmf=float(m.get("maintenanceMarginFraction") or 0))
+        except (KeyError, TypeError, ValueError):
+            continue
     return out
 
 
@@ -253,16 +263,24 @@ class Scanner:
         return bucket(float(np.median(p99))) if p99 else None
 
     def full_days(self, market: str, now_us: int) -> list[str]:
-        """Completed UTC days on which the recorder was up for at least 20 h and this market has data."""
+        """Completed UTC days on which the recorder was up for at least 20 h and this market has data. The market's
+        first recorded day counts only if its own data covers 20 h of it: a listing that went live at 15:00 UTC (or
+        was first recorded then) has a partial day, and averaging it as a full one would skew every per-day number."""
         today = day_str(now_us)
+        days = self.store.days(market)
         out = []
-        for d in self.store.days(market):
+        for d in days:
             if d >= today:
                 continue
             if d not in self._alive_h:
                 self._alive_h[d] = self.store.load_day(ALIVE_MARKET, d).bbo_hours()
-            if self._alive_h[d] >= 20:
-                out.append(d)
+            if self._alive_h[d] < 20:
+                continue
+            if d == days[0]:
+                ts = self.store.load_day(market, d).bbo["ts"]
+                if not len(ts) or day_start_us(d) + US_DAY - int(ts.min()) < 20 * 3600 * S:
+                    continue
+            out.append(d)
         return out[-self.htf_days:]
 
     def backtest(self, markets: list[str], now_us: int, mis: dict[str, MarketInfo],
@@ -389,20 +407,40 @@ class Candidate:
         return asdict(self)
 
 
-def score_market(market: str, bt: dict[str, Any], now: dict[str, float], pct: Pct | None = None) -> list[Candidate]:
-    """bt: {risk_key: {"risk", "days", "recent"}} from Scanner.backtest (or one such entry for a single sizing)."""
+def listed_days_ago(meta: dict[str, Any], now_us: int, first_seen: str | None = None,
+                    recorder_first: str | None = None) -> float | None:
+    """How long the market has been trading, in days: since Arcus listed it (addedTimestamp), or since the recorder
+    first saw it when that came after the recorder started (a market pre-listed OFFLINE for months keeps its old
+    addedTimestamp when it finally turns ONLINE). None when neither says it is new."""
+    ages = []
+    try:
+        added = float(meta.get("addedTimestamp") or 0)
+    except (TypeError, ValueError):
+        added = 0.0
+    if added > 0:
+        ages.append((now_us / 1e6 - added) / 86400)
+    if first_seen and recorder_first and first_seen > recorder_first:
+        ages.append((now_us - day_start_us(first_seen)) / US_DAY)
+    return min(ages) if ages else None
+
+
+def score_market(market: str, bt: dict[str, Any], now: dict[str, float], pct: Pct | None = None,
+                 listed_days: float | None = None) -> list[Candidate]:
+    """bt: {risk_key: {"risk", "days", "recent"}} from Scanner.backtest (or one such entry for a single sizing).
+    listed_days: days since Arcus listed the market (new listings need NEW_LISTING_MIN_DAYS full days)."""
     if "days" in bt:
         bt = {"": bt}
     out = []
     lev_max = max((e.get("risk", {}).get("leverage", 0.0) for e in bt.values()), default=0.0)
     for entry in bt.values():
         r = entry.get("risk") or {}
-        out += _score(market, entry, now, r, at_max=r.get("leverage", 0.0) >= lev_max, pct=pct or Pct())
+        out += _score(market, entry, now, r, at_max=r.get("leverage", 0.0) >= lev_max, pct=pct or Pct(),
+                      listed_days=listed_days)
     return out
 
 
 def _score(market: str, bt: dict[str, Any], now: dict[str, float], risk: dict[str, Any], at_max: bool,
-           pct: Pct) -> list[Candidate]:
+           pct: Pct, listed_days: float | None = None) -> list[Candidate]:
     out = []
     by_cfg: dict[str, list[dict[str, Any]]] = {}
     for _d, rs in sorted(bt["days"].items()):
@@ -444,6 +482,9 @@ def _score(market: str, bt: dict[str, Any], now: dict[str, float], risk: dict[st
                 reasons.append(f"only {pos_days}/{len(days)} days not negative")
             if fills_day < MIN_FILLS_DAY:
                 reasons.append(f"too few fills ({fills_day:.1f}/day)")
+            if listed_days is not None and listed_days < NEW_LISTING_DAYS and len(days) < NEW_LISTING_MIN_DAYS:
+                reasons.append(f"new market (trading {listed_days:.0f} days): {len(days)} of {NEW_LISTING_MIN_DAYS} "
+                               "full days")
         if rec is None or rec["hours"] < 12:
             if not bt.get("skip"):
                 reasons.append("under 12 h of recent data")
@@ -518,14 +559,17 @@ def scan(root: Path, *, now_us: int | None = None, markets: list[str] | None = N
     t0 = time.time()
     bt = sc.backtest(have, now_us, mis, meta)
     cands: list[Candidate] = []
+    rec_first = next(iter(sc.store.days(ALIVE_MARKET)), None)
     for m in have:
-        cands += score_market(m, bt[m], market_now(sc.store, m, now_us), pct)
+        age = listed_days_ago(meta[m], now_us, next(iter(sc.store.days(m)), None), rec_first)
+        cands += score_market(m, bt[m], market_now(sc.store, m, now_us), pct, age)
     ranked = rank(cands)
     return {"ts_us": now_us, "took_s": round(time.time() - t0, 1), "risk": asdict(sc.risk),
             "capital": {"usd": sc.capital, "source": capital_source, "pct": asdict(pct)},
             "leverage": {"policy": "max, then " + ", ".join(f"{x:g}x" for x in LADDER) if ladder else "max",
                          "caps": LEV_CAPS},
             "markets": len(have), "configs": len(MENU),
+            "offline": sorted(m for m in sc.store.markets() if m in meta and meta[m].get("status") != "ONLINE"),
             "top": [c.as_dict() for c in ranked if c.go][:3],
             "ranked": [c.as_dict() for c in ranked],
             "at_max": [c.as_dict() for c in best_at_max(cands)],

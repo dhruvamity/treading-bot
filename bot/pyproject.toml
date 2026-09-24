@@ -9,7 +9,9 @@ dependencies = [
     "orjson>=3.10",
     "pydantic>=2.7",
     "pyyaml>=6.0",
-    "cryptography>=42",
+    # cryptography 49+ ships no Intel-Mac wheels (building it needs a Rust toolchain); 48 still has universal2 ones
+    "cryptography>=42; sys_platform != 'darwin' or platform_machine != 'x86_64'",
+    "cryptography>=42,<49; sys_platform == 'darwin' and platform_machine == 'x86_64'",
     "eth-account>=0.13.4",
     "pyarrow>=16",
     "polars>=1.0",

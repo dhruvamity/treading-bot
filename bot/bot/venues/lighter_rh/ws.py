@@ -93,8 +93,7 @@ class LighterWS:
             ob = m.get("order_book") or {}
             self.ws.touch(f"order_book/{mid}", recv_us)
             if snapshot:
-                sync.on_snapshot(ob, recv_us)
-                res = SyncResult.APPLIED
+                res = sync.on_snapshot(ob, recv_us)
             else:
                 res = sync.on_delta(ob, recv_us)
                 if res is SyncResult.GAP:

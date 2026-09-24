@@ -3,10 +3,12 @@
 With `depth=True` it also keeps each market's order book and samples the top 10 levels once a second when the book
 changed (queue-position data for sizing fills of larger orders).
 
-Two WebSocket connections (three with depth; Arcus allows 100 subscriptions per connection). Rows are buffered per market and written
-every `flush_s` to the TapeStore as one part per market per hour, so a crash loses at most one flush. The market list
-is re-read hourly: new listings are picked up, delisted ones dropped. Recording pauses when free disk falls under
-`min_free_gb`.
+WebSocket connections hold up to 45 markets each (30 with depth; Arcus allows 100 subscriptions per connection and
+50 connections per IP). Rows are buffered per market and written every `flush_s` to the TapeStore as one part per
+market per hour, so a crash loses at most one flush. The market list is re-read every 10 minutes: a new listing, or a
+pre-listed market that turns ONLINE, is added to a connection with room (or a new one) without interrupting the
+others; a market that goes offline simply stops sending. A failed re-read is retried at the next interval. Recording
+pauses when free disk falls under `min_free_gb`.
 """
 
 from __future__ import annotations
@@ -31,6 +33,7 @@ from bot.venues.symbols import canonical_base
 
 log = Log("scout.record")
 SUBS_PER_CONN = 90
+MARKETS_EVERY_S = 600.0
 
 
 class ScoutRecorder:
@@ -53,9 +56,11 @@ class ScoutRecorder:
         self.parts: dict[tuple[str, str], list[dict[str, np.ndarray]]] = {}   # (market, kind) -> this hour's rows
         self.part_hour = -1
         self.conns: list[ArcusWS] = []
+        self.on_conn: list[set[str]] = []           # the markets each connection records
         self.rows = 0
         self.last_msg = 0.0
         self.paused_disk = False
+        self._last_flush = time.time()
         self._stop = asyncio.Event()
 
     # ---------------------------------------------------------------- markets
@@ -116,25 +121,37 @@ class ScoutRecorder:
                 await asyncio.wait_for(self._stop.wait(), timeout=1.0)
             self.sample_depth(int(time.time() * 1e6))
 
-    async def _connect(self, markets: list[str]) -> None:
-        for c in self.conns:
-            await c.stop()
-        self.conns = []
+    def _new_conn(self) -> int:
+        ws = ArcusWS(self.ws_url, n_levels=DEPTH_N if self.depth else 1)
+        ws.on("bbo", self._on_bbo)
+        ws.on("trades", self._on_trades)
+        if self.depth:
+            ws.on("book", self._on_book)
+        ws.start()
+        self.conns.append(ws)
+        self.on_conn.append(set())
+        return len(self.conns) - 1
+
+    async def subscribe(self, markets: list[str]) -> list[str]:
+        """Start recording the markets not recorded yet, filling existing connections before opening new ones.
+        Markets already recorded are left alone, so a new listing never interrupts the others."""
+        have = set().union(*self.on_conn) if self.on_conn else set()
+        new = [d for d in markets if d not in have]
         per = SUBS_PER_CONN // (3 if self.depth else 2)
-        for i in range(0, len(markets), per):
-            ws = ArcusWS(self.ws_url, n_levels=DEPTH_N if self.depth else 1)
-            ws.on("bbo", self._on_bbo)
-            ws.on("trades", self._on_trades)
-            if self.depth:
-                ws.on("book", self._on_book)
-            ws.start()
-            for d in markets[i:i + per]:
-                await ws.subscribe_market(d, book=self.depth, bbo=True, trades=True, predicted_funding=False)
-            self.conns.append(ws)
-        log.info("scout_record_subscribed", data={"markets": len(markets), "connections": len(self.conns)})
+        for d in new:
+            i = next((k for k, on in enumerate(self.on_conn) if len(on) < per), None)
+            if i is None:
+                i = self._new_conn()
+            await self.conns[i].subscribe_market(d, book=self.depth, bbo=True, trades=True, predicted_funding=False)
+            self.on_conn[i].add(d)
+        if new:
+            log.info("scout_record_subscribed", data={"new": new[:30], "markets": len(have) + len(new),
+                                                      "connections": len(self.conns)})
+        return new
 
     # ---------------------------------------------------------------- writing
     def flush(self) -> int:
+        self._last_flush = time.time()
         free_gb = shutil.disk_usage(self.root).free / 1e9
         self.paused_disk = free_gb < self.min_free_gb
         hour = int(time.time() // 3600)
@@ -164,23 +181,34 @@ class ScoutRecorder:
             log.warning("scout_record_disk", reason=f"only {free_gb:.1f} GB free: recording paused")
         return n
 
+    async def _update_markets(self) -> bool:
+        """Re-read the market list and record any market that is newly ONLINE. False if the read failed."""
+        try:
+            await self.subscribe(await self.refresh_markets())
+            return True
+        except Exception as e:  # network or API trouble: keep recording what we have, retry next time
+            log.warning("scout_record_markets_failed", reason=f"{type(e).__name__}: {e}"[:200])
+            return False
+
     async def run(self, duration_s: float | None = None) -> None:
         self.root.mkdir(parents=True, exist_ok=True)
-        markets = await self.refresh_markets()
-        await self._connect(markets)
+        while not await self._update_markets():   # no market list yet: nothing to record, so keep trying
+            with contextlib.suppress(TimeoutError):
+                await asyncio.wait_for(self._stop.wait(), timeout=30)
+            if self._stop.is_set():
+                await self.rest.close()
+                return
         sampler = asyncio.create_task(self._sample_loop()) if self.depth else None
         start = last_mk = time.time()
         try:
             while not self._stop.is_set():
                 with contextlib.suppress(TimeoutError):
-                    await asyncio.wait_for(self._stop.wait(), timeout=self.flush_s)
-                self.flush()
-                if time.time() - last_mk > 3600:
+                    await asyncio.wait_for(self._stop.wait(), timeout=min(self.flush_s, MARKETS_EVERY_S))
+                if time.time() - self._last_flush >= self.flush_s:
+                    self.flush()
+                if time.time() - last_mk >= MARKETS_EVERY_S:
                     last_mk = time.time()
-                    now = await self.refresh_markets()
-                    if now != markets:
-                        markets = now
-                        await self._connect(markets)
+                    await self._update_markets()
                 if duration_s is not None and time.time() - start >= duration_s:
                     break
         finally:

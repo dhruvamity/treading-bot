@@ -196,7 +196,15 @@ class Pilot:
             return out
         cand = next((c for c in scan.get("all", []) if c["market"] == a["market"] and c["config"] == a["config"]), None)
         base = base_of(a["market"])
-        if cand is None:
+        if a["market"] in (scan.get("offline") or []):
+            st["go_streak"] = 0
+            if not st.get("paused_by_scout"):
+                why = "Arcus has taken the market offline"
+                self.control.set_pause(a["mode"], base, f"scout: {why}")
+                st["paused_by_scout"] = why
+                out.append(self.event("paused", f"Paused {a['market']} ({a['config']}): {why}. Any position is being "
+                                      "closed with reduce-only orders once it trades again.", top=top))
+        elif cand is None:
             out.append(self.event("review", f"{a['market']} is not in this scan (no fresh data?). Leaving it as is."))
         elif not cand["go"]:
             st["go_streak"] = 0

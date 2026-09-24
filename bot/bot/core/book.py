@@ -194,12 +194,27 @@ class ArcusBookSync:
     boundary_gaps: int = 0
     gaps: int = 0
 
-    def on_snapshot(self, contents: dict[str, object], ts_us: int = 0) -> None:
+    def on_snapshot(self, contents: dict[str, object], ts_us: int = 0) -> SyncResult:
+        """Load a snapshot. Arcus answers a subscription to a market that is not available (OFFLINE, a pre-listing,
+        delisted, unknown) with `contents: {}`: the book is emptied and stays NOT_READY until a real snapshot comes.
+        (Raising here used to drop the whole connection, and the replayed subscription raised again: a reconnect
+        loop that stopped every market on that connection.)"""
+        if not contents or contents.get("lastSequenceId") is None:
+            self.invalidate(ts_us)
+            return SyncResult.NOT_READY
         seq = int(contents["lastSequenceId"])  # type: ignore[call-overload]
         self.book.load(_pairs(contents.get("bids") or []), _pairs(contents.get("asks") or []), seq,  # type: ignore[arg-type]
                        int(contents.get("timestamp") or ts_us))  # type: ignore[call-overload]
         self.snapshot_seq = seq
         self.last_seq = seq
+        self.first_delta = True
+        return SyncResult.APPLIED
+
+    def invalidate(self, ts_us: int = 0) -> None:
+        """The stream can no longer be trusted (empty snapshot, `degraded` frame): drop the book and ignore deltas
+        until the next snapshot."""
+        self.book.load([], [], None, ts_us)
+        self.snapshot_seq = self.last_seq = None
         self.first_delta = True
 
     def on_delta(self, contents: dict[str, object], ts_us: int = 0) -> SyncResult:
@@ -228,10 +243,16 @@ class LighterBookSync:
     last_nonce: int | None = None
     gaps: int = 0
 
-    def on_snapshot(self, ob: dict[str, object], ts_us: int = 0) -> None:
+    def on_snapshot(self, ob: dict[str, object], ts_us: int = 0) -> SyncResult:
+        """An empty or nonce-less snapshot empties the book and leaves it NOT_READY (see ArcusBookSync)."""
+        if not ob or ob.get("nonce") is None:
+            self.book.load([], [], None, ts_us)
+            self.last_nonce = None
+            return SyncResult.NOT_READY
         self.book.load(_pairs(ob.get("bids") or []), _pairs(ob.get("asks") or []), int(ob["nonce"]),  # type: ignore[arg-type, call-overload]
                        ts_us)
         self.last_nonce = int(ob["nonce"])  # type: ignore[call-overload]
+        return SyncResult.APPLIED
 
     def on_delta(self, ob: dict[str, object], ts_us: int = 0) -> SyncResult:
         if self.last_nonce is None:

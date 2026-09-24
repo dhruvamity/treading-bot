@@ -6,13 +6,20 @@ Envelope facts verified live (tests/fixtures/live/arcus_ws_frames.json):
 - `subscribed.contents` is the snapshot; updates arrive as `channel_data`;
 - subscriptions are never authenticated (account data is public by address);
 - order RPC: {"type":"post","id":<int>,"request":{"type":<method>,"payload":{..},"apiKey","timestamp","signature"}}
-  returns {"method","id","status":202,"result":{...}}; lifecycle arrives on `orders` / `userFills`.
+  returns {"method","id","status":202,"result":{...}}; lifecycle arrives on `orders` / `userFills`;
+- a market that is not available (OFFLINE, pre-listed, delisted, unknown) answers `l2OrderbookUpdates` with an empty
+  snapshot (`contents: {}`) and `bbo` with {"type":"error","message":"Market 'X' is not available"} (seen live
+  2026-09-25): the book stays empty and not ready, and each distinct error is logged once per 10 minutes;
+- a `degraded` frame (e.g. reason `snapshot_stale`) echoes the subscription's channel, id and accountIndex: that
+  stream can no longer be trusted. A book is dropped at once; the stream is re-subscribed for a fresh snapshot (at
+  most once per 10 s per stream), and a `degraded` event lets the account adapter ask for a reconciliation.
 """
 
 from __future__ import annotations
 
 import asyncio
 import itertools
+import time
 from collections.abc import Callable
 from typing import Any
 
@@ -24,6 +31,11 @@ from bot.venues.ws_base import ReconnectingWS
 
 Callback = Callable[..., Any]
 log = Log("arcus.ws")
+DEGRADED_RESUB_S = 10.0
+ERROR_LOG_EVERY_S = 600.0
+PER_MARKET = {"l2OrderbookUpdates": "l2u", "bbo": "bbo", "trades": "trades", "predictedFunding": "pf"}
+GLOBAL = ("markets", "oraclePrices", "marketAttributes")
+ACCOUNT = ("orders", "userFills", "positions", "account", "funding", "accountTransferUpdates", "accountAttributeUpdates")
 
 
 class ArcusWS:
@@ -36,12 +48,17 @@ class ArcusWS:
         self._rpc_ids = itertools.count(1)
         self._pending: dict[int, asyncio.Future[dict[str, Any]]] = {}
         self._inflight = asyncio.Semaphore(40)
+        self._resub_at: dict[str, float] = {}             # last degraded-driven resubscribe per stream
+        self._resub_later: dict[str, asyncio.Task[None]] = {}
+        self._errors_logged: dict[str, float] = {}
+        self.degraded = 0
 
     # ---------------------------------------------------------------- wiring
     def on(self, event: str, fn: Callback) -> None:
         """Events: book(base, sync, result, recv_us), bbo(base, contents, recv_us), trades(base, list, recv_us),
         oracle(list, recv_us), predicted_funding(base, contents, recv_us), markets(dict, recv_us),
-        market_attrs(contents, recv_us), orders/userFills/positions/account/funding(contents, recv_us, frame)."""
+        market_attrs(contents, recv_us), orders/userFills/positions/account/funding(contents, recv_us, frame),
+        degraded(channel, id, frame, recv_us), error(frame, recv_us)."""
         self.cb.setdefault(event, []).append(fn)
 
     async def _emit(self, event: str, *args: Any) -> None:
@@ -57,6 +74,8 @@ class ArcusWS:
         for f in self._pending.values():
             if not f.done():
                 f.cancel()
+        for task in self._resub_later.values():
+            task.cancel()
         await self.ws.stop()
 
     # ---------------------------------------------------------------- subscriptions
@@ -116,9 +135,60 @@ class ArcusWS:
             fut = self._pending.get(m["id"])
             if fut and not fut.done():
                 fut.set_result(m)
+        elif t == "degraded":
+            await self._on_degraded(m, recv_us)
         elif t == "error":
-            log.warning("ws_error_frame", data={"message": str(m.get("message"))[:300]})
+            msg = str(m.get("message"))[:300]
+            now = time.monotonic()
+            if now - self._errors_logged.get(msg, -ERROR_LOG_EVERY_S) >= ERROR_LOG_EVERY_S:
+                self._errors_logged[msg] = now
+                log.warning("ws_error_frame", data={"message": msg})
             await self._emit("error", m, recv_us)
+
+    @staticmethod
+    def stream_key(channel: str, sid: str, account_index: Any = None) -> tuple[str, dict[str, Any]] | None:
+        """(subscription key, unsubscribe frame) for a channel frame, as subscribe_* registered it."""
+        if channel in PER_MARKET:
+            return f"{PER_MARKET[channel]}:{sid}", {"type": "unsubscribe", "channel": channel, "id": sid}
+        if channel in GLOBAL:
+            return channel, {"type": "unsubscribe", "channel": channel}
+        if channel in ACCOUNT:
+            ai = int(account_index or 0)
+            return (f"{channel}:{sid.lower()}:{ai}",
+                    {"type": "unsubscribe", "channel": channel, "id": sid, "accountIndex": ai})
+        return None
+
+    async def _on_degraded(self, m: dict[str, Any], recv_us: int) -> None:
+        ch, sid = str(m.get("channel") or ""), str(m.get("id") or "")
+        self.degraded += 1
+        if ch == "l2OrderbookUpdates" and sid in self.books:
+            self.books[sid].invalidate(recv_us)   # never quote off a book the venue says is stale
+        k = self.stream_key(ch, sid, m.get("accountIndex"))
+        log.warning("ws_degraded", venue="arcus", market=sid or None,
+                    reason=str(m.get("reason") or m.get("message") or m.get("contents") or "")[:200],
+                    data={"channel": ch, "resubscribe": bool(k)})
+        await self._emit("degraded", ch, sid, m, recv_us)
+        if k is not None:
+            await self._resubscribe_soon(*k)
+
+    async def _resubscribe_soon(self, key: str, unsubscribe: dict[str, Any]) -> None:
+        """Re-subscribe for a fresh snapshot now, or once DEGRADED_RESUB_S has passed since the last one (a venue that
+        keeps sending `degraded` must not turn this into a subscribe storm)."""
+        wait = self._resub_at.get(key, -DEGRADED_RESUB_S) + DEGRADED_RESUB_S - time.monotonic()
+        if wait <= 0:
+            self._resub_at[key] = time.monotonic()
+            await self.ws.resubscribe(key, unsubscribe)
+            return
+        pending = self._resub_later.get(key)
+        if pending is not None and not pending.done():
+            return
+
+        async def later() -> None:
+            await asyncio.sleep(wait)
+            self._resub_at[key] = time.monotonic()
+            await self.ws.resubscribe(key, unsubscribe)
+
+        self._resub_later[key] = asyncio.create_task(later())
 
     async def _on_channel(self, m: dict[str, Any], recv_us: int, *, snapshot: bool) -> None:
         ch = m.get("channel")
@@ -128,8 +198,7 @@ class ArcusWS:
             sync = self.books.setdefault(sid, ArcusBookSync())
             self.ws.touch(f"l2u:{sid}", recv_us)
             if snapshot:
-                sync.on_snapshot(c, recv_us)
-                res = SyncResult.APPLIED
+                res = sync.on_snapshot(c, recv_us)
             else:
                 res = sync.on_delta(c, recv_us)
                 if res is SyncResult.GAP:
