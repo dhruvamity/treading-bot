@@ -11,6 +11,7 @@ from dataclasses import dataclass
 from decimal import Decimal
 from typing import Any
 
+from bot.common import sizing
 from bot.common.config import AppConfig, DNSession, MMSession
 from bot.common.errors import BotError, ConfigError
 from bot.common.secrets import SecretStore
@@ -232,11 +233,37 @@ async def _arcus_checks(r: Report, sessions: list[MMSession | DNSession], idx: i
             r.add("WARN", "arcus funds", f"could not read the account: {e}")
         await _arcus_sizing(r, sessions, rest, markets)
         return
-    need = sum(float(s.capital_usd) for s in sessions if isinstance(s, MMSession) and s.venue == "arcus")
+    follow = {id(s) for s in sessions if isinstance(s, MMSession) and s.venue == "arcus" and s.sizing is not None
+              and s.sizing.follow_equity}
+    need = sum(float(s.capital_usd) for s in sessions if isinstance(s, MMSession) and s.venue == "arcus"
+               and id(s) not in follow)
     need += sum(float(s.collateral_per_leg_usd) for s in sessions if isinstance(s, DNSession))
     lvl = "FAIL" if live and equity <= 0 else "WARN" if float(equity) < need else "PASS"
-    r.add(lvl, "arcus funds", f"equity ${equity:.2f}, free collateral ${free:.2f}; sessions plan ${need:.2f}",
+    r.add(lvl, "arcus funds", f"equity ${equity:.2f}, free collateral ${free:.2f}"
+          + (f"; fixed-size sessions plan ${need:.2f}" if need else ""),
           "deposit more, or lower capital_usd in the session file to what is really there")
+    sized: list[MMSession | DNSession] = []
+    for s in sessions:
+        if id(s) in follow:
+            assert isinstance(s, MMSession) and s.sizing is not None
+            z = s.sizing
+            cap = sizing.target_capital(float(equity), frac=z.capital_frac, max_capital=z.max_capital_usd,
+                                        covered=z.backtest_capital_usd)
+            if cap < z.min_capital_usd:
+                r.add("FAIL" if live else "WARN", "arcus funds",
+                      f"{s.market}: ${cap:,.2f} usable is under the ${z.min_capital_usd:,.2f} this setup needs "
+                      "(its smallest order would fall under 1.2x the Arcus minimum)",
+                      f"deposit at least ${z.min_capital_usd / z.capital_frac:,.2f}, or pick a lower-minimum setup")
+                s = s.model_copy(deep=True)
+            else:
+                s = s.model_copy(deep=True)
+                out = sizing.apply(s, cap)
+                r.add("PASS", "sizing", f"{s.market}: sizes follow the equity: ${out.capital:,.2f} of ${equity:,.2f} "
+                      f"(backtested at ${z.backtest_capital_usd:,.2f}; at most 1.25x a GO backtest) -> order "
+                      f"${s.order_size_usd:,.2f}, cap ${s.inventory_cap_usd:,.2f}, stops ${s.pos_stop_usd:,.2f} / "
+                      f"${s.daily_stop_usd:,.2f} / ${s.kill_usd:,.2f}")
+        sized.append(s)
+    sessions = sized
 
     try:
         orders = await rest.open_orders(address, idx)

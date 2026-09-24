@@ -162,16 +162,23 @@ The trading bot still sends its own WARN/CRIT alerts with the same token; the tw
 The scout needs no keys and places no orders, so it can run anywhere with Docker. On the server, in a copy of this
 folder (leave out `.venv`, `.env` and `state/`):
 
-```bash
-docker compose up -d --build          # records every Arcus perp (with --depth) and scans every 30 min, 24/7
-docker compose logs -f scout          # what it is doing
-cat data/scout/report.txt             # latest ranking: best per market, then each market at its max leverage
-ls data/scout/reports/                # the last scan of each UTC day
-docker compose down                   # stop; it finishes the scan in progress and writes out its buffers
-```
+Run these from this folder (`bot/`, where `docker-compose.yml` is), one at a time:
+
+| Command | What it does |
+|---|---|
+| `docker compose up -d --build` | Records every Arcus perp (with `--depth`) and scans every 30 min, 24/7 |
+| `docker compose logs -f scout` | What it is doing |
+| `cat data/scout/report.txt` | The latest ranking: best per market, then each market at its max leverage |
+| `ls data/scout/reports/` | The last scan of each UTC day |
+| `docker compose down` | Stop; it finishes the scan in progress and writes out its buffers |
+
+Don't paste trailing `# comments` into zsh: by default it passes them to the command as arguments
+("no such service: #").
 
 - Seed it with the history from the laptop first: copy `data/scout/tape/` (a few hundred MB) into the same place.
 - `SCOUT_WORKERS=8 docker compose up -d` uses more cores for the scans.
+- `SCOUT_CAPITAL=500 docker compose up -d` ranks for a $500 account. The default, `auto`, reads the subaccount's
+  equity, but the container has no keys, so it uses the $100 paper capital (`sizing` in `config/app.yaml`).
 - Disk: about 0.2-0.5 GB/day with depth recording, about 0.1 GB/day without. Recording pauses by itself under 5 GB free;
   the container reports unhealthy when the recorder has not written for 15 minutes.
 - Bring results back with `rsync -a server:PATH/data/scout/ data/scout/` (tape, scans, reports).

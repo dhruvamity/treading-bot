@@ -15,6 +15,7 @@ from dataclasses import dataclass, field, replace
 from decimal import Decimal
 from typing import Any
 
+from bot.common import sizing
 from bot.common.config import DNSession, MMSession, RiskLimitsCfg
 from bot.common.ids import ClientIdFactory
 from bot.common.logging import DecisionLog, Log
@@ -104,6 +105,11 @@ class SessionEngine:
         self.exit_since_us: int | None = None
         self.pos_stop_active = False
         self.cooldown_until_us = 0
+        # sizes that follow the account (MMSession.sizing, bot/common/sizing.py): the capital the sizes and the stops
+        # are taken on, re-read from the account's equity at start and at 00:00 UTC
+        self.size_capital = self.capital
+        self.sized_day: str | None = None
+        self.too_small = ""
         self._wire_risk_context()
 
     # ---------------------------------------------------------------- wiring
@@ -159,6 +165,49 @@ class SessionEngine:
 
     def set_account(self, v: Venue, equity: Decimal, free: Decimal) -> None:
         self.state.kv_set(f"acct:{v.value}", f"{equity},{free}")
+
+    def resize(self, now_us: int) -> None:
+        """Sessions with `sizing.follow_equity`: at the first account read and at each 00:00 UTC, size from the
+        account's equity x capital_frac, bucketed, at most max_capital_usd and at most 1.25x the last capital a GO
+        backtest covered (the session's, or a newer one the scout recorded for this market in kv "sizing_ok",
+        which every new approval clears)."""
+        s = self.session
+        if not isinstance(s, MMSession) or s.sizing is None or not s.sizing.follow_equity:
+            return
+        from bot.common.time import utc_date_str
+
+        day = utc_date_str(now_us)
+        if day == self.sized_day:
+            return
+        eq = float(self._account(self.venue).equity)
+        if eq <= 0:
+            return  # no account read yet
+        self.sized_day = day
+        z = s.sizing
+        ok, _, ok_market = (self.state.kv_get("sizing_ok") or "").partition(":")
+        covered = max(z.backtest_capital_usd, float(ok) if ok and ok_market == self.base else 0.0)
+        cap = sizing.target_capital(eq, frac=z.capital_frac, max_capital=z.max_capital_usd, covered=covered)
+        if cap < z.min_capital_usd:
+            self.too_small = (f"equity ${eq:,.2f} is under the ${z.min_capital_usd:,.2f} {self.base} needs at this "
+                              "leverage (Arcus minimum order)")
+            self.decisions.record("resize", self.too_small, venue=self.venue.value, market=self.base, session=self.sid,
+                                  ts_us=now_us)
+            if self.alerter is not None:
+                self.alerter.warn("sizing", self.too_small)
+            return
+        self.too_small = ""
+        out = sizing.apply(s, cap)
+        self.size_capital = Decimal(str(round(out.capital, 2)))
+        lim = self.risk.market_limits.get((self.venue, self.base))
+        if lim is not None:
+            self.risk.market_limits[(self.venue, self.base)] = replace(
+                lim, position_cap_usd=Decimal(str(s.inventory_cap_usd * 1.25)))
+        msg = (f"sized for ${out.capital:,.2f} (equity ${eq:,.2f}, backtests cover ${covered:,.2f}): "
+               f"order ${s.order_size_usd:,.2f}, cap ${s.inventory_cap_usd:,.2f}, stops ${s.pos_stop_usd:,.2f} "
+               f"position / ${s.daily_stop_usd:,.2f} day / ${s.kill_usd:,.2f} kill")
+        self.decisions.record("resize", msg, venue=self.venue.value, market=self.base, session=self.sid, ts_us=now_us)
+        log.info("resize", venue=self.venue.value, market=self.base, session=self.sid,
+                 data={"equity": eq, "capital": out.capital, "order": s.order_size_usd, "cap": s.inventory_cap_usd})
 
     # ---------------------------------------------------------------- context
     def build_ctx(self, now_us: int) -> StrategyContext | None:
@@ -224,6 +273,7 @@ class SessionEngine:
         state = self.clock.update(now_us)
         if state is SessionState.DONE or self.stopped:
             return None
+        self.resize(now_us)
         for v in (self.venue, self.other_venue):
             if v is None:
                 continue
@@ -276,6 +326,10 @@ class SessionEngine:
             return None
         assert isinstance(self.session, MMSession)
         s, inv = self.session, ctx.inventory
+        if self.too_small:
+            if inv != 0 and self.exit_since_us is None:
+                self.exit_since_us = now_us   # close what is left: maker first, then a taker order
+            return self.too_small
         if self.venue in self.risk.venue_stopped_day:
             if inv == 0:
                 self.exit_since_us = None
@@ -415,10 +469,10 @@ class SessionEngine:
         self.risk.roll_day(now_us)
         sl = getattr(self.session, "stop_loss_pct", 10.0)
         tp = getattr(self.session, "take_profit_pct", None)
-        margin = self.capital
+        margin = self.size_capital
         for d in self.risk.on_pnl(venue=self.venue, session_id=self.sid, session_pnl=equity - self.session_start_equity,
                                   session_margin=margin, stop_loss_pct=sl, take_profit_pct=tp,
-                                  day_pnl=equity - self.day_start_equity[day], capital=self.capital, equity=equity,
+                                  day_pnl=equity - self.day_start_equity[day], capital=self.size_capital, equity=equity,
                                   is_dn=self.is_dn, ts_us=now_us, daily_stop_usd=self._usd("daily_stop_usd"),
                                   kill_usd=self._usd("kill_usd")):
             await self.execute(d, now_us)

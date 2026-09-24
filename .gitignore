@@ -24,6 +24,8 @@ bot/config/sessions/pilot.yaml
 bot/config/*.tmp
 *.sqlite
 *.sqlite-*
+*.tgz
+*.tar.gz
 
 # ---- Python and tooling -------------------------------------------------------------------------------------
 .venv/

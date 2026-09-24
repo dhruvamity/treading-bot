@@ -193,7 +193,7 @@ class BotRunner:
             for v in venues_needed:
                 mk = {b: m for b, m in markets[v].items() if b in self.bases}
                 books = {b: self.hub.view(v, b).book for b in mk}
-                pv = PaperVenue(v, mk, books, now_us=now_us, starting_equity=D(self.app.capital_usd_total / 2),
+                pv = PaperVenue(v, mk, books, now_us=now_us, starting_equity=D(str(self._paper_equity(v))),
                                 marks=self._mark_fn(v))
                 await pv.connect()
                 self.adapters[v] = pv
@@ -252,6 +252,17 @@ class BotRunner:
                 raise ConfigError(f"{venue.value} {base}: asked for {lev}x but the venue reports {got}x; not starting")
             self.decisions.record("leverage", f"set {venue.value} {base} leverage to {lev}x cross before quoting",
                                   venue=venue.value, market=base, leverage=lev)
+
+    def _paper_equity(self, v: Venue) -> float:
+        """A paper account holds what the sessions on it were sized for (the backtested capital for pilot sessions),
+        so equity-following sizes start where the backtest did."""
+        total = 0.0
+        for s in self.sessions:
+            if isinstance(s, DNSession):
+                total += s.collateral_per_leg_usd
+            elif Venue(s.venue) is v:
+                total += s.sizing.backtest_capital_usd if s.sizing else s.capital_usd
+        return total or self.app.capital_usd_total / 2
 
     def _mark_fn(self, v: Venue) -> Any:
         def f(b: str) -> Decimal | None:
