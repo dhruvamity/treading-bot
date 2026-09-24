@@ -398,6 +398,35 @@ the stops apply to the capital actually used; the rest of the account is margin 
 most about $1,375 of capital, and at 2x about $13,750. There is no upper limit on the account, but one deployment on
 one market can only use what that market trades. (Running several markets at once would use more; the bot runs one.)
 
+**Measured: the whole menu at nine capital levels.** Every market and setting was backtested on the 4 full days
+recorded 2026-09-20 to 09-23, with the checks as of 2026-09-24 02:50 UTC. These are backtests on a short history,
+not promises:
+
+| Capital | Setups that pass | Best by maker volume (capital it uses) | Order | Maker volume/day | PnL/day (best) | Worst day |
+|---|---|---|---|---|---|---|
+| $5 | 4 markets | NVDA deep 2bp ×2 @ 5x ($5) | $10 | $1,008 | +$0.05 | −$0.04 |
+| $10 | 6 | NVDA deep 3bp, skew @ 5x ($10) | $20 | $1,256 | −$0.00 | −$0.11 |
+| $25 | 7 | NVDA deep 3bp, no pause @ 5x ($25) | $50 | $2,080 | +$0.37 | −$0.01 |
+| $50 | 8 | QQQ deep 3bp, skew @ 20x ($50) | $400 | $11,452 | −$0.01 | −$0.60 |
+| $100 | 8 | QQQ deep 3bp, skew @ 20x ($100) | $800 | $20,961 | +$0.29 | −$1.60 |
+| $250 | 9 | QQQ deep 3bp, skew @ 25x ($250) | $2,500 | $42,959 | −$0.00 | −$5.50 |
+| $1,000 | 13 | QQQ deep 1.5bp, no pause @ 10x ($1,000) | $4,000 | $102,561 | +$6.29 | −$6.87 |
+| $5,000 | 14 | QQQ deep 1bp @ 5x ($5,000) | $10,000 | $204,963 | +$8.75 | −$47.35 |
+| $25,000 | 16 | HYPE deep 3bp, skew @ 2x ($11,250) | $9,000 | $404,706 | +$81.34 | −$237.82 |
+
+What it says:
+- **The least money that works is about $5**, but only four markets pass and each order is $10, so volume is about
+  $1k a day. HOOD, INTC and SNDK need more than $5 (their minimum order is $12–18); from $10 every market can be
+  funded.
+- **Around $50 is where it gets useful:** QQQ at 20x can then post $400 orders and does about $11k of maker volume a
+  day near breakeven. From $50 to about $1,000, volume grows almost in step with the capital (100–230× the capital
+  a day).
+- **Past about $1,000 the growth slows:** at $5,000 the best setup does about 40× the capital a day, and at $25,000
+  about 16×. Orders hit the markets' liquidity ceilings, so extra capital becomes margin cushion (the $25,000 row uses
+  $11,250), and the best market changes (HYPE at $25,000).
+- **The worst day grows with the capital** (the stops are a percentage of it), as do the stakes of a four-day sample
+  being wrong. Scan at your own capital and let the scout's history grow before sizing up.
+
 ---
 
 ## 5. The pilot: approve, run, re-check
