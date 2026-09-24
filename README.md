@@ -69,8 +69,6 @@ flowchart LR
 ```
 treading-bot/
   README.md                   this guide
-  arclight-agent-prompts.md   the original build spec (the project's old name is kept in these files)
-  arclight-project-spec       the original project spec
   lighter-rh-docs/            a copy of the Lighter (Robinhood Chain) API docs used while building
   bot/                        the bot (Python 3.12 package `bot`, command `bot`)
     bot/scout/                tape (data store), record (recorder), sim (backtest), scan (menu + ranking), pilot, service
@@ -81,6 +79,7 @@ treading-bot/
     config/                   app.yaml (risk limits), venues/, sessions/, calendars/ (CPI, FOMC, NFP, earnings)
     deploy/                   systemd units and a VPS bootstrap script
     docs/RUNBOOK.md           operations handbook
+    docs/SPEC.md, PROMPT_PACK.md   the original design and build spec (the project's old name is kept there)
     tests/                    offline tests (no network, no keys)
     Dockerfile, docker-compose.yml   the scout for a server
     .env.example              the credentials template (copy to .env)
