@@ -19,3 +19,5 @@ config/secrets.enc
 config/sessions/pilot.yaml
 CONTEXT.md
 OWNER_ACTIONS.md
+*.tgz
+*.tar.gz

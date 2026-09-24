@@ -19,3 +19,14 @@ risk:
   max_actions_per_filled_usd: 8.0
   feed_stale_s: 2.0
   max_error_rate: 0.05
+sizing:                          # every dollar figure is a share of the capital (bot/common/sizing.py)
+  capital_usd: auto              # auto: the Arcus subaccount's equity, re-read before each scan and at 00:00 UTC
+                                 # by the bot; or a fixed amount (e.g. 250) to size for money not deposited yet
+  paper_capital_usd: 100         # auto with no ARCUS_ADDRESS or an unfunded account (the Docker scout, paper)
+  capital_frac: 1.0              # trade this share of the equity (0.5 = half; the rest is untouched cushion)
+  max_capital_usd: null          # never size above this, however large the account grows (null = no cap)
+  position_stop_pct: 1.0         # an open position down 1% of the capital: close it, then cool down
+  daily_stop_pct: 2.0            # the UTC day down 2%: close, no new orders until 00:00 UTC
+  kill_pct: 10.0                 # equity 10% below its peak: flatten and stop until `bot resume`
+  go_pnl_day_pct: 0.25           # scout GO: average day and the last 24 h not worse than -0.25%
+  go_tail_pnl_pct: 0.50          # scout GO: the last 6 h not worse than -0.50%

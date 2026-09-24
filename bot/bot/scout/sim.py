@@ -26,6 +26,7 @@ Risk rules (the live bot enforces the same ones, from the same session fields):
 Leverage sets the size: at leverage L the position may reach capital x L (Arcus's own limit), so the inventory cap is
 capital x L / 1.25 (the risk engine's hard cap is 1.25x it) and each order is half the cap. RWA perps outside their
 session need 1.5x the initial margin to open, so the cap (and the order size with it) drops to `cap_off_usd` there.
+The capital and the stops (as % of it) come from bot/common/sizing.py, the same code the live engine sizes with.
 """
 
 from __future__ import annotations
@@ -37,6 +38,7 @@ from typing import Any
 
 import numpy as np
 
+from bot.common.sizing import Pct, sizes
 from bot.scout.tape import DayTape
 
 S = 1_000_000
@@ -58,15 +60,37 @@ class Risk:
     cap_off_usd: float | None = None   # inventory cap outside the RWA session (higher initial margin); None = cap_usd
     leverage: float = 0.0              # the leverage the sizes came from (0 = sizes set by hand)
     leverage_off: float = 0.0
+    used_usd: float = 0.0              # the capital the sizes and stops use (< capital_usd when order_max
+                                       # binds); 0 = all of it
+    order_max_usd: float = 0.0         # the liquidity ceiling when it limits these sizes (0 = it does not)
+    liq_ceiling_usd: float = 0.0       # the market's liquidity ceiling for one order, binding or not (information)
+    min_capital_usd: float = 0.0       # below this the venue minimum order, not the capital, would set the size
 
     @classmethod
     def at_leverage(cls, lev: float, lev_off: float | None = None, **kw: Any) -> Risk:
-        """Sizes for leverage `lev`: position up to capital x lev, inventory cap = that / 1.25, order = cap / 2."""
+        """Sizes for leverage `lev`: position up to capital x lev, inventory cap = that / 1.25, order = cap / 2.
+        The dollar stops are kept as given (see for_capital for stops that scale with the capital)."""
         base = cls(**kw)
         lev_off = lev if lev_off is None else min(lev_off, lev)
         cap = base.capital_usd * lev / 1.25
         return cls(**{**asdict(base), "order_usd": cap / 2, "cap_usd": cap,
                       "cap_off_usd": base.capital_usd * lev_off / 1.25, "leverage": lev, "leverage_off": lev_off})
+
+    @classmethod
+    def for_capital(cls, capital: float, lev: float, lev_off: float | None = None, *, pct: Pct | None = None,
+                    order_max: float | None = None, min_capital: float = 0.0, **kw: Any) -> Risk:
+        """Sizes and stops for `capital` at leverage `lev` (bot/common/sizing.py: the live engine's numbers)."""
+        lev_off = lev if lev_off is None else min(lev_off, lev)
+        s = sizes(capital, lev, lev_off, pct=pct, order_max=order_max)
+        binds = s.capital < capital
+        return cls(capital_usd=capital, order_usd=s.order, cap_usd=s.cap, cap_off_usd=s.cap_off,
+                   daily_stop_usd=s.daily_stop, pos_stop_usd=s.pos_stop, kill_usd=s.kill, leverage=lev,
+                   leverage_off=lev_off, used_usd=s.capital, order_max_usd=(order_max or 0.0) if binds else 0.0,
+                   liq_ceiling_usd=order_max or 0.0, min_capital_usd=min_capital, **kw)
+
+    @property
+    def used(self) -> float:
+        return self.used_usd or self.capital_usd
 
     def off_scale(self) -> float:
         return self.cap_off_usd / self.cap_usd if self.cap_off_usd and self.cap_usd else 1.0

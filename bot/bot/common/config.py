@@ -14,6 +14,7 @@ import yaml
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
 from bot.common.errors import ConfigError
+from bot.common.sizing import Pct
 
 Auto = Literal["auto"]
 
@@ -236,6 +237,32 @@ class AutopilotCfg(_Model):
     deep_depth_usd: float = 20_000
 
 
+class SizingCfg(_Model):
+    """How the dollar figures follow the account (bot/common/sizing.py). With follow_equity the engine re-reads the
+    account's equity at start and at 00:00 UTC and rewrites order_size_usd, the inventory caps and the dollar stops;
+    the numbers in the file are the ones the backtest used."""
+
+    follow_equity: bool = True
+    backtest_capital_usd: float          # the capital the scout backtested this setup at
+    capital_frac: float = 1.0            # size from this share of the account's equity
+    max_capital_usd: float | None = None
+    leverage: float                      # sizes: position up to capital x leverage (not the venue leverage setting)
+    leverage_off: float | None = None    # the same outside an RWA perp's session (higher initial margin)
+    order_max_usd: float | None = None   # the market's liquidity ceiling for one order
+    position_stop_pct: float = 1.0
+    daily_stop_pct: float = 2.0
+    kill_pct: float = 10.0
+    min_capital_usd: float = 0.0         # below this the venue minimum order, not the capital, would set the size
+
+    @model_validator(mode="after")
+    def _checks(self) -> SizingCfg:
+        if not 0 < self.capital_frac <= 1:
+            raise ValueError("sizing.capital_frac must be in (0, 1]")
+        if self.leverage <= 0:
+            raise ValueError("sizing.leverage must be positive")
+        return self
+
+
 class MMSession(_Model):
     session_id: str
     venue: Literal["arcus", "lighter_rh"]
@@ -280,6 +307,7 @@ class MMSession(_Model):
     pos_stop_usd: float | None = None    # the open position is down X: close it (maker, then taker), then cool down
     kill_usd: float | None = None        # equity X below its peak: flatten and stop until a manual resume
     cooldown_s: float = 60               # pause after a position stop
+    sizing: SizingCfg | None = None      # follow the account's equity (pilot sessions); None = the fixed numbers above
 
     @model_validator(mode="after")
     def _checks(self) -> MMSession:
@@ -378,6 +406,32 @@ class RiskLimitsCfg(_Model):
     max_error_rate: float = 0.05
 
 
+class SizingDefaults(_Model):
+    """The capital the scout backtests at and the pilot sizes from, and the stops as % of it (bot/common/sizing.py)."""
+
+    capital_usd: float | Auto = "auto"   # auto: the Arcus subaccount's equity; else a fixed amount
+    paper_capital_usd: float = 100       # auto with no keys or an unfunded account (the Docker scout, paper runs)
+    capital_frac: float = 1.0            # trade this share of the equity
+    max_capital_usd: float | None = None
+    position_stop_pct: float = 1.0
+    daily_stop_pct: float = 2.0
+    kill_pct: float = 10.0
+    go_pnl_day_pct: float = 0.25
+    go_tail_pnl_pct: float = 0.50
+
+    @model_validator(mode="after")
+    def _checks(self) -> SizingDefaults:
+        if not 0 < self.capital_frac <= 1:
+            raise ValueError("sizing.capital_frac must be in (0, 1]")
+        if not 0 < self.position_stop_pct <= self.daily_stop_pct <= self.kill_pct:
+            raise ValueError("sizing stops must satisfy 0 < position_stop_pct <= daily_stop_pct <= kill_pct")
+        return self
+
+    def pct(self) -> Pct:
+        return Pct(self.position_stop_pct, self.daily_stop_pct, self.kill_pct, self.go_pnl_day_pct,
+                   self.go_tail_pnl_pct)
+
+
 class AppConfig(_Model):
     data_dir: str = "data"
     logs_dir: str = "logs"
@@ -386,6 +440,7 @@ class AppConfig(_Model):
     capital_usd_total: float = 100
     alerts: AlertsCfg = AlertsCfg()
     risk: RiskLimitsCfg = RiskLimitsCfg()
+    sizing: SizingDefaults = SizingDefaults()
     extra: dict[str, Any] = Field(default_factory=dict)
 
     # Paper, testnet and live never share state: a paper run must not leave orders the live reconciler would

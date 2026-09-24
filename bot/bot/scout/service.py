@@ -8,13 +8,16 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import functools
 import json
 import signal
 import time
 from pathlib import Path
 from typing import Any
 
+from bot.common.config import SizingDefaults
 from bot.common.logging import Log
+from bot.scout.capital import account_equity, choose
 from bot.scout.pilot import Pilot
 from bot.scout.record import ScoutRecorder
 from bot.scout.scan import scan, table
@@ -41,7 +44,10 @@ def save_scan(root: Path, res: dict[str, Any]) -> Path:
 
 
 async def run_service(root: Path, pilot: Pilot, *, rest_url: str, ws_url: str, every_min: float = 30.0,
-                      workers: int = 4, record: bool = True, ladder: bool = True, depth: bool = False) -> None:
+                      workers: int = 4, record: bool = True, ladder: bool = True, depth: bool = False,
+                      capital: str | float | None = None, sizing: SizingDefaults | None = None) -> None:
+    """capital: "auto" (the subaccount's equity before each scan), a fixed amount, or None for app.yaml's sizing."""
+    z = sizing or SizingDefaults()
     rec = ScoutRecorder(root / "data" / "scout", rest_url=rest_url, ws_url=ws_url, depth=depth) if record else None
     rec_task = asyncio.create_task(rec.run()) if rec else None
     loop = asyncio.get_running_loop()
@@ -57,11 +63,15 @@ async def run_service(root: Path, pilot: Pilot, *, rest_url: str, ws_url: str, e
             if rec:
                 rec.flush()   # scan on data up to now
             try:
-                res = await loop.run_in_executor(None, lambda: scan(root / "data" / "scout", workers=workers,
-                                                                    ladder=ladder))
+                spec = z.capital_usd if capital in (None, "") else capital
+                eq = await account_equity(rest_url, pilot.account_index) if str(spec).lower() == "auto" else None
+                cap, src = choose(spec, eq, z)
+                res = await loop.run_in_executor(None, functools.partial(
+                    scan, root / "data" / "scout", workers=workers, ladder=ladder, capital=cap, pct=z.pct(),
+                    capital_source=src))
                 save_scan(root, res)
                 events = pilot.review(res)
-                log.info("scout_scan", data={"took_s": res["took_s"], "go": len(res["top"]),
+                log.info("scout_scan", data={"took_s": res["took_s"], "go": len(res["top"]), "capital": cap,
                                              "events": [e["kind"] for e in events]})
             except Exception as e:  # a failed scan must not stop the recorder
                 log.error("scout_scan_failed", reason=type(e).__name__, data={"err": str(e)[:300]}, exc_info=True)

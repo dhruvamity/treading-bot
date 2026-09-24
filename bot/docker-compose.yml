@@ -1,7 +1,9 @@
-# 24/7 recorder + backtester for the server PC (see the repository README, section 11).
+# 24/7 recorder + backtester for the server PC (see the repository README, section 11). Run these from bot/, the
+# folder this file is in.
 #
 #   docker compose up -d --build                     the scout: record every Arcus perp, backtest every 30 min
 #   docker compose --profile research up -d --build  also the full-book research recorder (optional)
+#   SCOUT_CAPITAL=500 docker compose up -d --build   rank for a $500 account (default auto: no keys here, so $100)
 #   docker compose ps                                running and healthy?
 #   docker compose logs -f scout                     what it is doing
 #   cat data/scout/report.txt                        the latest ranking (best per market, and each at max leverage)
@@ -17,7 +19,7 @@ services:
     image: arcus-scout
     container_name: arcus-scout
     restart: unless-stopped
-    command: ["scout", "run", "--depth", "--workers", "${SCOUT_WORKERS:-6}"]
+    command: ["scout", "run", "--depth", "--workers", "${SCOUT_WORKERS:-6}", "--capital", "${SCOUT_CAPITAL:-auto}"]
     volumes:
       - ./data:/app/data
       - ./state:/app/state
@@ -32,10 +34,10 @@ services:
   # useful for exact queue-position replays and funding research. Shrink closed days with:
   #   docker compose run --rm recorder compact
   recorder:
-    image: arcus-scout
+    build: .                       # same image as the scout (the second build is all cache); stops compose trying
+    image: arcus-scout             # to pull "arcus-scout" from Docker Hub, where it does not exist
     container_name: arcus-recorder
     profiles: ["research"]
-    depends_on: [scout]            # built by the scout service
     restart: unless-stopped
     command: ["record"]
     volumes:

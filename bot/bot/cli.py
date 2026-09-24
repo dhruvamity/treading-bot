@@ -22,6 +22,7 @@ from decimal import Decimal
 from pathlib import Path
 from typing import Any
 
+from bot.common import sizing
 from bot.common.config import (
     load_app,
     load_arcus_config,
@@ -500,18 +501,31 @@ def cmd_scout(a: argparse.Namespace) -> None:
         pid = Path(app.state_dir) / "scout.pid"
         pid.parent.mkdir(parents=True, exist_ok=True)
         pid.write_text(str(os.getpid()))
-        print(f"scout: recording all Arcus perps, scanning every {a.every_min:g} min; Ctrl-C stops it")
+        spec = a.capital or app.sizing.capital_usd
+        print(f"scout: recording all Arcus perps, scanning every {a.every_min:g} min at capital {spec}; "
+              "Ctrl-C stops it")
         try:
             _run(run_service(root, Pilot(root, Control(app)), rest_url=cfg.rest.mainnet, ws_url=cfg.ws.mainnet,
-                             every_min=a.every_min, workers=a.workers, ladder=not a.max_only, depth=a.depth))
+                             every_min=a.every_min, workers=a.workers, ladder=not a.max_only, depth=a.depth,
+                             capital=a.capital, sizing=app.sizing))
         finally:
             with contextlib.suppress(OSError):
                 if pid.read_text() == str(os.getpid()):
                     pid.unlink()
     elif a.action == "scan":
-        res = scan(root / "data" / "scout", workers=a.workers, markets=a.markets or None, ladder=not a.max_only)
+        from bot.scout.capital import account_equity, choose
+
+        spec = a.capital or app.sizing.capital_usd
+        eq = _run(account_equity(load_arcus_config().rest.mainnet)) if str(spec).lower() == "auto" else None
+        cap, src = choose(spec, eq, app.sizing)
+        res = scan(root / "data" / "scout", workers=a.workers, markets=a.markets or None, ladder=not a.max_only,
+                   capital=cap, pct=app.sizing.pct(), capital_source=src)
         save_scan(root, res)
         print(table(res, a.limit))
+    elif a.action == "limits":
+        from bot.scout.scan import limits_table
+
+        print(limits_table(root / "data" / "scout", a.markets or None))
     elif a.action == "import":
         from bot.scout.bootstrap import import_arcusmm
         from bot.scout.tape import TapeStore
@@ -542,6 +556,11 @@ def cmd_pilot(a: argparse.Namespace) -> None:
     elif a.action == "approve":
         c = pilot.pick(a.n)
         print(describe(c))
+        cap = (pilot.latest_scan() or {}).get("capital") or {}
+        if cap:
+            print(f"Backtested at ${cap['usd']:,.2f} of capital ({cap.get('source')}). Sizes and stops follow the "
+                  f"account's equity (re-read at start and at 00:00 UTC), at most "
+                  f"{sizing.COVER_X:g}x the last capital a GO scan covered.")
         if a.live:
             if os.environ.get("BOT_PILOT_LIVE") != "1":
                 print("live is off: set BOT_PILOT_LIVE=1 in .env first")
@@ -722,8 +741,9 @@ def build_parser() -> argparse.ArgumentParser:
     sp = add("telegram", cmd_telegram, "Telegram control bot: status, pause/stop/run, cancel/flatten, live alerts")
     sp.add_argument("--read-only", action="store_true", help="status and alerts only; every control is refused")
     sp = add("scout", cmd_scout, "record all Arcus perps, backtest every strategy on each, rank what to run now")
-    sp.add_argument("action", choices=["run", "scan", "import"],
-                    help="run: record + scan every N min (the daemon); scan: one scan now; import: old recordings")
+    sp.add_argument("action", choices=["run", "scan", "limits", "import"],
+                    help="run: record + scan every N min (the daemon); scan: one scan now; limits: the least and the "
+                         "most capital each market can use; import: old recordings")
     sp.add_argument("src", nargs="?", default="../../arcus-mm", help="import: the arcus-mm folder")
     sp.add_argument("--every-min", type=float, default=30)
     sp.add_argument("--workers", type=int, default=4)
@@ -733,6 +753,9 @@ def build_parser() -> argparse.ArgumentParser:
                     help="test each market at its maximum leverage only (default: the max, then 20x, 10x, 5x, 2x)")
     sp.add_argument("--depth", action="store_true",
                     help="run: also record the top 10 book levels (queue-position data for larger orders; more disk)")
+    sp.add_argument("--capital",
+                    help="the capital to backtest at: auto (the subaccount's equity; paper capital if unfunded) or "
+                         "a dollar amount (default: config/app.yaml sizing.capital_usd)")
     sp = add("pilot", cmd_pilot, "one deployment at a time: status, approve N [--live], close")
     sp.add_argument("action", choices=["status", "approve", "close"])
     sp.add_argument("n", nargs="?", type=int, default=1, help="approve: which of the top 3")
@@ -750,7 +773,8 @@ def build_parser() -> argparse.ArgumentParser:
     sp = add("guardian", cmd_guardian, "run the independent guardian process")
     sp.add_argument("--venue", nargs="+", default=["arcus"])
     sp.add_argument("--account", type=int, help="subaccount (default: the one your key is bound to)")
-    sp.add_argument("--capital", type=float, default=100)
+    sp.add_argument("--capital", type=float, default=0,
+                    help="the drawdown limit is a %% of this (default 0: the account's equity when the guardian starts)")
     sp.add_argument("--testnet", action="store_true")
     sp = add("secrets", cmd_secrets, "encrypted secrets store")
     sp.add_argument("action", choices=["init", "set", "list-redacted", "status", "import-env"])

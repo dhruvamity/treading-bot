@@ -1,7 +1,9 @@
 # treading-bot
 
-A maker (limit-order) trading bot for **Arcus perpetual futures**, built for a small account ($100 by default). Its
-goal is as much **maker volume** per day as possible while staying at breakeven or better.
+A maker (limit-order) trading bot for **Arcus perpetual futures**. Its goal is as much **maker volume** per day as
+possible while staying at breakeven or better. It sizes itself from your account: every order size, position cap and
+stop is a fixed share of the capital, so the same setup runs on $20 or $20,000 ([4.6](#46-capital-the-least-and-the-most)).
+The examples in this guide use $100.
 
 It does three things:
 
@@ -54,8 +56,8 @@ flowchart LR
 
 - **One strategy on one market at a time.** The bot never runs several deployments in parallel, and it never switches
   markets without your approval.
-- **The backtest and the live bot share their rules.** Order sizes, leverage, the dollar stops, the safety pause and
-  the order-budget governor are the same numbers in both, taken from the same session file.
+- **The backtest and the live bot share their rules.** Capital, order sizes, leverage, the stops, the safety pause
+  and the order-budget governor are the same numbers in both, computed by the same code (`bot/common/sizing.py`).
 - **Paper mode** uses live market data with simulated orders and fills, through the same code as live.
 - **Arcus only.** Everything the scout tests trades Arcus perps alone: no hedging on another venue, no spot. (The code
   also contains two-venue strategies for Lighter; see [7.10](#710-two-venue-strategies-not-used-by-the-scout).)
@@ -97,6 +99,9 @@ Created at run time and never committed: `bot/.env` (credentials), `bot/data/` (
   `curl -LsSf https://astral.sh/uv/install.sh | sh`).
 - An Arcus account and an **API key** (only needed for live trading and for the account checks; recording and paper
   trading need no keys).
+- Money: any amount above the chosen setup's minimum. The floor is under $10 for every market at its maximum leverage,
+  but setups only start passing the checks somewhat higher; see [4.6](#46-capital-the-least-and-the-most) for the
+  measured numbers.
 - Disk: the scout needs about 0.1 GB per day (0.2–0.5 GB with depth recording). Recording pauses by itself under
   5 GB free.
 - Optional: a Telegram account for phone control.
@@ -106,12 +111,19 @@ Created at run time and never committed: `bot/.env` (credentials), `bot/data/` (
 ```bash
 git clone https://github.com/dhruvamity/treading-bot.git
 cd treading-bot/bot
-make install          # creates .venv with Python 3.12 and installs the bot plus dev tools
-.venv/bin/bot --help  # every command
+make install
+.venv/bin/bot --help
 ```
+
+`make install` creates `.venv` with Python 3.12 and installs the bot plus the dev tools; `bot --help` lists every
+command.
 
 All commands below are run from `treading-bot/bot`. `bot` means `.venv/bin/bot` (or activate the venv with
 `source .venv/bin/activate`).
+
+> **Copying commands:** the command blocks in this guide contain commands only, so paste them as they are. Run a
+> block line by line when its lines are alternatives. (On macOS, zsh does not treat `# ...` as a comment when
+> typed or pasted, so a trailing comment would be passed to the command as extra arguments.)
 
 ### 3.3 Credentials
 
@@ -135,21 +147,28 @@ Fill in only what you use:
 The bot asks Arcus for everything else (which subaccount a key trades, when it expires). Check with:
 
 ```bash
-bot keys      # your API keys as Arcus sees them: subaccount, status, days left
-bot doctor    # credentials, account, clock, region; places no orders
+bot keys
+bot doctor
 ```
+
+`bot keys` lists your API keys as Arcus sees them (subaccount, status, days left). `bot doctor` checks credentials,
+account, clock and region, and places no orders.
 
 `.env` is in `.gitignore`: never commit it. For an encrypted alternative see `bot secrets --help`.
 
 ### 3.4 Start the scout (recording + backtests)
 
 ```bash
-mkdir -p logs && nohup .venv/bin/bot scout run >> logs/scout.out 2>&1 &   # pid in state/scout.pid
+mkdir -p logs && nohup .venv/bin/bot scout run >> logs/scout.out 2>&1 &
 ```
 
+- Its process id goes to `state/scout.pid`.
 - It connects to Arcus's public WebSocket, subscribes to every online perp and writes data every 5 minutes.
 - About 10 seconds after it starts, and then every 30 minutes, it backtests the whole menu on every market and writes
   `data/scout/latest.json` and `data/scout/report.txt`.
+- It backtests at **your capital**: before each scan it reads the subaccount's equity (with `ARCUS_ADDRESS` in `.env`;
+  an unfunded account or no address means the $100 paper capital). `--capital 250` sizes for a fixed amount instead,
+  e.g. for a deposit you have not made yet.
 - A market needs at least one **full day** of data (the recorder up for 20+ hours of a UTC day) before it can be
   ranked. The checks get more reliable as the history grows towards 7 days.
 - Stop it cleanly with `kill $(cat state/scout.pid)`: it finishes the current scan and writes out its buffers.
@@ -158,9 +177,12 @@ mkdir -p logs && nohup .venv/bin/bot scout run >> logs/scout.out 2>&1 &   # pid 
 ### 3.5 Read the ranking
 
 ```bash
-cat data/scout/report.txt     # or: bot scout scan  (runs one scan now and prints it)
-bot pilot status              # what is deployed + the current top 3
+cat data/scout/report.txt
+bot pilot status
 ```
+
+`report.txt` is the latest ranking (`bot scout scan` runs one scan now and prints it instead). `bot pilot status`
+shows what is deployed and the current top 3.
 
 An example from 2026-09-24 02:28 UTC (4 full days of data; the numbers change every scan):
 
@@ -190,13 +212,17 @@ bot pilot approve 1
 ```
 
 This writes `config/sessions/pilot.yaml` (the exact backtested setting, leverage and stops) and starts
-`bot run pilot` in **paper** mode: live market data, simulated orders. Watch it:
+`bot run pilot` in **paper** mode: live market data, simulated orders. The paper account starts with the capital
+the scan used, and its sizes follow the paper equity the same way live sizes follow the real one. Watch it:
 
 ```bash
-bot status                    # heartbeat, open orders, positions, per mode
-bot report --mode paper       # today's PnL split, volume
+bot status
+bot report --mode paper
 tail -f logs/runs/pilot-paper-*.log
 ```
+
+`bot status` shows the heartbeat, open orders and positions for each mode; `bot report` shows today's PnL split and
+volume.
 
 Or from Telegram: `/scout` → **Run #1** → **Paper** → Confirm. Let paper run for a few days and compare its daily PnL
 and volume with the backtest (`/pilot` shows both).
@@ -211,9 +237,10 @@ Do these in order:
    trade. Every line should say `PASS` or `INFO`.
 2. **Use a dedicated subaccount** if you also trade by hand: the bot treats every order and position on its
    subaccount as its own (it cancels orders it did not place and trades existing positions down).
-3. **Deposit USDG** into that subaccount (Arcus web app).
-4. Put `BOT_PILOT_LIVE=1` in `.env`.
-5. `bot doctor pilot` must end in **READY**.
+3. **Deposit USDG** into that subaccount (Arcus web app): at least the minimum for the setup you want
+   ([4.6](#46-capital-the-least-and-the-most)); more only adds size once the scout has backtested at the new amount.
+4. Put `BOT_PILOT_LIVE=1` in `.env`, and wait for the next scan: the scout then backtests at the account's equity.
+5. `bot doctor pilot` must end in **READY**. Its `sizing` line shows the order size, cap and stops for your equity.
 6. `bot pilot approve 1 --live`, read the summary, and type `LIVE`. From Telegram: **Run #1** → **LIVE**, the bot
    runs `doctor`, then you type back the one-time code it sends.
 
@@ -266,7 +293,7 @@ For each market, each setting and each UTC day (each day starts flat, with 2 hou
 - **Arcus order budget.** Each subaccount has an order pool of 20,000 actions, growing by one per $0.10 filled. The
   governor doubles the requote tolerance when actions per filled dollar get too high and allows cancels only when the
   pool is nearly empty, exactly like the live governor.
-- **Risk rules.** The same stops as live ([section 6.1](#61-the-dollar-stops-backtest-and-live)), plus the safety
+- **Risk rules.** The same stops as live ([section 6.1](#61-the-stops-backtest-and-live)), plus the safety
   pause, the liquidation-distance cut and liquidation itself.
 - **Session hours.** Stock, index and commodity perps (RWA) need 1.5× the initial margin to open positions outside
   their session (04:00–20:00 New York time on weekdays; weekends and NYSE holidays are off-hours). The backtest
@@ -280,16 +307,17 @@ Every market is tested at its **maximum Arcus leverage** (1 / `initialMarginFrac
 NVDA 20x, most stocks and alts 10x) and then at 20x, 10x, 5x and 2x below it. **BTC and ETH are capped at 20x**
 (`LEV_CAPS` in `bot/scout/scan.py`). The leverage sets the size:
 
-| Quantity | Rule | QQQ at 10x ($100 account) |
+| Quantity | Rule | QQQ at 10x, $100 capital |
 |---|---|---|
 | Largest position Arcus allows | capital × leverage | $1,000 |
 | Inventory cap (`inventory_cap_usd`) | that ÷ 1.25, so the risk engine's hard cap (1.25 × cap) lands on the venue limit | $800 |
 | Order size (`order_size_usd`) | half the cap, per level per side | $400 |
 | Off-hours (RWA) | cap and order × (off-hours leverage ÷ leverage) | unchanged at 10x (QQQ allows 16.7x off-hours) |
+| Stops | 1% / 2% / 10% of the capital ([6.1](#61-the-stops-backtest-and-live)) | $1 / $2 / $10 |
 
 Leverage does not create fills by itself; it lets you post bigger orders, and bigger orders capture more of each
-taker order that reaches them. The dollar stops do **not** grow with size, so at high leverage a small move reaches
-them. That trade-off is exactly what the ladder measures.
+taker order that reaches them. The stops grow with the **capital**, not with the leverage, so at high leverage a
+small price move reaches them. That trade-off is exactly what the ladder measures.
 
 ### 4.4 GO checks
 
@@ -297,9 +325,11 @@ A setting is **GO** only when all three windows pass:
 
 | Window | Checks |
 |---|---|
-| Long: up to the last 7 full days | average PnL/day ≥ −$0.25; at most one daily stop; never the $10 kill or a liquidation; at least half the days not negative |
-| Short: last 24 h (re-run every scan) | 24 h PnL ≥ −$0.25; last 6 h ≥ −$0.50; no kill in the last 24 h; at least 30% of its usual fills (the flow is still there) |
+| Long: up to the last 7 full days | average PnL/day ≥ −0.25% of the capital; at most one daily stop; never the kill or a liquidation; at least half the days not negative; at least 5 fills a day |
+| Short: last 24 h (re-run every scan) | 24 h PnL ≥ −0.25%; last 6 h ≥ −0.50%; no kill in the last 24 h; at least 30% of its usual fills (the flow is still there) |
 | Now: last 60 one-minute prices | not trending (efficiency ratio < 0.5); volatility and spread under 2× their usual level; data less than 5 minutes old |
+
+The percentages are of the capital the setting uses: −0.25% is −$0.25 a day on $100 and −$2.50 on $1,000.
 
 **Ranking:** GO settings rank by maker volume per day, then PnL. The best setting per market is kept, and the top 3
 markets are offered.
@@ -315,6 +345,50 @@ markets are offered.
 | `data/scout/recorder.json` | Recorder health: markets, rows, message age, free disk |
 | `data/scout/markets.json` | Arcus market parameters (ticks, minimums, margins), refreshed hourly |
 
+### 4.6 Capital: the least and the most
+
+Nothing in the bot is tied to a fixed amount. Every size and stop is a share of the **capital**
+(`bot/common/sizing.py`, used by the backtest, the session file, the live engine and the doctor):
+
+| Quantity | Formula | $50 at QQQ 20x | $1,000 at QQQ 20x |
+|---|---|---|---|
+| Order size | capital × leverage ÷ 2.5 | $400 | $8,000 |
+| Inventory cap | 2 × order | $800 | $16,000 |
+| Position stop (the risk per trade) | 1% of capital | $0.50 | $10 |
+| Daily stop | 2% of capital | $1 | $20 |
+| Kill | 10% of capital | $5 | $100 |
+
+**Where the capital comes from.** `sizing.capital_usd` in `config/app.yaml`:
+- `auto` (default): the subaccount's equity × `capital_frac`, capped at `max_capital_usd`. With no `ARCUS_ADDRESS`
+  or an unfunded account it is `paper_capital_usd` ($100).
+- A number: exactly that, e.g. to rank setups for a deposit you have not made yet (`bot scout run --capital 500`).
+
+The capital is rounded **down** to a fixed series (…, 90, 100, 110, 125, 140, 160, …; about 20 steps per decade), so
+the backtest and the live bot size from exactly the same number and cached backtests stay valid while equity moves.
+
+**How the live bot follows the account** (sessions written by the pilot have `sizing.follow_equity: true`):
+1. At start and at every 00:00 UTC it reads the equity and re-computes the order size, caps and dollar stops.
+2. It never sizes above **1.25×** the capital the setup was last backtested at. The scout scans at the account's
+   equity every 30 minutes, and every scan in which the running setup is still GO records that capital, so growth is
+   followed one validated step at a time. A deposit that doubles the account takes effect after the scout has
+   confirmed the setup at the new size.
+3. Losses shrink the sizes the same way (at the next 00:00 UTC), and the stops shrink with them.
+4. If the equity falls below the setup's **least capital**, it stops quoting and closes what is left.
+
+**The floor: least capital.** The smallest order the bot places, the off-hours one on RWA perps, must stay at least
+1.2× the Arcus minimum order (max($5, minimum size × price)). So the least capital is 3 × minimum order ÷ off-hours
+leverage: $0.90 for QQQ or GLD at their maximum (25x, 16.7x off-hours), $7.50 for most markets at 2x, $8.11 for
+SNDK at its maximum. A leverage that the capital cannot fund is not backtested, and the report lists it as "capital
+too small". `bot scout limits` prints the table for every market.
+
+**The ceiling: market liquidity.** An order larger than almost every taker order does not fill more; it only takes on
+more risk. So one order never exceeds the market's **order ceiling**: the 99th-percentile taker order over the
+recorded days (September 2026: QQQ $11k, GLD $25k, SPY $9k, NVDA $4k, BTC $22k). Past it the sizes stop growing and
+the stops apply to the capital actually used; the rest of the account is margin cushion. QQQ at 20x therefore uses at
+most about $1,375 of capital, and at 2x about $13,750. There is no upper limit on the account, but one deployment on
+one market can only use what that market trades. (Running several markets at once would use more; the bot runs one.)
+
+
 ---
 
 ## 5. The pilot: approve, run, re-check
@@ -323,7 +397,8 @@ markets are offered.
 
 1. It re-reads the latest scan and refuses if it is over 90 minutes old (is the scout running?). From Telegram it
    also refuses if the top 3 changed between your tap and your confirm.
-2. It writes `config/sessions/pilot.yaml`: the strategy, leverage, order size, caps, dollar stops, quoting 24/7.
+2. It writes `config/sessions/pilot.yaml`: the strategy, leverage, order size, caps and stops at the backtested
+   capital, quoting 24/7, plus the `sizing` recipe the engine uses to re-size from the account's equity.
 3. If a bot is already running, it first sends it the **close** command (reduce-only maker exit, then a taker order;
    the bot stops even if a position is still open after 10 minutes, with a critical alert).
 4. It starts `bot run pilot` (paper, or live with the checks in [3.7](#37-go-live-real-money)).
@@ -333,7 +408,7 @@ markets are offered.
 | Situation | What the pilot does |
 |---|---|
 | Nothing running | Offers the top 3 whenever they change |
-| Running and still GO | Nothing |
+| Running and still GO | Records the capital it was backtested at (kv `sizing_ok`): the engine may size up to 1.25× that at the next 00:00 UTC |
 | Running and no longer GO | **Pauses quoting** on that market (reduce-only exits close the position) and tells you why, with the current top 3 |
 | Paused, then GO on two scans in a row | Resumes quoting by itself |
 | Another GO setting with ≥ 1.5× the maker volume | Suggests a switch, once. It never switches without you |
@@ -344,18 +419,20 @@ State lives in `state/pilot.json`; every event is a line in `state/pilot_events.
 
 ## 6. Risk rules and safety systems
 
-### 6.1 The dollar stops (backtest and live)
+### 6.1 The stops (backtest and live)
 
-These are the defaults in `bot/scout/sim.py` (`Risk`), which the pilot copies into every session file.
+The stops are percentages of the capital (`sizing` in `config/app.yaml`). The pilot writes them into every session
+file both as dollars (for the capital it was backtested at) and as percentages (the `sizing` block), and the engine
+re-computes the dollars from the account's equity at start and at 00:00 UTC ([4.6](#46-capital-the-least-and-the-most)).
 
-| Rule | Default | What happens |
-|---|---|---|
-| Position stop | $1 | The open position is down $1 from its average entry: cancel quotes, exit with a reduce-only maker order at the touch, cross the spread with a taker order after 20 s if it has not filled, then pause 60 s |
-| Daily stop | $2 | The day's PnL is below −$2: close the position the same way, no new orders until 00:00 UTC, then resume by itself |
-| Kill | $10 | Equity more than $10 below its peak: close everything with a taker order and stop until you resume it |
-| Safety pause | on | Spread over 3× its 1-hour median (and more than 1 bp above it) or a 1-second move over 6σ: no quotes for 30 s |
-| Liquidation distance | 4σ | Distance to liquidation below 4σ of 1-hour moves: cut half the position at market; re-armed above 6σ |
-| Position caps | 1.2× / 1.25× | No new order that could take the position past 1.2× the cap; the risk engine rejects anything past 1.25× |
+| Rule | Default | On $100 | What happens |
+|---|---|---|---|
+| Position stop | 1% | $1 | The open position is down 1% of the capital from its average entry: cancel quotes, exit with a reduce-only maker order at the touch, cross the spread with a taker order after 20 s if it has not filled, then pause 60 s |
+| Daily stop | 2% | $2 | The day's PnL is below −2%: close the position the same way, no new orders until 00:00 UTC, then resume by itself |
+| Kill | 10% | $10 | Equity more than 10% below its peak: close everything with a taker order and stop until you resume it |
+| Safety pause | on | — | Spread over 3× its 1-hour median (and more than 1 bp above it) or a 1-second move over 6σ: no quotes for 30 s |
+| Liquidation distance | 4σ | — | Distance to liquidation below 4σ of 1-hour moves: cut half the position at market; re-armed above 6σ |
+| Position caps | 1.2× / 1.25× | — | No new order that could take the position past 1.2× the cap; the risk engine rejects anything past 1.25× |
 
 ### 6.2 Other kill switches (live engine)
 
@@ -371,7 +448,7 @@ These are the defaults in `bot/scout/sim.py` (`Risk`), which the pilot copies in
 | Unexpected error in the trading loop | Safe mode: cancel quotes, keep positions | manual |
 | The same rejection 5 times in 60 s (e.g. `UNDERCOLLATERALIZED`) | Pause that market | 60 s, doubling up to 10 min |
 
-When a session has no dollar stops, the app-wide limits in `config/app.yaml` apply: daily loss 3% of capital,
+When a session has no stops of its own, the app-wide limits in `config/app.yaml` apply: daily loss 3% of capital,
 drawdown 10%.
 
 ### 6.3 Safety systems
@@ -537,7 +614,8 @@ A session is one YAML file in `bot/config/sessions/`. The pilot writes `pilot.ya
 | `inventory_cap_off_usd` | Cap outside an RWA session (higher off-hours margin) |
 | `execution_style`, `spacing_bps`, `levels_per_side`, `level_step_bps`, `offset_bps` | Quote placement ([7.3](#73-mid-mode-mid)) |
 | `skew_kappa`, `passive_k_sigma` | Inventory skew strength; passive extra distance in 1-minute σ |
-| `pos_stop_usd`, `daily_stop_usd`, `kill_usd`, `exit_taker_after_s`, `cooldown_s` | The dollar stops ([6.1](#61-the-dollar-stops-backtest-and-live)) |
+| `pos_stop_usd`, `daily_stop_usd`, `kill_usd`, `exit_taker_after_s`, `cooldown_s` | The stops in dollars for `capital_usd` ([6.1](#61-the-stops-backtest-and-live)) |
+| `sizing` | Pilot sessions: `follow_equity`, `backtest_capital_usd`, `capital_frac`, `max_capital_usd`, `leverage` / `leverage_off` (the leverage the sizes use), `order_max_usd` (the liquidity ceiling), the stops in %, `min_capital_usd`. With `follow_equity: true` the engine rewrites the dollar sizes and stops from the account's equity at start and at 00:00 UTC ([4.6](#46-capital-the-least-and-the-most)) |
 | `stop_loss_pct`, `take_profit_pct` | Session-level stop and take-profit, in % of capital |
 | `participation_cap_pct` | Widen when your share of market volume is higher than this |
 | `safety_pause` | `move_sigma_1s`, `spread_x_median`, `depth_frac_min`, `resume_s` |
@@ -615,8 +693,9 @@ within 2 minutes. If a bot is already running it first closes its position and s
 
 | Command | What |
 |---|---|
-| `bot scout run [--workers N] [--every-min M] [--depth] [--max-only]` | Record everything and scan every M minutes (the daemon) |
-| `bot scout scan [--markets …] [--max-only]` | One scan now, printed as a table |
+| `bot scout run [--workers N] [--every-min M] [--depth] [--max-only] [--capital auto\|USD]` | Record everything and scan every M minutes (the daemon), at the account's equity or a fixed capital |
+| `bot scout scan [--markets …] [--max-only] [--capital auto\|USD]` | One scan now, printed as a table |
+| `bot scout limits [--markets …]` | Per market: the least capital it can run on, the order ceiling, and the capital it can fully use |
 | `bot scout import PATH` | One-off import of older recordings |
 | `bot pilot status` / `approve N [--live]` / `close` | See, deploy, or close the one deployment |
 
@@ -675,7 +754,9 @@ Each scan (the first one 10 s after start):
 
 1. Takes every market with at least one full recorded UTC day.
 2. Backtests **all 18 settings** ([7.2](#72-the-scout-menu-18-settings)) at **every leverage on the ladder**: the
-   market's maximum, then 20x, 10x, 5x and 2x (BTC and ETH at most 20x). With today's 58 markets that is 178
+   market's maximum, then 20x, 10x, 5x and 2x (BTC and ETH at most 20x). It sizes them for the **capital** in
+   `SCOUT_CAPITAL` (default `auto`: the Docker container has no keys, so that means the $100 paper capital; set
+   `SCOUT_CAPITAL=500` to rank for a $500 account). With today's 58 markets that is 178
    market-leverage pairs and **3,204 backtests per window**.
 3. The windows are each of the last **7 full days** (computed once per day, then cached) and the **last 24 hours**
    (re-run every scan). It also reads the **last hour** for the "now" checks.
@@ -715,7 +796,12 @@ queue-position replays or funding research later. Shrink closed days now and the
 
 ### 11.4 What the server does not do
 
-- **No trading and no keys.** Do not copy `.env` to it. The containers never sign a request.
+- **No trading and no keys.** The containers never sign a request and need no `.env`.
+  - **To trade live on this same machine,** stop the containers (`docker compose down`).
+  - Then run the scout natively, next to the bot: `bot scout run --depth` ([3.4](#34-start-the-scout-recording--backtests)).
+  - Why: the pilot checks the running bot by its process id, which a container cannot see. A Docker scout would
+    never review, pause or resume a native live bot.
+  - The native scout keeps using the same `data/scout/` folder, so no history is lost.
 - **No Telegram.** Alerts and control come from the machine that runs the trading bot.
 - **No live decisions.** Deploying stays on the machine with the keys, after you approve ([section 5](#5-the-pilot-approve-run-re-check)).
 
@@ -729,33 +815,72 @@ Hardware: 4 or more CPU cores, 4–8 GB of RAM, and disk for the length of the r
      `sudo systemctl enable docker` so it starts at boot.
    - Windows or macOS: [Docker Desktop](https://www.docker.com/products/docker-desktop/) (WSL 2 on Windows), with
      "Start Docker Desktop when you sign in" on.
-2. **Keep the machine awake:** turn off sleep and hibernation, and prefer a wired network.
-3. **Get the code:**
+2. **Keep the machine awake:** turn off sleep and hibernation, and prefer a wired network. A sleeping machine
+   records nothing, and the gap cannot be filled later.
+   - macOS: keep it plugged in, turn on System Settings → Battery → Options → "Prevent automatic sleeping on power
+     adapter when the display is off", and **keep a laptop's lid open** (closing it sleeps the Mac unless an
+     external display is attached). For extra safety, leave `caffeinate -s` running in a Terminal window.
+3. **Get the code.** Every `docker compose` command below is run from `treading-bot/bot`, the folder with
+   `docker-compose.yml`; from anywhere else it fails with "no configuration file provided".
    ```bash
    git clone https://github.com/dhruvamity/treading-bot.git
    cd treading-bot/bot
    ```
-4. **Seed it with the history you already have** (recommended): copy your laptop's `bot/data/scout/tape/` into
-   `bot/data/scout/tape/` on the server, e.g. `rsync -a laptop:treading-bot/bot/data/scout/tape/ data/scout/tape/`.
-   The scans can then use every recorded day at once.
-5. **Start it:**
+4. **Optional: seed it with the history you already have.** A fresh server has no full day yet, so the first scans
+   rank nothing ("still recording") until it has recorded for a day. Skipping this costs nothing in the end: the scan
+   reads the last 7 full days, which the server records itself within a week, and its data merges with the
+   laptop's when you bring it back ([11.7](#117-bring-the-results-back-after-a-week-or-more)). Copy the laptop's
+   `bot/data/scout/tape/` (a few hundred MB) into `bot/data/scout/tape/` on the server and the next scan uses every
+   recorded day. This works while the containers run: the two machines write differently named part files.
+   With SSH between them, on the server:
    ```bash
-   docker compose up -d --build                       # scout only
-   SCOUT_WORKERS=8 docker compose up -d --build       # more cores for the scans
-   docker compose --profile research up -d --build    # scout + the research recorder
+   rsync -a laptop:treading-bot/bot/data/scout/tape/ data/scout/tape/
    ```
-   `restart: unless-stopped` brings the containers back after a crash or a reboot.
+   Without SSH, pack it on the laptop (from `treading-bot/bot`; the archive goes to your home folder):
+   ```bash
+   tar -czf ~/scout-tape.tgz -C data/scout tape
+   ```
+   Send `scout-tape.tgz` to the server by AirDrop (it lands in Downloads) or USB, then unpack it there, from
+   `treading-bot/bot`:
+   ```bash
+   tar -xzf ~/Downloads/scout-tape.tgz -C data/scout
+   ```
+5. **Start it** with **one** of these commands:
+
+   | Command | Runs |
+   |---|---|
+   | `docker compose up -d --build` | The scout only (recommended) |
+   | `SCOUT_WORKERS=8 docker compose up -d --build` | The scout, with 8 scan workers instead of 6 (for 8+ cores) |
+   | `SCOUT_CAPITAL=500 docker compose up -d --build` | The scout, ranking for a $500 account instead of $100 |
+   | `docker compose --profile research up -d --build` | The scout plus the research recorder ([11.3](#113-optional-the-full-book-research-recorder)) |
+
+   `restart: unless-stopped` brings the containers back after a crash or a reboot (on macOS and Windows, once Docker
+   Desktop has started). To drop the research recorder later and keep the scout running:
+   ```bash
+   docker compose --profile research stop recorder
+   ```
 
 ### 11.6 Check on it
 
+From `treading-bot/bot`:
+
 ```bash
-docker compose ps                  # "Up … (healthy)": the recorder wrote within the last 15 minutes
+docker compose ps
 docker compose logs --tail 50 scout
-cat data/scout/recorder.json       # markets, rows written, age of the last message, free disk
-cat data/scout/report.txt          # the latest ranking and the time of the scan
-ls data/scout/reports/             # one file per UTC day
-df -h .                            # recording pauses by itself under 5 GB free
+cat data/scout/recorder.json
+cat data/scout/report.txt
+ls data/scout/reports/
+df -h .
 ```
+
+| Command | What healthy looks like |
+|---|---|
+| `docker compose ps` | `arcus-scout` is "Up … (healthy)": the recorder wrote within the last 15 minutes. `arcus-recorder` (research profile) shows "Up" with no health status. |
+| `docker compose logs` | `ws_connected`, then a `scout_scan` line every 30 minutes. `"go": 0` with `"events": ["offer"]` is normal: nothing is deployed on the server, so it only records the top 3. |
+| `recorder.json` | `markets` ≈ 58, `rows_total` climbing, `last_msg_age_s` a few seconds, `paused_for_disk` false |
+| `report.txt` | The time of the last scan and the ranking. For the first day on a fresh server it only lists "still recording (under a full day of data)" (see step 4 of 11.5). |
+| `reports/` | One file per UTC day |
+| `df -h .` | Free disk. The scout pauses recording under 5 GB free; the research recorder stops its order-book table at 95% full. |
 
 If `last_msg_age_s` in `recorder.json` keeps growing, or the container shows `unhealthy`, restart it with
 `docker compose restart scout`. Short outages only leave a gap; the scan ignores days with less than 20 hours
@@ -766,10 +891,14 @@ recorded.
 On your laptop, from `treading-bot/bot`:
 
 ```bash
-rsync -a server:treading-bot/bot/data/scout/ data/scout/     # tape, cache, scans, reports
-bot scout scan                                               # re-rank with everything recorded
-bot pilot status                                             # the current top 3
+rsync -a server:treading-bot/bot/data/scout/ data/scout/
+bot scout scan
+bot pilot status
 ```
+
+That copies the tape, cache, scans and reports, re-ranks with everything recorded, and shows the current top 3.
+Without SSH, pack it on the server instead (`tar -czf ~/scout-data.tgz -C data scout`), move it over, and unpack it
+on the laptop with `tar -xzf ~/Downloads/scout-data.tgz -C data`.
 
 What to look at:
 - **`data/scout/reports/`, day by day.** Does the same market and setting stay GO for most days, or does the top
@@ -824,10 +953,12 @@ keys expire after at most 180 days; `doctor` refuses to start within 24 h of exp
 
 ```bash
 cd bot
-make test     # offline tests (no network, no keys)
-make lint     # ruff
-make type     # strict mypy
+make test
+make lint
+make type
 ```
+
+`make test` runs the offline tests (no network, no keys), `make lint` runs ruff, and `make type` runs strict mypy.
 
 - Strategies return **desired orders**; they never call a venue. The same strategy objects run in the backtest,
   paper and live (`bot/strategies/base.py`).
@@ -854,4 +985,7 @@ make type     # strict mypy
 | IMF / MMF | Initial / maintenance margin fraction; max leverage = 1 / IMF; liquidation below MMF |
 | ALO / IOC | Add-liquidity-only (post-only) / immediate-or-cancel |
 | Dead man's switch | An order to the venue to cancel everything unless the bot keeps checking in |
+| Capital | What the bot sizes from: the subaccount's equity × `capital_frac`, rounded down to a fixed series (about 20 steps per decade) so the backtest and the live bot use the same number |
+| Least capital | The smallest capital whose smallest order still clears 1.2× the Arcus minimum order |
+| Order ceiling | The 99th percentile taker order on a market; our orders never exceed it, so extra capital beyond it only adds margin |
 | GO | A setting that passed every check in the latest scan |

@@ -1,17 +1,21 @@
 """Backtest the strategy menu on every recorded market and rank what to run now.
 
-Every config runs on every market, one UTC day at a time (each day starts flat, with 2 h of warm-up), under the $100
-account's risk rules (sim.Risk). Completed days are cached; the current day is re-run on each scan.
+Every config runs on every market, one UTC day at a time (each day starts flat, with 2 h of warm-up), at the capital
+the bot trades with (the account's equity, bucketed; bot/common/sizing.py) and its stops as % of that capital.
+Completed days are cached per capital bucket; the current day is re-run on each scan.
 
 Leverage: each market is tested at its maximum Arcus leverage (1 / initialMarginFraction; BTC and ETH capped at 20x)
-and, below that, at 20x, 10x, 5x and 2x. The leverage sets the size (sim.Risk.at_leverage): position up to capital x
+and, below that, at 20x, 10x, 5x and 2x. The leverage sets the size (sim.Risk.for_capital): position up to capital x
 leverage, orders of half the inventory cap. RWA perps use their off-hours maximum outside the underlying's session.
+Two limits: a leverage whose off-hours order would fall under 1.2x the Arcus minimum order needs more capital and is
+skipped; and one order never exceeds the market's liquidity ceiling (the 99th percentile of taker-order notional over
+the recorded days), past which the sizes stop growing and the stops apply to the capital actually used.
 
-A candidate is GO only when all three checks pass:
-- long window (up to the last 7 full days): average PnL/day >= -$0.25 (close to breakeven or better), at most one
-  daily stop, never the $10 kill, and at least half the days not negative;
-- short window (the last 24 h, re-run each scan): PnL >= -$0.25, and still at least 30% of its usual fills (the flow is
-  still there), with the last 6 h not worse than -$0.50;
+A candidate is GO only when all three checks pass (percentages are of the capital the sizes use):
+- long window (up to the last 7 full days): average PnL/day >= -0.25% (close to breakeven or better), at most one
+  daily stop, never the kill, at least half the days not negative, and at least 5 fills a day;
+- short window (the last 24 h, re-run each scan): PnL >= -0.25%, and still at least 30% of its usual fills (the flow is
+  still there), with the last 6 h not worse than -0.50%;
 - market now (last 60 minutes of 1-min mids): not trending (efficiency ratio < 0.5), volatility not above 2x its
   usual level, spread not above 2x its usual level, and data fresh (< 5 minutes old).
 GO candidates rank by maker volume per day (the goal: the most maker volume while at or near breakeven), then PnL.
@@ -20,6 +24,7 @@ One pick per market; the top three go to the owner for approval.
 
 from __future__ import annotations
 
+import contextlib
 import datetime as dt
 import hashlib
 import json
@@ -34,6 +39,7 @@ from zoneinfo import ZoneInfo
 
 import numpy as np
 
+from bot.common.sizing import Pct, bucket, min_capital, venue_min_usd
 from bot.scout.sim import Config, MarketInfo, Result, Risk, S, Sim, SimParams, Window
 from bot.scout.tape import US_DAY, TapeStore, day_start_us, day_str
 
@@ -55,10 +61,9 @@ MENU: list[Config] = [
 ]
 BY_NAME = {c.name: c for c in MENU}
 
-# GO thresholds (see module docstring)
-MIN_PNL_DAY = -0.25
+# GO thresholds (see module docstring; the PnL ones are % of capital, in sizing.Pct)
 MAX_DAY_STOPS = 1
-MIN_TAIL_PNL = -0.50
+MIN_FILLS_DAY = 5
 MIN_FLOW_FRAC = 0.30
 MAX_ER = 0.5
 MAX_VOL_X = 2.0
@@ -132,8 +137,14 @@ def session_mask(spec: dict[str, Any] | None, holidays: list[str]) -> Any:
     return mask
 
 
+INFO_KEYS = ("min_capital_usd", "liq_ceiling_usd")   # risk fields the simulation does not read
+
+
 def risk_key(r: dict[str, Any]) -> str:
-    return hashlib.sha1(json.dumps(r, sort_keys=True).encode()).hexdigest()[:10]
+    """Cache key of a sizing: only the fields that change a backtest (a price-dependent minimum must not force the
+    cached days to be recomputed every hour)."""
+    sim = {k: v for k, v in r.items() if k not in INFO_KEYS}
+    return hashlib.sha1(json.dumps(sim, sort_keys=True).encode()).hexdigest()[:10]
 
 
 def label(setting: str, lev: float) -> str:
@@ -143,6 +154,35 @@ def label(setting: str, lev: float) -> str:
 def market_meta(path: Path) -> dict[str, dict[str, Any]]:
     data = json.loads(path.read_text())
     return {m["marketDisplayName"]: m for m in data.get("markets", data)}
+
+
+def venue_min(mi: MarketInfo, meta: dict[str, Any]) -> float:
+    """The Arcus minimum order in USD at the last known price."""
+    px = float(meta.get("markPrice") or meta.get("oraclePrice") or meta.get("lastTradePrice") or 0)
+    return venue_min_usd(mi.min_notional, mi.min_size, px)
+
+
+def taker_orders(trades: dict[str, np.ndarray]) -> np.ndarray:
+    """Notional of each taker order (the prints sharing one sequenceNumber); prints without one count alone."""
+    if not len(trades["ts"]):
+        return np.zeros(0)
+    n = trades["px"] * trades["sz"]
+    seq = trades["seq"]
+    order = np.argsort(seq, kind="stable")
+    s2, n2 = seq[order], n[order]
+    u, idx = np.unique(s2, return_index=True)
+    sums = np.add.reduceat(n2, idx)
+    if u[0] == 0:
+        sums = np.concatenate([sums[1:], n2[s2 == 0]])
+    return np.asarray(sums, float)
+
+
+def liquidity(trades: dict[str, np.ndarray]) -> dict[str, float]:
+    """One day's taker flow: the 99th percentile taker order (the liquidity ceiling for one of our orders), the
+    number of taker orders and the traded notional."""
+    a = taker_orders(trades)
+    return {"p99": float(np.percentile(a, 99)) if len(a) else 0.0, "takers": len(a),
+            "volume": float(a.sum()) if len(a) else 0.0}
 
 
 # ------------------------------------------------------------------------------------------------ backtests
@@ -168,7 +208,9 @@ def _run_window(args: tuple[str, str, int, int, dict[str, Any], list[str], list[
 @dataclass
 class Scanner:
     root: Path                        # data/scout
-    risk: Risk = field(default_factory=Risk)   # capital and dollar stops; sizes come from each leverage
+    capital: float = 100.0            # what the sizes and stops are taken on (bucketed; sizing.bucket)
+    pct: Pct = field(default_factory=Pct)
+    risk: Risk = field(default_factory=Risk)   # exit timing (exit_taker_after_s, cooldown_s)
     sp: SimParams = field(default_factory=SimParams)
     workers: int = 6
     htf_days: int = 7
@@ -182,11 +224,33 @@ class Scanner:
     def cache_path(self, market: str, day: str, rkey: str) -> Path:
         return self.root / "cache" / f"v{SIM_VERSION}" / rkey / market / f"{day}.json"
 
-    def risks_for(self, meta: dict[str, Any]) -> list[dict[str, Any]]:
-        stops = {k: v for k, v in asdict(self.risk).items() if k in (
-            "capital_usd", "daily_stop_usd", "pos_stop_usd", "kill_usd", "exit_taker_after_s", "cooldown_s")}
+    def risks_for(self, meta: dict[str, Any], mi: MarketInfo, order_max: float | None = None
+                  ) -> list[dict[str, Any]]:
+        timing = {"exit_taker_after_s": self.risk.exit_taker_after_s, "cooldown_s": self.risk.cooldown_s}
         levs = leverages(meta) if self.ladder else leverages(meta)[:1]
-        return [asdict(Risk.at_leverage(lev, off, **stops)) for lev, off in levs]
+        vmin = venue_min(mi, meta)
+        if order_max:   # a ceiling below two minimum orders would only distort the sizes
+            order_max = max(order_max, bucket(2 * 1.2 * vmin) or order_max)
+        return [asdict(Risk.for_capital(self.capital, lev, off, pct=self.pct, order_max=order_max,
+                                        min_capital=round(min_capital(vmin, off), 2), **timing)) for lev, off in levs]
+
+    def order_max(self, market: str, days: list[str]) -> float | None:
+        """The liquidity ceiling for one order: the median of the daily 99th-percentile taker orders over the full
+        days, bucketed so it stays put from scan to scan. Cached per completed day."""
+        p99 = []
+        for d in days:
+            cp = self.root / "cache" / "liq" / market / f"{d}.json"
+            try:
+                p99.append(json.loads(cp.read_text())["p99"])
+                continue
+            except (OSError, ValueError, KeyError):
+                pass
+            liq = liquidity(self.store.load_day(market, d).trades)
+            cp.parent.mkdir(parents=True, exist_ok=True)
+            cp.write_text(json.dumps(liq))
+            p99.append(liq["p99"])
+        p99 = [x for x in p99 if x > 0]
+        return bucket(float(np.median(p99))) if p99 else None
 
     def full_days(self, market: str, now_us: int) -> list[str]:
         """Completed UTC days on which the recorder was up for at least 20 h and this market has data."""
@@ -211,10 +275,17 @@ class Scanner:
         sp = asdict(self.sp)
         holidays = load_holidays()
         for m in markets:
-            risks = self.risks_for(meta[m])
-            out[m] = {risk_key(r): {"risk": r, "days": {}, "recent": []} for r in risks}
+            days = self.full_days(m, now_us)
+            every = self.risks_for(meta[m], mis[m], self.order_max(m, days))
+            out[m] = {risk_key(r): {"risk": r, "days": {}, "recent": [],
+                                    "skip": f"needs ${r['min_capital_usd']:,.2f} of capital at {r['leverage']:g}x (Arcus "
+                                            "minimum order)" if r["used_usd"] < r["min_capital_usd"] else ""}
+                      for r in every}
+            risks = [r for r in every if not out[m][risk_key(r)]["skip"]]
+            if not risks:
+                continue
             rth = meta[m].get("regularTradingHours")
-            for d in self.full_days(m, now_us):
+            for d in days:
                 todo = []
                 for r in risks:
                     cp = self.cache_path(m, d, risk_key(r))
@@ -308,13 +379,17 @@ class Candidate:
     cap_off_usd: float = 0.0
     max_pos_usd: float = 0.0    # largest position the backtest reached
     liq_reduces: int = 0
+    capital_usd: float = 0.0    # the capital scanned at
+    used_usd: float = 0.0       # the capital the sizes use (less when the market's liquidity ceiling binds)
+    min_capital_usd: float = 0.0
+    too_small: bool = False     # the capital is under min_capital_usd at this leverage: not backtested
     risk: dict[str, Any] = field(default_factory=dict)
 
     def as_dict(self) -> dict[str, Any]:
         return asdict(self)
 
 
-def score_market(market: str, bt: dict[str, Any], now: dict[str, float]) -> list[Candidate]:
+def score_market(market: str, bt: dict[str, Any], now: dict[str, float], pct: Pct | None = None) -> list[Candidate]:
     """bt: {risk_key: {"risk", "days", "recent"}} from Scanner.backtest (or one such entry for a single sizing)."""
     if "days" in bt:
         bt = {"": bt}
@@ -322,12 +397,12 @@ def score_market(market: str, bt: dict[str, Any], now: dict[str, float]) -> list
     lev_max = max((e.get("risk", {}).get("leverage", 0.0) for e in bt.values()), default=0.0)
     for entry in bt.values():
         r = entry.get("risk") or {}
-        out += _score(market, entry, now, r, at_max=r.get("leverage", 0.0) >= lev_max)
+        out += _score(market, entry, now, r, at_max=r.get("leverage", 0.0) >= lev_max, pct=pct or Pct())
     return out
 
 
-def _score(market: str, bt: dict[str, Any], now: dict[str, float], risk: dict[str, Any], at_max: bool
-           ) -> list[Candidate]:
+def _score(market: str, bt: dict[str, Any], now: dict[str, float], risk: dict[str, Any], at_max: bool,
+           pct: Pct) -> list[Candidate]:
     out = []
     by_cfg: dict[str, list[dict[str, Any]]] = {}
     for _d, rs in sorted(bt["days"].items()):
@@ -335,11 +410,19 @@ def _score(market: str, bt: dict[str, Any], now: dict[str, float], risk: dict[st
             by_cfg.setdefault(r["config"], []).append(r)
     recent = {r["config"]: r for r in bt["recent"]}
     lev = float(risk.get("leverage", 0.0))
+    used = float(risk.get("used_usd") or risk.get("capital_usd") or 100.0)
+    min_day, min_tail = -used * pct.go_pnl_day / 100, -used * pct.go_tail_pnl / 100
+
+    def of_cap(x: float) -> str:
+        return f"${x:.2f} ({100 * x / used:.2f}% of ${used:,.0f})"
+
     for name in [c.name for c in MENU]:
         days = by_cfg.get(name, [])
         rec = recent.get(name)
         reasons = []
-        if len(days) < 1:
+        if bt.get("skip"):
+            reasons.append(bt["skip"])
+        elif len(days) < 1:
             reasons.append("no full day of data yet")
         pnl = [d["pnl"] for d in days]
         n = max(1, len(days))
@@ -349,23 +432,26 @@ def _score(market: str, bt: dict[str, Any], now: dict[str, float], risk: dict[st
         day_stops = sum(d["day_stops"] for d in days)
         pos_days = sum(1 for p in pnl if p >= 0)
         if days:
-            if pnl_day < MIN_PNL_DAY:
-                reasons.append(f"loses ${-pnl_day:.2f}/day over {len(days)} days")
+            if pnl_day < min_day:
+                reasons.append(f"loses {of_cap(-pnl_day)}/day over {len(days)} days")
             if day_stops > MAX_DAY_STOPS:
                 reasons.append(f"hit the daily stop {day_stops} times")
             if any(d.get("liquidated") for d in days):
                 reasons.append("liquidated")
             elif any(d["killed"] for d in days):
-                reasons.append("hit the $10 kill")
+                reasons.append(f"hit the {pct.kill:g}% kill")
             if pos_days < len(days) / 2:
                 reasons.append(f"only {pos_days}/{len(days)} days not negative")
+            if fills_day < MIN_FILLS_DAY:
+                reasons.append(f"too few fills ({fills_day:.1f}/day)")
         if rec is None or rec["hours"] < 12:
-            reasons.append("under 12 h of recent data")
+            if not bt.get("skip"):
+                reasons.append("under 12 h of recent data")
         else:
-            if rec["pnl"] < MIN_PNL_DAY:
-                reasons.append(f"last 24 h lost ${-rec['pnl']:.2f}")
-            if rec["tail_pnl"] < MIN_TAIL_PNL:
-                reasons.append(f"last 6 h lost ${-rec['tail_pnl']:.2f}")
+            if rec["pnl"] < min_day:
+                reasons.append(f"last 24 h lost {of_cap(-rec['pnl'])}")
+            if rec["tail_pnl"] < min_tail:
+                reasons.append(f"last 6 h lost {of_cap(-rec['tail_pnl'])}")
             if rec.get("liquidated") or rec.get("killed"):
                 reasons.append("last 24 h hit the kill")
             if days and rec["maker_fills"] < MIN_FLOW_FRAC * fills_day:
@@ -392,41 +478,51 @@ def _score(market: str, bt: dict[str, Any], now: dict[str, float], risk: dict[st
             order_usd=float(risk.get("order_usd", 0.0)), cap_usd=float(risk.get("cap_usd", 0.0)),
             cap_off_usd=float(risk.get("cap_off_usd") or risk.get("cap_usd", 0.0)),
             max_pos_usd=max((d.get("max_pos_usd", 0.0) for d in days), default=0.0),
-            liq_reduces=sum(d.get("liq_reduces", 0) for d in days), risk=risk))
+            liq_reduces=sum(d.get("liq_reduces", 0) for d in days), capital_usd=float(risk.get("capital_usd", 0.0)),
+            used_usd=used, min_capital_usd=float(risk.get("min_capital_usd", 0.0)), too_small=bool(bt.get("skip")),
+            risk=risk))
     return out
+
+
+def _order(c: Candidate) -> tuple[bool, bool, float, float]:
+    """GO first; then candidates that were backtested; by maker volume (GO) or PnL (not GO)."""
+    return (not c.go, not c.days, -c.volume_day if c.go else -c.pnl_day, -c.pnl_day)
 
 
 def rank(cands: list[Candidate]) -> list[Candidate]:
     """GO first, by maker volume/day then PnL; one entry per market."""
     best: dict[str, Candidate] = {}
-    for c in sorted(cands, key=lambda c: (not c.go, -c.volume_day if c.go else -c.pnl_day, -c.pnl_day)):
+    for c in sorted(cands, key=_order):
         best.setdefault(c.market, c)
-    return sorted(best.values(), key=lambda c: (not c.go, -c.volume_day if c.go else -c.pnl_day, -c.pnl_day))
+    return sorted(best.values(), key=_order)
 
 
 def best_at_max(cands: list[Candidate]) -> list[Candidate]:
     """Per market, the best setting at its maximum leverage (GO or not): what max leverage does, as asked."""
     best: dict[str, Candidate] = {}
-    for c in sorted((c for c in cands if c.at_max and c.days),
-                    key=lambda c: (not c.go, -c.volume_day if c.go else -c.pnl_day)):
+    for c in sorted((c for c in cands if c.at_max and (c.days or c.too_small)), key=_order):
         best.setdefault(c.market, c)
-    return sorted(best.values(), key=lambda c: (not c.go, -c.volume_day if c.go else -c.pnl_day))
+    return sorted(best.values(), key=_order)
 
 
 def scan(root: Path, *, now_us: int | None = None, markets: list[str] | None = None, workers: int = 6,
-         risk: Risk | None = None, ladder: bool = True) -> dict[str, Any]:
+         capital: float = 100.0, pct: Pct | None = None, capital_source: str = "fixed", risk: Risk | None = None,
+         ladder: bool = True) -> dict[str, Any]:
+    """capital: what the sizes and stops are taken on (bucketed here, as the live bot does)."""
     now_us = now_us or time.time_ns() // 1000
     mis = load_markets(root / "markets.json")
     meta = market_meta(root / "markets.json")
-    sc = Scanner(root, risk=risk or Risk(), workers=workers, ladder=ladder)
+    pct = pct or Pct()
+    sc = Scanner(root, capital=bucket(capital), pct=pct, risk=risk or Risk(), workers=workers, ladder=ladder)
     have = [m for m in sc.store.markets() if m in mis and (not markets or m in markets) and sc.store.days(m)]
     t0 = time.time()
     bt = sc.backtest(have, now_us, mis, meta)
     cands: list[Candidate] = []
     for m in have:
-        cands += score_market(m, bt[m], market_now(sc.store, m, now_us))
+        cands += score_market(m, bt[m], market_now(sc.store, m, now_us), pct)
     ranked = rank(cands)
     return {"ts_us": now_us, "took_s": round(time.time() - t0, 1), "risk": asdict(sc.risk),
+            "capital": {"usd": sc.capital, "source": capital_source, "pct": asdict(pct)},
             "leverage": {"policy": "max, then " + ", ".join(f"{x:g}x" for x in LADDER) if ladder else "max",
                          "caps": LEV_CAPS},
             "markets": len(have), "configs": len(MENU),
@@ -440,23 +536,82 @@ def as_result(d: dict[str, Any]) -> Result:
     return Result(**d)
 
 
+def limits(root: Path, markets: list[str] | None = None, now_us: int | None = None) -> list[dict[str, Any]]:
+    """Per market, the least capital the bot can trade it with (its smallest order still 1.2x the Arcus minimum) and
+    the most one order can use (the liquidity ceiling), from markets.json and the recorded taker flow."""
+    now_us = now_us or time.time_ns() // 1000
+    mis, meta = load_markets(root / "markets.json"), market_meta(root / "markets.json")
+    sc = Scanner(root)
+    out = []
+    for m in sorted(mis):
+        if markets and m not in markets:
+            continue
+        lev, off = max_leverage(meta[m])
+        vmin = venue_min(mis[m], meta[m])
+        days = sc.full_days(m, now_us) if sc.store.days(m) else []
+        om = sc.order_max(m, days)
+        vols = []
+        for d in days:
+            with contextlib.suppress(OSError, ValueError, KeyError):
+                vols.append(json.loads((root / "cache" / "liq" / m / f"{d}.json").read_text())["volume"])
+        two = min(2.0, off)
+        out.append({"market": m, "venue_min_usd": vmin, "leverage": lev, "leverage_off": off,
+                    "min_capital_max_lev": min_capital(vmin, off), "min_capital_2x": min_capital(vmin, two),
+                    "order_max_usd": om, "days": len(days), "taker_volume_day": float(np.median(vols)) if vols else 0.0,
+                    "full_use_to_max_lev": om * 2 * 1.25 / lev if om else None,
+                    "full_use_to_2x": om * 2 * 1.25 / 2 if om else None})
+    return out
+
+
+def limits_table(root: Path, markets: list[str] | None = None) -> str:
+    def usd(x: float | None) -> str:
+        return f"{x:,.0f}" if x else "-"
+
+    lines = ["least capital: the smallest order (off-hours on RWA perps) stays >= 1.2x the Arcus minimum order.",
+             "order ceiling: the 99th percentile taker order (median over the recorded full days). Past it orders "
+             "stop growing,",
+             "so capital beyond 'fully used up to' only adds margin cushion (a lower effective leverage).", "",
+             f"{'market':<13}{'min order':>10}{'max lev':>10}{'least $':>10}{'least $':>10}{'ceiling':>10}"
+             f"{'fully used up to':>20}{'takers $':>12}{'days':>5}",
+             f"{'':<13}{'':>10}{'in/off':>10}{'@max lev':>10}{'@2x':>10}{'1 order':>10}{'@max lev':>10}{'@2x':>10}"
+             f"{'per day':>12}{'':>5}"]
+    for r in sorted(limits(root, markets), key=lambda r: r["min_capital_max_lev"]):
+        lev = f"{r['leverage']:g}/{r['leverage_off']:g}"
+        lines.append(f"{r['market']:<13}{r['venue_min_usd']:>10,.2f}{lev:>10}{r['min_capital_max_lev']:>10,.2f}"
+                     f"{r['min_capital_2x']:>10,.2f}{usd(r['order_max_usd']):>10}{usd(r['full_use_to_max_lev']):>10}"
+                     f"{usd(r['full_use_to_2x']):>10}{r['taker_volume_day']:>12,.0f}{r['days']:>5}")
+    return "\n".join(lines)
+
+
+def capital_line(res: dict[str, Any]) -> str:
+    cap = res.get("capital") or {}
+    p = cap.get("pct") or asdict(Pct())
+    return (f"capital ${cap.get('usd', 100):,.2f} ({cap.get('source', 'fixed')}); stops: position {p['position_stop']:g}%, "
+            f"day {p['daily_stop']:g}%, kill {p['kill']:g}% of the capital each setup uses")
+
+
 def table(res: dict[str, Any], limit: int = 25) -> str:
     """Plain-text ranking for the terminal: the best setting per market, then each market at its max leverage."""
     lines = [f"scan of {res['markets']} markets x {res['configs']} settings in {res['took_s']} s; "
-             f"{len(res['top'])} pass all checks", ""]
-    head = (f"{'':3}{'market':<12} {'setting':<30} {'order':>6} {'fills/d':>7} {'volume/d':>9} {'pnl/d':>7} "
-            f"{'worst':>7} {'24h':>6}  why not")
+             f"{len(res['top'])} pass all checks", capital_line(res), ""]
+    head = (f"{'':3}{'market':<12} {'setting':<30} {'uses':>7} {'order':>6} {'fills/d':>7} {'volume/d':>9} "
+            f"{'pnl/d':>7} {'worst':>7} {'24h':>6}  why not")
 
     def rows(cs: list[dict[str, Any]]) -> list[str]:
-        return [f"{i:>2} {c['market']:<12} {c['config']:<30} {c.get('order_usd', 0):>6,.0f} {c['fills_day']:>7.0f} "
-                f"{c['volume_day']:>9,.0f} {c['pnl_day']:>+7.2f} {c['worst_day']:>+7.2f} {c['recent_pnl']:>+6.2f}  "
+        return [f"{i:>2} {c['market']:<12} {c['config']:<30} {c.get('used_usd', 0):>7,.0f} "
+                f"{c.get('order_usd', 0):>6,.0f} {c['fills_day']:>7.0f} {c['volume_day']:>9,.0f} "
+                f"{c['pnl_day']:>+7.2f} {c['worst_day']:>+7.2f} {c['recent_pnl']:>+6.2f}  "
                 f"{'GO' if c['go'] else '; '.join(c['reasons'])[:80]}" for i, c in enumerate(cs, 1)]
     lines += ["best per market (any leverage up to the max):", head]
     lines += rows([r for r in res["ranked"] if r["days"]][:limit])
     if res.get("at_max"):
         lines += ["", "each market at its MAXIMUM leverage:", head]
         lines += rows(res["at_max"][:limit])
-    waiting = [r["market"] for r in res["ranked"] if not r["days"]]
+    small = [f"{r['market']} (${r.get('min_capital_usd', 0):,.2f})" for r in res["ranked"]
+             if r.get("too_small") and not r["days"]]
+    if small:
+        lines += ["", f"capital too small for (minimum at the best leverage): {', '.join(small)}"]
+    waiting = [r["market"] for r in res["ranked"] if not r["days"] and not r.get("too_small")]
     if waiting:
         lines += ["", f"still recording (under a full day of data): {', '.join(waiting)}"]
     return "\n".join(lines)

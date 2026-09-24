@@ -201,6 +201,15 @@ class Control:
         self._kv_set(mode, "paused", json.dumps(cur) if cur else "")
         return cur
 
+    def set_sizing_ok(self, mode: str, capital_usd: float, market: str) -> None:
+        """The scout found the running setup (on `market`, a base like QQQ) still GO at this capital; the engine may
+        size up to 1.25x it."""
+        self._kv_set(mode, "sizing_ok", f"{capital_usd:.2f}:{market}")
+
+    def clear_sizing_ok(self, mode: str) -> None:
+        """A new deployment starts from its own backtested capital, never from an earlier one's."""
+        self._kv_set(mode, "sizing_ok", "")
+
     def request_stop(self, mode: str, by: str) -> None:
         self._kv_set(mode, "control", json.dumps({"cmd": "stop", "by": by, "ts": time.time()}))
 

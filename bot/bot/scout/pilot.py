@@ -13,6 +13,10 @@ After every scan, review():
   the current top 3. It unpauses by itself once the same setting is GO on two scans in a row;
 - another GO candidate with at least 1.5x its maker volume: suggest a switch. The bot never switches on its own.
 Approving a different candidate closes the current position first (runner "close" command), then starts the new one.
+
+Sizes follow the account: the scout scans at the subaccount's equity (bot/scout/capital.py) and the engine re-sizes
+from it at start and at 00:00 UTC (bot/common/sizing.py), never above 1.25x the last capital a GO scan covered. Each
+GO review records that capital (kv "sizing_ok"), so the sizes grow with the account as long as the backtest agrees.
 """
 
 from __future__ import annotations
@@ -26,6 +30,8 @@ from typing import Any
 
 import yaml
 
+from bot.common.config import SizingDefaults
+from bot.common.sizing import INV_BUFFER
 from bot.scout.scan import BY_NAME
 from bot.scout.sim import Config, Risk
 from bot.telegram.control import Control
@@ -42,22 +48,37 @@ def base_of(market: str) -> str:
     return canonical_base(Venue.ARCUS, market)
 
 
-def session_for(market: str, cfg: Config, risk: Risk, *, live: bool, account_index: int = 0) -> dict[str, Any]:
+def session_for(market: str, cfg: Config, risk: Risk, *, live: bool, account_index: int = 0,
+                sizing: SizingDefaults | None = None) -> dict[str, Any]:
     """The session file for one scan candidate: the same strategy settings, leverage, sizes and dollar stops the
-    backtest used. Outside an RWA perp's session the cap and the order size shrink with the off-hours margin."""
+    backtest used. Outside an RWA perp's session the cap and the order size shrink with the off-hours margin.
+    The `sizing` block holds the recipe behind those numbers, so the engine can re-size them from the account's
+    equity (bot/common/sizing.py): leverage for the sizes, the stops in % of the capital, the liquidity ceiling."""
     off = risk.off_scale()
+    z = sizing or SizingDefaults()
+    used = risk.used
     s: dict[str, Any] = {
         "session_id": SESSION, "venue": "arcus", "account_index": account_index, "market": base_of(market),
-        "mode": cfg.mode, "live_enabled": live, "capital_usd": risk.capital_usd,
+        "mode": cfg.mode, "live_enabled": live, "capital_usd": round(used, 2),
         "leverage_max": risk.leverage or 3,
         "order_size_usd": round(risk.order_usd, 2), "inventory_cap_usd": round(risk.cap_usd, 2),
         "daily_stop_usd": risk.daily_stop_usd, "pos_stop_usd": risk.pos_stop_usd, "kill_usd": risk.kill_usd,
         "exit_taker_after_s": risk.exit_taker_after_s, "cooldown_s": risk.cooldown_s,
-        "stop_loss_pct": 100 * risk.kill_usd / risk.capital_usd,
+        "stop_loss_pct": round(100 * risk.kill_usd / used, 4),
         "participation_cap_pct": 100,   # not in the backtest: never widen for our share of volume
         "spacing_bps": cfg.spacing_bps, "levels_per_side": cfg.levels,
         "session": {"duration": "24h", "repeat": 3650, "windows_ist": []},
         "off_hours": {"spacing_mult": 1, "size_mult": round(off, 4), "allow_mid": True},
+        "sizing": {
+            "follow_equity": True, "backtest_capital_usd": risk.capital_usd, "capital_frac": z.capital_frac,
+            "max_capital_usd": z.max_capital_usd,
+            "leverage": round(risk.cap_usd * INV_BUFFER / used, 6),
+            "leverage_off": round((risk.cap_off_usd or risk.cap_usd) * INV_BUFFER / used, 6) if off < 1 else None,
+            "order_max_usd": risk.liq_ceiling_usd or risk.order_max_usd or None,
+            "position_stop_pct": round(100 * risk.pos_stop_usd / used, 6),
+            "daily_stop_pct": round(100 * risk.daily_stop_usd / used, 6),
+            "kill_pct": round(100 * risk.kill_usd / used, 6), "min_capital_usd": risk.min_capital_usd,
+        },
     }
     if off < 1:
         s["inventory_cap_off_usd"] = round(risk.cap_usd * off, 2)
@@ -81,6 +102,8 @@ def session_for(market: str, cfg: Config, risk: Risk, *, live: bool, account_ind
 def describe(c: dict[str, Any]) -> str:
     """One line a person can read: market, setting, backtest numbers."""
     size = f" · ${c['order_usd']:,.0f} orders, cap ${c['cap_usd']:,.0f}" if c.get("order_usd") else ""
+    if c.get("used_usd"):
+        size += f" on ${c['used_usd']:,.0f} of capital"
     return (f"{c['market']} · {c['config']}{size} · {c['fills_day']:.0f} fills/day · "
             f"${c['volume_day']:,.0f} maker volume/day"
             f" · PnL {c['pnl_day']:+.2f}/day (worst day {c['worst_day']:+.2f}, {c['days']} days) · last 24 h "
@@ -186,6 +209,8 @@ class Pilot:
                                       "twice in a row.", top=top))
         else:
             st["go_streak"] = st.get("go_streak", 0) + 1
+            if cand.get("capital_usd"):   # still GO at this capital: the engine may size up to 1.25x it
+                self.control.set_sizing_ok(a["mode"], float(cand["capital_usd"]), base)
             if st.get("paused_by_scout") and st["go_streak"] >= RESUME_AFTER_GO_SCANS:
                 self.control.clear_pause(a["mode"], base)
                 st.pop("paused_by_scout", None)
@@ -219,7 +244,8 @@ class Pilot:
     def write_session(self, c: dict[str, Any], *, live: bool) -> Path:
         cfg = BY_NAME[c.get("setting") or c["config"]]
         risk = Risk(**c["risk"]) if c.get("risk") else self.risk
-        s = session_for(c["market"], cfg, risk, live=live, account_index=self.account_index)
+        s = session_for(c["market"], cfg, risk, live=live, account_index=self.account_index,
+                        sizing=self.control.app.sizing)
         self.session_path.parent.mkdir(parents=True, exist_ok=True)
         head = (f"# Written by the pilot {time.strftime('%Y-%m-%d %H:%M UTC', time.gmtime())} for: {describe(c)}\n"
                 "# Rewritten on every approval; edit the scout's menu or risk instead of this file.\n")
@@ -242,6 +268,7 @@ class Pilot:
                 if self.control.is_running(m):
                     raise RuntimeError(f"the {m} bot did not stop within {wait_close_s / 60:.0f} min; check it (/status)")
         self.write_session(c, live=live)
+        self.control.clear_sizing_ok(mode)
         rec = self.control.start_run(SESSION, live=live)
         st.update(active={"market": c["market"], "config": c["config"], "mode": mode, "since": time.time(), "by": by,
                           "backtest": c, "pid": rec["pid"], "log": rec["log"]}, go_streak=0)

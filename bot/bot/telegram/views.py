@@ -243,8 +243,10 @@ def candidate_lines(top: list[dict[str, Any]]) -> str:
         return "Nothing passes all checks right now."
     rows = []
     for i, c in enumerate(top, 1):
+        uses = (f" · uses {usd(c['used_usd'], sign=False)} of {usd(c['capital_usd'], sign=False)} (liquidity)"
+                if c.get("used_usd") and c.get("capital_usd") and c["used_usd"] < c["capital_usd"] - 0.01 else "")
         size = (f"   {usd(c['order_usd'], sign=False)} orders · max position {usd(1.25 * c['cap_usd'], sign=False)}"
-                f"{' (max leverage)' if c.get('at_max') else ''}\n") if c.get("order_usd") else ""
+                f"{' (max leverage)' if c.get('at_max') else ''}{uses}\n") if c.get("order_usd") else ""
         rows.append(f"<b>{i}. {escape(c['market'])}</b> — {escape(c['config'])}\n{size}"
                     f"   {c['fills_day']:.0f} fills/day · {usd(c['volume_day'], sign=False)} maker volume/day\n"
                     f"   PnL {usd(c['pnl_day'])}/day (worst day {usd(c['worst_day'])}, {c['days']} days) · "
@@ -263,12 +265,15 @@ def scout_text(scan: dict[str, Any] | None, now: float) -> str:
     age = now - scan["ts_us"] / 1e6
     r = scan.get("risk", {})
     lev = scan.get("leverage")
+    cap = scan.get("capital") or {"usd": r.get("capital_usd", 100), "source": "fixed",
+                                  "pct": {"position_stop": 1, "daily_stop": 2, "kill": 10}}
+    p = cap["pct"]
     sizing = (f"sizes from each market's leverage ({escape(lev['policy'])}; BTC/ETH at most 20x)" if lev else
               f"${r.get('order_usd', 25):g} orders, ${r.get('cap_usd', 50):g} max position")
     head = (f"<b>Best setups right now</b> (scan {ago(age)} ago, {scan.get('markets')} markets × "
             f"{scan.get('configs')} settings)\n"
-            f"Each is backtested with the $100 account's rules: {sizing}, ${r.get('pos_stop_usd', 1):g} position stop, "
-            f"${r.get('daily_stop_usd', 2):g} daily stop, ${r.get('kill_usd', 10):g} kill.\n\n")
+            f"Backtested at ${cap['usd']:,.2f} of capital ({escape(str(cap['source']))}): {sizing}; stops "
+            f"{p['position_stop']:g}% position, {p['daily_stop']:g}% day, {p['kill']:g}% kill.\n\n")
     body = candidate_lines(scan.get("top") or [])
     near = [c for c in scan.get("ranked", []) if not c["go"] and c.get("days")][:3]
     if near:
