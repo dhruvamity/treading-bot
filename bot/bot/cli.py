@@ -463,7 +463,7 @@ def cmd_telegram(a: argparse.Namespace) -> None:
     s = SecretStore()
     tok, chat = s.get("TELEGRAM_BOT_TOKEN"), s.get("TELEGRAM_CHAT_ID")
     if not tok or not chat:
-        print("set TELEGRAM_BOT_TOKEN and TELEGRAM_CHAT_ID in .env first (OWNER_ACTIONS.md, step 9)")
+        print("set TELEGRAM_BOT_TOKEN and TELEGRAM_CHAT_ID in .env first (README.md, section 9.1)")
         sys.exit(2)
     allowed = {int(x) for x in (s.get("TELEGRAM_ALLOWED_USER_IDS") or "").replace(" ", "").split(",") if x}
     api = TelegramAPI(tok)

@@ -33,7 +33,7 @@ def load_yaml(path: Path | str) -> dict[str, Any]:
 
 
 # ------------------------------------------------------------------------------------------------------
-# Venue static configs (E5, corrected against the live docs; see handoffs/PHASE_0_HANDOFF.md §5)
+# Venue static configs (E5, corrected against the live docs; see docs/notes/venue_corrections.md)
 # ------------------------------------------------------------------------------------------------------
 class EnvUrls(_Model):
     mainnet: str
