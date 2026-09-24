@@ -172,7 +172,9 @@ docker compose down                   # stop; it finishes the scan in progress a
 
 - Seed it with the history from the laptop first: copy `data/scout/tape/` (a few hundred MB) into the same place.
 - `SCOUT_WORKERS=8 docker compose up -d` uses more cores for the scans.
-- Disk: about 300-500 MB/day with depth recording, 150-250 MB/day without. Recording pauses by itself under 5 GB free;
+- Disk: about 0.2-0.5 GB/day with depth recording, about 0.1 GB/day without. Recording pauses by itself under 5 GB free;
   the container reports unhealthy when the recorder has not written for 15 minutes.
 - Bring results back with `rsync -a server:PATH/data/scout/ data/scout/` (tape, scans, reports).
 - Running the laptop scout at the same time is fine: each writes its own part files and the store de-duplicates.
+- `docker compose --profile research up -d` adds the full-book research recorder (`bot record`, about 1.5-2.5 GB/day;
+  `docker compose run --rm recorder compact` shrinks closed days). What runs and why: the repository README, section 11.

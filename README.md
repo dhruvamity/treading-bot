@@ -30,10 +30,11 @@ It does three things:
 8. [Session files (configuration)](#8-session-files-configuration)
 9. [The Telegram bot](#9-the-telegram-bot)
 10. [Command reference](#10-command-reference)
-11. [Running 24/7: Docker and systemd](#11-running-247-docker-and-systemd)
-12. [Daily routine and troubleshooting](#12-daily-routine-and-troubleshooting)
-13. [Development](#13-development)
-14. [Glossary](#14-glossary)
+11. [The server PC: what runs 24/7](#11-the-server-pc-what-runs-247)
+12. [The live bot on a VPS (systemd)](#12-the-live-bot-on-a-vps-systemd)
+13. [Daily routine and troubleshooting](#13-daily-routine-and-troubleshooting)
+14. [Development](#14-development)
+15. [Glossary](#15-glossary)
 
 ---
 
@@ -96,7 +97,8 @@ Created at run time and never committed: `bot/.env` (credentials), `bot/data/` (
   `curl -LsSf https://astral.sh/uv/install.sh | sh`).
 - An Arcus account and an **API key** (only needed for live trading and for the account checks; recording and paper
   trading need no keys).
-- Disk: the scout needs a few hundred MB per day. Recording pauses by itself under 5 GB free.
+- Disk: the scout needs about 0.1 GB per day (0.2–0.5 GB with depth recording). Recording pauses by itself under
+  5 GB free.
 - Optional: a Telegram account for phone control.
 
 ### 3.2 Install
@@ -151,6 +153,7 @@ mkdir -p logs && nohup .venv/bin/bot scout run >> logs/scout.out 2>&1 &   # pid 
 - A market needs at least one **full day** of data (the recorder up for 20+ hours of a UTC day) before it can be
   ranked. The checks get more reliable as the history grows towards 7 days.
 - Stop it cleanly with `kill $(cat state/scout.pid)`: it finishes the current scan and writes out its buffers.
+- To record and backtest 24/7 on another machine instead, see [section 11](#11-the-server-pc-what-runs-247).
 
 ### 3.5 Read the ranking
 
@@ -646,44 +649,159 @@ within 2 minutes. If a bot is already running it first closes its position and s
 
 ---
 
-## 11. Running 24/7: Docker and systemd
+## 11. The server PC: what runs 24/7
 
-### 11.1 The scout on a server (Docker)
+A second machine (a home PC or a small server) should run the **scout** around the clock, so the history keeps
+growing and the ranking stays current even when your laptop is off. It needs no keys and places no orders: it only
+reads Arcus's public market data. Everything runs from `bot/docker-compose.yml`.
 
-The scout needs no keys and places no orders, so it can run on any machine with Docker:
+### 11.1 What it records, continuously
+
+For **every online Arcus perp** (58 in September 2026; new listings are picked up within the hour):
+
+| Stream | What is stored | What it is used for | Disk per day (all markets) |
+|---|---|---|---|
+| Best bid and offer | Price and size of the best bid and ask: a row whenever a price changes, or sizes change and 1 s has passed | Backtest prices and spreads, the safety pause, the "now" checks | ~50–150 MB (with trades) |
+| Trades | Every trade: price, size, taker side, trade id, and the `sequenceNumber` that groups one taker order's prints | Fills in the backtest (which taker orders reached our price and how much they had left), the flow checks | included above |
+| Depth (`--depth`, on by default in Docker) | The top 10 levels of each side, sampled once a second when the book changed | A queue-position fill model for larger, leveraged orders (the next backtest upgrade); not used by the scan yet | ~150–400 MB |
+| Market parameters | `markets.json`, refreshed hourly: tick, minimum size, margins (so maximum leverage), open-interest caps, session hours | Order sizes, the leverage ladder, the off-hours margin | tiny |
+
+Files: `data/scout/tape/<MARKET>/<YYYY-MM-DD>/{bbo,trades,depth}-*.npz`. Arcus serves no historical order books, so
+**this recording is the only history there will be**: gaps cannot be filled later.
+
+### 11.2 What it backtests, every 30 minutes
+
+Each scan (the first one 10 s after start):
+
+1. Takes every market with at least one full recorded UTC day.
+2. Backtests **all 18 settings** ([7.2](#72-the-scout-menu-18-settings)) at **every leverage on the ladder**: the
+   market's maximum, then 20x, 10x, 5x and 2x (BTC and ETH at most 20x). With today's 58 markets that is 178
+   market-leverage pairs and **3,204 backtests per window**.
+3. The windows are each of the last **7 full days** (computed once per day, then cached) and the **last 24 hours**
+   (re-run every scan). It also reads the **last hour** for the "now" checks.
+4. Applies the GO checks ([4.4](#44-go-checks)) and ranks by maker volume per day.
+5. Writes the results:
+
+| File | Contents |
+|---|---|
+| `data/scout/report.txt` | The latest ranking: best setting per market, then each market at its maximum leverage |
+| `data/scout/reports/<YYYY-MM-DD>.txt` | The last ranking of each UTC day: the day-by-day record to compare later |
+| `data/scout/scans/<YYYYMMDD-HHMM>.json` | Every scan (top 3, ranking, at-max table), about 48 per day |
+| `data/scout/latest.json` | The full latest scan, every setting (what the pilot reads) |
+| `data/scout/cache/` | The per-day backtest results |
+| `state/pilot_events.jsonl` | The top 3 each time they change (nothing is deployed on the server, so it only offers) |
+
+A scan takes a few minutes (80–240 s with 8 workers on a laptop in September 2026) and grows with the number of
+markets that have full days. It only uses the CPU during the scan.
+
+### 11.3 Optional: the full-book research recorder
 
 ```bash
-cd treading-bot/bot
-docker compose up -d --build          # records every perp (with depth) and scans every 30 min
-docker compose logs -f scout          # what it is doing
-cat data/scout/report.txt             # the latest ranking
-docker compose down                   # stop (it finishes the scan and writes out its buffers)
+docker compose --profile research up -d --build
 ```
 
-- Seed it with existing history by copying `data/scout/tape/` into the same place first.
-- `SCOUT_WORKERS=8 docker compose up -d` gives the scans more cores.
-- Disk: about 300–500 MB/day with depth recording, 150–250 MB/day without (remove `--depth` from the command in
-  `docker-compose.yml`).
-- Bring results back with `rsync -a server:PATH/bot/data/scout/ data/scout/`.
+This adds a second container running `bot record`, the original research recorder. For the markets in
+`config/universe.yaml` (BTC, ETH, SOL, HYPE, SPY, QQQ, NVDA, TSLA) on **both Arcus and Lighter** it writes Parquet
+tables under `data/`:
+- every order-book change, plus a top-100 snapshot every 60 s;
+- best bid/offer and trades;
+- mark, oracle and index prices;
+- predicted and paid funding;
+- market attributes, parameter changes, clock offset and recorder health.
 
-### 11.2 The live bot on a VPS (systemd)
+It costs about 1.5–2.5 GB/day before compaction. The scout does not need it. Turn it on if you want exact
+queue-position replays or funding research later. Shrink closed days now and then with
+`docker compose run --rm recorder compact`.
 
-`deploy/scripts/bootstrap.sh` prepares a fresh Ubuntu 24.04 server (chrony, uv, Python 3.12, firewall); pick a
-region Arcus allows (`bot region-check`). The units in `deploy/systemd/`:
+### 11.4 What the server does not do
+
+- **No trading and no keys.** Do not copy `.env` to it. The containers never sign a request.
+- **No Telegram.** Alerts and control come from the machine that runs the trading bot.
+- **No live decisions.** Deploying stays on the machine with the keys, after you approve ([section 5](#5-the-pilot-approve-run-re-check)).
+
+### 11.5 Set it up
+
+Hardware: 4 or more CPU cores, 4–8 GB of RAM, and disk for the length of the run. The scout with depth needs about
+**15 GB per month**; add about 60 GB per month for the research recorder.
+
+1. **Install Docker.**
+   - Linux: [Docker Engine](https://docs.docker.com/engine/install/) plus the compose plugin, then
+     `sudo systemctl enable docker` so it starts at boot.
+   - Windows or macOS: [Docker Desktop](https://www.docker.com/products/docker-desktop/) (WSL 2 on Windows), with
+     "Start Docker Desktop when you sign in" on.
+2. **Keep the machine awake:** turn off sleep and hibernation, and prefer a wired network.
+3. **Get the code:**
+   ```bash
+   git clone https://github.com/dhruvamity/treading-bot.git
+   cd treading-bot/bot
+   ```
+4. **Seed it with the history you already have** (recommended): copy your laptop's `bot/data/scout/tape/` into
+   `bot/data/scout/tape/` on the server, e.g. `rsync -a laptop:treading-bot/bot/data/scout/tape/ data/scout/tape/`.
+   The scans can then use every recorded day at once.
+5. **Start it:**
+   ```bash
+   docker compose up -d --build                       # scout only
+   SCOUT_WORKERS=8 docker compose up -d --build       # more cores for the scans
+   docker compose --profile research up -d --build    # scout + the research recorder
+   ```
+   `restart: unless-stopped` brings the containers back after a crash or a reboot.
+
+### 11.6 Check on it
+
+```bash
+docker compose ps                  # "Up … (healthy)": the recorder wrote within the last 15 minutes
+docker compose logs --tail 50 scout
+cat data/scout/recorder.json       # markets, rows written, age of the last message, free disk
+cat data/scout/report.txt          # the latest ranking and the time of the scan
+ls data/scout/reports/             # one file per UTC day
+df -h .                            # recording pauses by itself under 5 GB free
+```
+
+If `last_msg_age_s` in `recorder.json` keeps growing, or the container shows `unhealthy`, restart it with
+`docker compose restart scout`. Short outages only leave a gap; the scan ignores days with less than 20 hours
+recorded.
+
+### 11.7 Bring the results back (after a week or more)
+
+On your laptop, from `treading-bot/bot`:
+
+```bash
+rsync -a server:treading-bot/bot/data/scout/ data/scout/     # tape, cache, scans, reports
+bot scout scan                                               # re-rank with everything recorded
+bot pilot status                                             # the current top 3
+```
+
+What to look at:
+- **`data/scout/reports/`, day by day.** Does the same market and setting stay GO for most days, or does the top
+  change every day? A setup that is GO day after day is more trustworthy than one good day.
+- **The "each market at its MAXIMUM leverage" table.** Whether higher leverage starts passing as the history grows.
+- **The markets that were new in September** (HOOD, SNDK, MSFT, META and others). They only get full days from the
+  server's recording, so the first week is their first real test.
+
+Running the laptop's scout at the same time is fine: each writes its own part files, and the store de-duplicates
+when it loads them.
+
+---
+
+## 12. The live bot on a VPS (systemd)
+
+For running the **trading** bot unattended (this machine needs the keys). `deploy/scripts/bootstrap.sh` prepares a
+fresh Ubuntu 24.04 server (chrony, uv, Python 3.12, firewall); pick a region Arcus allows (`bot region-check`). The
+units in `deploy/systemd/`:
 
 | Unit | Runs |
 |---|---|
-| `bot-scout` | `bot scout run` |
 | `bot` | `bot run $BOT_RUN_ARGS` (from `/etc/bot.env`, e.g. `pilot --live --yes`) |
 | `bot-guardian` | The guardian |
 | `bot-telegram` | The Telegram bot |
+| `bot-scout` | `bot scout run` (the same scout as the Docker container, without depth) |
 | `bot-recorder`, `bot-maintenance.timer` | The research recorder and its daily compaction |
 
 Details, daily checks and emergency procedures: [bot/docs/RUNBOOK.md](bot/docs/RUNBOOK.md).
 
 ---
 
-## 12. Daily routine and troubleshooting
+## 13. Daily routine and troubleshooting
 
 **Every day (2 minutes):** `bot status`; `/pilot` or `bot pilot status`; `cat data/scout/report.txt`; `bot keys` (Arcus
 keys expire after at most 180 days; `doctor` refuses to start within 24 h of expiry).
@@ -702,7 +820,7 @@ keys expire after at most 180 days; `doctor` refuses to start within 24 h of exp
 
 ---
 
-## 13. Development
+## 14. Development
 
 ```bash
 cd bot
@@ -719,7 +837,7 @@ make type     # strict mypy
 
 ---
 
-## 14. Glossary
+## 15. Glossary
 
 | Term | Meaning |
 |---|---|

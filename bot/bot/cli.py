@@ -732,7 +732,7 @@ def build_parser() -> argparse.ArgumentParser:
     sp.add_argument("--max-only", action="store_true",
                     help="test each market at its maximum leverage only (default: the max, then 20x, 10x, 5x, 2x)")
     sp.add_argument("--depth", action="store_true",
-                    help="run: also record the top 10 book levels (queue-position data for larger orders; ~2x the disk)")
+                    help="run: also record the top 10 book levels (queue-position data for larger orders; more disk)")
     sp = add("pilot", cmd_pilot, "one deployment at a time: status, approve N [--live], close")
     sp.add_argument("action", choices=["status", "approve", "close"])
     sp.add_argument("n", nargs="?", type=int, default=1, help="approve: which of the top 3")

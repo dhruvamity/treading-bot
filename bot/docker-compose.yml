@@ -1,12 +1,16 @@
-# 24/7 recorder + backtester for the server PC.   docker compose up -d --build
+# 24/7 recorder + backtester for the server PC (see the repository README, section 11).
 #
-#   docker compose logs -f scout          what it is doing
-#   cat data/scout/report.txt             the latest ranking (best per market, and each market at max leverage)
-#   ls data/scout/reports/                one report per UTC day
-#   docker compose down                   stop (it flushes its data first)
+#   docker compose up -d --build                     the scout: record every Arcus perp, backtest every 30 min
+#   docker compose --profile research up -d --build  also the full-book research recorder (optional)
+#   docker compose ps                                running and healthy?
+#   docker compose logs -f scout                     what it is doing
+#   cat data/scout/report.txt                        the latest ranking (best per market, and each at max leverage)
+#   ls data/scout/reports/                           the last ranking of each UTC day
+#   docker compose down                              stop (a scan in progress finishes, buffers are written out)
 #
-# Needs no keys and places no orders. Disk: roughly 300-500 MB/day with depth recording on (the default here), about
-# 150-250 MB/day without it (drop "--depth" from the command). Recording pauses by itself under 5 GB free.
+# Needs no keys and places no orders. Disk: about 0.2-0.5 GB/day for the scout with depth recording (the default
+# here; drop "--depth" for about 0.1 GB/day), plus about 1.5-2.5 GB/day for the research recorder if enabled.
+# Recording pauses by itself under 5 GB free.
 services:
   scout:
     build: .
@@ -19,6 +23,27 @@ services:
       - ./state:/app/state
       - ./logs:/app/logs
     stop_grace_period: 2m          # a scan in progress finishes and the recorder writes out its buffers
+    logging:
+      driver: json-file
+      options: {max-size: "20m", max-file: "5"}
+
+  # Optional: every order-book change (plus 60 s top-100 snapshots), trades, mark/oracle/index prices and funding
+  # for the markets in config/universe.yaml, on Arcus and Lighter, as Parquet under data/. Not needed by the scout;
+  # useful for exact queue-position replays and funding research. Shrink closed days with:
+  #   docker compose run --rm recorder compact
+  recorder:
+    image: arcus-scout
+    container_name: arcus-recorder
+    profiles: ["research"]
+    depends_on: [scout]            # built by the scout service
+    restart: unless-stopped
+    command: ["record"]
+    volumes:
+      - ./data:/app/data
+      - ./logs:/app/logs
+    stop_grace_period: 1m
+    healthcheck:
+      disable: true                # the image's check watches the scout's recorder, not this one
     logging:
       driver: json-file
       options: {max-size: "20m", max-file: "5"}
