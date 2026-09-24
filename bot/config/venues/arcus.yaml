@@ -1,0 +1,20 @@
+# Arcus static facts. [LIVE] values (fees, ticks, margins, minimums, OI caps, RTH) are fetched by LiveParams.
+# Sources: docs.arcus.xyz (authentication, rate-limits, websocket, schedule-cancel), read 2026-09-23.
+venue: arcus
+env: testnet                     # testnet | mainnet (mainnet writes also need the B4 triple lock)
+rest: {mainnet: "https://api.arcus.xyz", testnet: "https://api.testnet.arcus.xyz"}
+ws:   {mainnet: "wss://api.arcus.xyz/v1/ws", testnet: "wss://api.testnet.arcus.xyz/v1/ws"}
+chain_id: {mainnet: 4663, testnet: 46630}
+eip712_api_key_domain: {name: "Arcus API Key", version: "1"}
+signing:
+  scheme1_ops: {place: 1, cancel: 2, modify: 3, tpsl: 4}
+  tif: {GTT: 0, FOK: 1, IOC: 2, ALO: 3}
+  side: {BUY: 0, SELL: 1}
+good_til_days: 35                # must be >= ~1 month ahead on every order, incl. IOC/FOK
+ip_bucket: {capacity: 1500, refill_per_min: 1500, target_max_util: 0.5}
+pools: {order_start: 20000, cancel_start: 40000, usd_per_unit: 0.10, drip_s: 10, cancel_all_cost: 1000}
+batch: {place_max_free: 39, cancel_max: 100}
+ws_limits: {connections: 50, subs_per_conn: 100, subs_per_ip: 1000, inflight_post: 50, lifetime_h: 24, sub_msgs_per_min: 1000}
+taker_speed_bump_ms: 50
+dms: {refresh_s: 20, deadline_s: 60, min_lead_s: 5, max_lead_s: 300, max_fires_per_day: 10}
+live_fields: [markets, feetiers, fundingRates, rateLimit, compliance]

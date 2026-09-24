@@ -1,0 +1,22 @@
+[Unit]
+Description=trading bot (mode set by BOT_RUN_ARGS; paper by default)
+After=network-online.target bot-guardian.service
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=bot
+WorkingDirectory=/opt/bot
+EnvironmentFile=/etc/bot.env
+# Paper:  BOT_RUN_ARGS="arcus_btc_mm"
+# Live:   BOT_RUN_ARGS="arcus_btc_mm --live --yes"   (needs live_enabled: true in that session file;
+#         the start is refused if `bot doctor arcus_btc_mm` reports any FAIL)
+ExecStart=/bin/sh -c '/opt/bot/.venv/bin/bot run $BOT_RUN_ARGS'
+Restart=on-failure
+RestartSec=30
+MemoryMax=3G
+KillSignal=SIGINT
+TimeoutStopSec=60
+
+[Install]
+WantedBy=multi-user.target

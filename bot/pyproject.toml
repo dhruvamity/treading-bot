@@ -1,0 +1,80 @@
+[project]
+name = "bot"
+version = "0.1.0"
+description = "Self-hosted maker / delta-neutral farming bot for Arcus and Lighter on Robinhood Chain"
+readme = "README.md"
+requires-python = ">=3.12,<3.13"
+dependencies = [
+    "aiohttp>=3.9",
+    "orjson>=3.10",
+    "pydantic>=2.7",
+    "pyyaml>=6.0",
+    "cryptography>=42",
+    "eth-account>=0.13.4",
+    "pyarrow>=16",
+    "polars>=1.0",
+    "duckdb>=1.0",
+    "numpy>=1.26",
+    "ntplib>=0.4",
+    "tzdata>=2024.1",
+    "lighter-sdk==1.1.4",
+    "uvloop>=0.19; sys_platform != 'win32'",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=8",
+    "pytest-asyncio>=0.23",
+    "hypothesis>=6.100",
+    "ruff>=0.5",
+    "mypy>=1.10",
+    "types-PyYAML",
+    "pytest-cov>=5",
+]
+
+[project.scripts]
+bot = "bot.cli:main"
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["bot"]
+
+[tool.ruff]
+line-length = 110
+target-version = "py312"
+extend-exclude = ["docs/reference"]
+
+[tool.ruff.lint]
+select = ["E", "F", "W", "I", "B", "UP", "SIM", "RUF", "ASYNC"]
+ignore = ["RUF001", "RUF002", "RUF003", "E501", "B008", "SIM108", "RUF012", "ASYNC109", "ASYNC110", "UP047"]
+
+[tool.ruff.lint.per-file-ignores]
+"tests/**" = ["B011", "S101", "ASYNC240"]
+"scripts/**" = ["ASYNC250", "ASYNC240", "E402"]
+
+[tool.mypy]
+python_version = "3.12"
+warn_unused_configs = true
+ignore_missing_imports = true
+files = ["bot"]
+
+[[tool.mypy.overrides]]
+module = ["bot.core.*", "bot.venues.*", "bot.strategies.*", "bot.autopilot.*", "bot.common.*"]
+strict = true
+warn_return_any = false
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+asyncio_mode = "auto"
+markers = [
+    "network: talks to live venue APIs (excluded by default; run with -m network)",
+]
+addopts = "-m 'not network' -q"
+filterwarnings = ["ignore::DeprecationWarning"]
+
+[tool.coverage.run]
+source = ["bot"]
+omit = ["bot/cli.py", "bot/research/recorder/*"]

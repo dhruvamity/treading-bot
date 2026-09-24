@@ -1,0 +1,29 @@
+# Highest churn at breakeven-or-better on Arcus perps (arcus-mm/research/STRATEGY_SHOOTOUT.md §Churn, 2026-09-23):
+# AMD-USD perp, Mid in AGGRESSIVE style: one order per side, one tick inside the touch when the book is wider than
+# 1.5 ticks (AMD's median spread is 6.8 bps), otherwise joining it; the safety pause stands aside in toxic stretches.
+# Tested at $25 / $100 over 94 h of recorded L2: 165 fills/day (~$4.0k maker volume/day), +2.2 bps, +$0.88/day,
+# positive in all 7 stress variants, positive 30 s markout. At $100 / $400: ~$16k/day, +$3.41/day.
+# Caveat: those 165 fills are 55% of AMD's trade count; other makers stepping in front would cut the churn.
+# Values below are CANARY size. Raise order_size_usd / inventory_cap_usd after a paper run agrees with the replay.
+session_id: arcus_amd_midagg
+venue: arcus
+account_index: 0            # one strategy per subaccount: the bot treats every order on its subaccount as its own
+market: AMD
+mode: mid
+live_enabled: false
+capital_usd: 35
+leverage_max: 5
+bias: neutral
+execution_style: aggressive # improve the best bid/ask by one tick when spread > 1.5 ticks, else join
+offset_bps: 0
+spacing_bps: 1              # only sets the skew scale in aggressive style
+levels_per_side: 1
+order_size_usd: 10          # tested: 25
+inventory_cap_usd: 20       # tested: 100
+skew_kappa: 1.0             # kappa 0 gave the identical result
+stop_loss_pct: 10
+participation_cap_pct: 25
+requote: {min_ticks: 2, min_frac_of_half_spread: 0.25}
+safety_pause: {move_sigma_1s: 6, spread_x_median: 3, depth_frac_min: 0.3, resume_s: 30}
+session: {duration: 24h, repeat: 30, windows_ist: [], skip_events: [cpi, fomc, nfp, earnings]}
+off_hours: {spacing_mult: 1, size_mult: 1, allow_mid: true}   # tested quoting at all hours

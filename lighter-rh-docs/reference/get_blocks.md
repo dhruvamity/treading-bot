@@ -1,0 +1,125 @@
+---
+updatedAt: 2026-07-01T15:46:06.000Z
+---
+
+Fetch the complete documentation index at: https://apidocs.rh.lighter.xyz/llms.txt. Use this file to discover all available pages before exploring further. Append .md to any documentation page URL to get its markdown version.
+
+# Get Recent Blocks
+
+# OpenAPI definition
+
+```json
+{
+  "openapi": "3.0.0",
+  "info": {
+    "description": "Explorer Api for ZkLighter",
+    "title": "Lighter Explorer API",
+    "contact": {},
+    "version": "1.0"
+  },
+  "paths": {
+    "/blocks": {
+      "get": {
+        "tags": [
+          "Blocks"
+        ],
+        "summary": "Get Recent Blocks",
+        "responses": {
+          "200": {
+            "description": "OK",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "array",
+                  "items": {
+                    "$ref": "#/components/schemas/response.RecentBlock"
+                  }
+                }
+              }
+            }
+          }
+        }
+      }
+    }
+  },
+  "servers": [
+    {
+      "url": "https://explorerapi.rh.lighter.xyz/api",
+      "description": "Production server"
+    }
+  ],
+  "components": {
+    "schemas": {
+      "response.BatchDetails": {
+        "type": "object",
+        "properties": {
+          "commit_tx_hash": {
+            "type": "string",
+            "nullable": true
+          },
+          "execute_tx_hash": {
+            "type": "string",
+            "nullable": true
+          },
+          "verify_tx_hash": {
+            "type": "string",
+            "nullable": true
+          }
+        },
+        "required": [
+          "commit_tx_hash",
+          "execute_tx_hash",
+          "verify_tx_hash"
+        ]
+      },
+      "response.BatchStatus": {
+        "type": "string",
+        "enum": [
+          "nothing_to_execute",
+          "committed",
+          "verified",
+          "executed"
+        ],
+        "x-enum-varnames": [
+          "BatchStatus_NothingToExecute",
+          "BatchStatus_Committed",
+          "BatchStatus_Verified",
+          "BatchStatus_Executed"
+        ]
+      },
+      "response.RecentBlock": {
+        "type": "object",
+        "properties": {
+          "batch_details": {
+            "allOf": [
+              {
+                "$ref": "#/components/schemas/response.BatchDetails"
+              }
+            ],
+            "nullable": true
+          },
+          "batch_status": {
+            "$ref": "#/components/schemas/response.BatchStatus"
+          },
+          "block_height": {
+            "type": "integer"
+          },
+          "block_size": {
+            "type": "integer"
+          },
+          "updated_at": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "batch_details",
+          "batch_status",
+          "block_height",
+          "block_size",
+          "updated_at"
+        ]
+      }
+    }
+  }
+}
+```

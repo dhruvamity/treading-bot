@@ -1,0 +1,17 @@
+name: ci
+on: [push, pull_request]
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with: {fetch-depth: 0}
+      - uses: astral-sh/setup-uv@v3
+      - run: uv venv --python 3.12 .venv && uv pip install -e '.[dev]'
+      - run: .venv/bin/ruff check bot tests scripts deploy/scripts
+      - run: .venv/bin/mypy
+      - run: .venv/bin/pytest
+      - name: no secrets in history
+        run: |
+          if git log -p | grep -E -i '(PRIVKEY|BOT_TOKEN|secrets\.enc)\s*[:=]\s*["'"'"']?[0-9a-f]{32,}' ; then
+            echo "possible secret committed"; exit 1; fi

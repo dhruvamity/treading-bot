@@ -1,0 +1,21 @@
+data_dir: data
+logs_dir: logs
+reports_dir: reports
+state_dir: state                 # per mode: state/{paper,testnet,live}.sqlite and state/heartbeat.{mode}
+capital_usd_total: 100
+alerts: {telegram_enabled: true, min_interval_s: 30, levels: [WARN, CRIT]}
+risk:
+  daily_loss_pct: 3.0
+  drawdown_pct: 10.0
+  drawdown_pct_dn: 8.0
+  liq_distance_sigma: 4.0
+  liq_resume_sigma: 6.0
+  hedge_missing_s: 5.0
+  heartbeat_timeout_s: 60.0
+  arcus_pool_freeze_frac: 0.05
+  arcus_pool_widen_frac: 0.20
+  max_leverage_mm: 50.0           # Arcus maximum; each session's leverage_max (the market max, BTC/ETH 20x) binds
+  max_leverage_dn: 3.0
+  max_actions_per_filled_usd: 8.0
+  feed_stale_s: 2.0
+  max_error_rate: 0.05

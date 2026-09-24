@@ -1,0 +1,14 @@
+# Lighter standard: wide spacing, <= 5 levels per side, requote only on fills or re-centre.
+session_id: lighter_btc_grid
+venue: lighter_rh
+market: BTC
+mode: grid
+live_enabled: false
+capital_usd: 25
+leverage_max: 3
+spacing_bps: 25
+levels_per_side: 3
+order_size_usd: 21          # Lighter BTC min base is 0.0002 (~$17); the bot never sends less than 1.2x that
+inventory_cap_usd: 42       # about two filled levels
+reset_threshold_pct: 0.5
+session: {duration: 12h, repeat: 1, windows_ist: [], skip_events: [cpi, fomc, nfp]}

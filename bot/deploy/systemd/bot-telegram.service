@@ -1,0 +1,21 @@
+[Unit]
+Description=Telegram control bot (status, pause/stop/run, cancel/flatten, live alerts)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=bot
+WorkingDirectory=/opt/bot
+EnvironmentFile=/etc/bot.env
+# Needs TELEGRAM_BOT_TOKEN and TELEGRAM_CHAT_ID (in .env or /etc/bot.env). Optional:
+#   TELEGRAM_ALLOWED_USER_IDS=123,456   only these users may command (recommended for group chats)
+#   BOT_PILOT_LIVE=1                      allow live deployments from the Run buttons
+#   BOT_TELEGRAM_ARGS="--read-only"       status and alerts only
+ExecStart=/bin/sh -c '/opt/bot/.venv/bin/bot telegram $BOT_TELEGRAM_ARGS'
+Restart=always
+RestartSec=10
+MemoryMax=512M
+
+[Install]
+WantedBy=multi-user.target

@@ -1,0 +1,18 @@
+[Unit]
+Description=guardian (independent cancel-all / flatten on heartbeat loss or hard drawdown)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=bot
+WorkingDirectory=/opt/bot
+EnvironmentFile=/etc/bot.env
+# e.g. BOT_GUARDIAN_ARGS="--venue arcus --capital 43"  (watches the LIVE heartbeat; account = your key's subaccount)
+ExecStart=/bin/sh -c '/opt/bot/.venv/bin/bot guardian $BOT_GUARDIAN_ARGS'
+Restart=always
+RestartSec=5
+MemoryMax=1G
+
+[Install]
+WantedBy=multi-user.target

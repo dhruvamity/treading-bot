@@ -1,0 +1,17 @@
+session_id: arcus_spy_blend
+venue: arcus
+account_index: 0            # the subaccount your API key is bound to (`bot keys` shows it)
+market: SPY
+mode: blend
+live_enabled: false
+capital_usd: 35
+leverage_max: 5
+execution_style: normal
+offset_bps: 0
+spacing_bps: 10
+levels_per_side: 2
+order_size_usd: 6
+inventory_cap_usd: 30
+blend: {reference: ["lighter_rh:SPY", "pyth"], weights: [0.7, 0.3], stale_ms: 2000, dev_bps: 25}
+off_hours: {spacing_mult: 2, size_mult: 0.25, allow_mid: false}
+session: {duration: 8h, repeat: 1, windows_ist: [], skip_events: [cpi, fomc, nfp]}

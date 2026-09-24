@@ -1,0 +1,18 @@
+[Unit]
+Description=scout: record all Arcus perps, backtest and rank every 30 min, review the deployment
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=bot
+WorkingDirectory=/opt/bot
+EnvironmentFile=/etc/bot.env
+ExecStart=/opt/bot/.venv/bin/bot scout run
+Restart=always
+RestartSec=10
+MemoryMax=4G
+Nice=5
+
+[Install]
+WantedBy=multi-user.target

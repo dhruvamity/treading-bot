@@ -1,0 +1,21 @@
+session_id: dn_spy
+strategy: dn_carry          # dn_carry | dn_hedged_mm | points_overlay
+market: SPY
+live_enabled: false
+legs:
+  arcus: {account_index: 2, role: maker}      # ALO entries and exits
+  lighter_rh: {role: hedge}                   # IOC hedge per Arcus fill
+collateral_per_leg_usd: 25
+leverage_per_leg: 3
+entry_ev_bps: 5
+exit_ev_bps: 0
+horizons_h: [4, 8, 12, 24, 48, 72]
+max_hold_h: 168
+spread_forecast: persistence   # persistence | ar1 | gbm
+hedge_slippage_cap_bps: 10
+min_hedge_usd: 10
+arcus_reprice_max: 5
+arcus_inside_spread_ticks: 1
+margin_warn_x_mm: 3.0
+margin_crit_x_mm: 1.8
+avoid: [earnings, ex_dividend]

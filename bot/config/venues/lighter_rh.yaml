@@ -1,0 +1,37 @@
+# Lighter on Robinhood Chain static facts. [LIVE] values come from /api/v1/orderBooks and /orderBookDetails.
+# Sources: apidocs.rh.lighter.xyz (get-started, rate-limits, account-types, api-keys, websocket), lighter-sdk 1.1.4.
+# Corrections vs the prompt pack: a testnet exists; API key slots 0-3 and 157 are reserved (use >= 4);
+# order limits are pending 500/acct 16/market and active 1500/acct 1000/market; standard maker/cancel
+# latency is documented as 200 ms; sendTx over WS does not count toward the 200 msgs/min WS limit.
+venue: lighter_rh
+env: mainnet                     # testnet | mainnet
+rest: {mainnet: "https://api.rh.lighter.xyz", testnet: "https://api.rh-testnet.lighter.xyz"}
+ws:   {mainnet: "wss://api.rh.lighter.xyz/stream", testnet: "wss://api.rh-testnet.lighter.xyz/stream"}
+signing_chain_id: {mainnet: 466324, testnet: 300}   # confirmed in docs get-started and lighter-sdk signer_client
+api_key_index_default: 4
+reserved_api_key_indices: [0, 1, 2, 3, 157]
+tx_types: {change_pub_key: 8, create_sub_account: 9, transfer: 12, withdraw: 13, create_order: 14, cancel_order: 15, cancel_all: 16, modify_order: 17, update_leverage: 20, create_grouped_orders: 28, update_margin: 29, approve_integrator: 45}
+order_type: {limit: 0, market: 1, stop_loss: 2, stop_loss_limit: 3, take_profit: 4, take_profit_limit: 5, twap: 6}
+tif: {ioc: 0, gtt: 1, post_only: 2}
+cancel_all_tif: {immediate: 0, scheduled: 1, abort: 2}   # scheduled = Lighter-side dead man's switch
+tx_lifetime_ms: 599000
+order_expiry_days: 28            # docs: expiry must be 5 min .. 30 days (ms)
+auth_token: {lifetime_h: 7, refresh_before_min: 10, max_h: 8}
+limits_standard:
+  rest_req_per_min: 60
+  sendtx_per_min: 60
+  pending_per_market: 16
+  pending_per_account: 500
+  active_per_market: 1000
+  active_per_account: 1500
+  ws_msgs_per_min: 200
+  ws_batch_max: 15
+  rest_batch_max: 50
+  ws_ping_s: 60
+  design_active_per_market: 30
+  design_pending_per_market: 10
+latency_ms: {maker: [0, 200], taker: 300, cancel: 200, documented_standard_maker: 200}
+min_quote_usd: 10
+usdg_asset_index: 3
+deposit_contract: "0x94bAB9693Ba2f6358507eFfcbd372b0660AFfF9d"   # confirmed in docs deposits-transfers-and-withdrawals
+live_fields: [orderBooks, orderBookDetails, fundings]

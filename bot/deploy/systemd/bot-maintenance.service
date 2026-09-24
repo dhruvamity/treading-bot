@@ -1,0 +1,10 @@
+[Unit]
+Description=daily maintenance (compact yesterday's Parquet, data-quality report)
+
+[Service]
+Type=oneshot
+User=bot
+WorkingDirectory=/opt/bot
+EnvironmentFile=/etc/bot.env
+ExecStart=/opt/bot/.venv/bin/bot compact
+ExecStart=/bin/sh -c '/opt/bot/.venv/bin/bot dq-report --date $(date -u -d yesterday +%%F)'
