@@ -278,8 +278,10 @@ class Farm:
 def synth_study(out: Path, *, hours: float = 12.0, workers: int = 3, seeds: tuple[int, ...] = (1, 2),
                 profiles: tuple[str, ...] = ("index", "major", "alt"),
                 regimes: tuple[str, ...] = ("chop", "trend", "mixed"),
-                informed: tuple[float, ...] = (0.1, 0.5)) -> list[dict[str, Any]]:
-    """Every menu setting on synthetic tapes: profile x regime x informed-flow level x seed. The tapes start on a
+                informed: tuple[float, ...] = (2.5, 0.5)) -> list[dict[str, Any]]:
+    """Every menu setting on synthetic tapes: profile x regime x toxicity x seed. Toxicity is the informed taker's
+    cost threshold in bps (`informed`): 2.5 = only traders who pay Arcus's 2.25 bp taker fee (low), 0.5 = a fast
+    trader who trades almost any stale quote (high); informed_p is 0.5 throughout. The tapes start on a
     Saturday so the skip-US-session variants are comparable (they quote all weekend)."""
     from bot.farm.synth import PROFILES, REGIMES, generate, variant
 
@@ -289,18 +291,20 @@ def synth_study(out: Path, *, hours: float = 12.0, workers: int = 3, seeds: tupl
     jobs = []
     for pn in profiles:
         for rn in regimes:
-            for inf in informed:
+            for edge in informed:
                 for seed in seeds:
-                    market = f"{pn.upper()}-{rn.upper()}-I{int(inf * 100)}-S{seed}"
-                    tape, meta = generate(variant(PROFILES[pn], informed_p=inf), REGIMES[rn], hours=hours,
-                                          start_us=start, seed=seed * 1000 + zlib.crc32(f"{pn}/{rn}/{inf}".encode()) % 997,
+                    market = f"{pn.upper()}-{rn.upper()}-E{edge:g}-S{seed}"
+                    tape, meta = generate(variant(PROFILES[pn], informed_p=0.5, informed_edge_bps=edge), REGIMES[rn],
+                                          hours=hours,
+                                          start_us=start, seed=seed * 1000 + zlib.crc32(f"{pn}/{rn}/{edge}".encode()) % 997,
                                           market=market)
                     store.write_part(market, "bbo", "syn", tape.bbo)
                     store.write_part(market, "trades", "syn", tape.trades)
                     jobs.append({"tape_root": str(tape_root), "market": market, "start": start + WARMUP_S * S,
                                  "end": start + int(hours * 3600 * S), "meta": meta, "out": str(out),
                                  "capital": 100.0, "alive_market": market, "warmup_s": WARMUP_S,
-                                 "scenario": {"profile": pn, "regime": rn, "informed_p": inf, "seed": seed}})
+                                 "scenario": {"profile": pn, "regime": rn, "informed_edge_bps": edge,
+                                              "seed": seed}})
     rows: list[dict[str, Any]] = []
     with ProcessPoolExecutor(max_workers=max(1, workers), mp_context=get_context("spawn")) as ex:
         for job, res in zip(jobs, ex.map(run_market, jobs), strict=True):

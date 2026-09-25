@@ -12,9 +12,10 @@ Model, one second at a time:
 - Noise takers arrive at `noise_per_s` with lognormal sizes. Each is one taker order (one sequence number) that
   walks the book level by level, printing at each price it takes. Its impact is temporary (it decays with a
   `revert_s` half-life): the "sweep and bounce back" flow that pays deep quotes.
-- Informed takers trade when the efficient price has moved beyond the touch (the makers' quotes are stale): with
-  probability `informed_p` each such second, in the direction of the move. They move the makers' mid to the new
-  price at once. This is the flow that picks off quotes at the touch.
+- Informed takers trade when the efficient price has moved beyond the touch by more than their cost
+  (`informed_edge_bps`: Arcus's 2.25 bp taker fee plus a little): with probability `informed_p` each such second,
+  in the direction of the move. They move the makers' mid to the new price at once. This is the flow that picks off
+  quotes at and near the touch.
 """
 
 from __future__ import annotations
@@ -43,6 +44,7 @@ class Profile:
     noise_per_s: float           # noise taker orders per second
     noise_usd: float             # median noise taker order
     informed_p: float = 0.3      # chance per stale second that an informed taker trades
+    informed_edge_bps: float = 2.5   # an informed taker needs the price this far beyond the touch (taker fee 2.25 bp)
     lag_s: float = 3.0           # how slowly the makers follow the efficient price
     revert_s: float = 8.0        # half-life of a sweep's temporary impact
     impact_bps_per_10k: float = 1.0   # temporary impact of a $10k sweep
@@ -118,7 +120,7 @@ def generate(profile: Profile, regimes: Regimes, *, hours: float, start_us: int,
     bbo: list[tuple[int, float, float, float, float]] = []
     trades: list[tuple[int, float, float, bool, int, int]] = []
     seq = tid = 0
-    n_levels = 16
+    n_levels = 32
     p_jump = regimes.jump_per_h / 3600
     probs = np.array(regimes.p, float)
     probs = probs / probs.sum(axis=1, keepdims=True)
@@ -154,8 +156,10 @@ def generate(profile: Profile, regimes: Regimes, *, hours: float, start_us: int,
         # informed taker: the efficient price is beyond the touch
         xp = math.exp(x)
         events: list[tuple[int, bool, float, bool]] = []    # (offset us, taker buys, notional, informed)
-        if (xp > ask or xp < bid) and rng.random() < pr.informed_p:
-            events.append((int(rng.integers(0, S)), xp > ask, pr.noise_usd * rng.lognormal(0.3, 0.8), True))
+        edge = pr.informed_edge_bps * 1e-4
+        stale_up, stale_down = xp > ask * (1 + edge), xp < bid * (1 - edge)
+        if (stale_up or stale_down) and rng.random() < pr.informed_p:
+            events.append((int(rng.integers(0, S)), stale_up, pr.noise_usd * rng.lognormal(0.3, 0.8), True))
         k = rng.poisson(pr.noise_per_s)
         for _ in range(k):
             events.append((int(rng.integers(0, S)), bool(rng.random() < 0.5),

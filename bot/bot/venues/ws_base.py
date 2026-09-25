@@ -145,7 +145,7 @@ class ReconnectingWS:
 
     async def _connect_once(self) -> None:
         if self._session is None or self._session.closed:
-            self._session = aiohttp.ClientSession()
+            self._session = aiohttp.ClientSession(trust_env=True)   # HTTPS_PROXY / NO_PROXY when set
         async with self._session.ws_connect(self.url, heartbeat=20.0, max_msg_size=0, compress=15) as ws:
             self._ws = ws
             self.connected_at = time.monotonic()

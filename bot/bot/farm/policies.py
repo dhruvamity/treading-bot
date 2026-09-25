@@ -99,6 +99,42 @@ class RsiSkewPolicy(Policy):
         return self.two_sided(b, [(bid, ask, "0")], q, self.u(b), nb, ns), 0.0
 
 
+class VMidPolicy(MidPolicy):
+    """Volatility-gated Mid 0: Mid 0 while the market is calm, wider when it moves. Each minute: d = min(spacing_bps,
+    level_step_bps x the 1-minute volatility in bps), and the full spacing_bps when the 30-minute efficiency ratio is
+    0.35 or more (a trend). Under 0.5 bp it quotes like Mid 0 (the tightest pair around the mid), else mid +/- d.
+    Sizes skew against inventory like every Mid setting."""
+
+    ER_TREND = 0.35
+
+    def __init__(self, cfg: Config, risk: Risk, mi: MarketInfo) -> None:
+        super().__init__(cfg, risk, mi)
+        self._min = -1
+        self.d = cfg.spacing_bps
+
+    def quotes(self, b: Book) -> tuple[list[Quote], float]:
+        c, tick = self.c, self.m.tick
+        minute = b.t // (60 * sim.S)
+        if minute != self._min:
+            self._min = minute
+            er = efficiency_ratio(list(b.closes)[-31:])
+            self.d = c.spacing_bps if er >= self.ER_TREND else min(c.spacing_bps, c.level_step_bps * b.sigma_1m / BP)
+        u = self.u(b)
+        if self.d < 0.5:
+            bid, ask = tightest_pair(b.mid, tick)
+            bid, ask = max(bid, b.bid), min(ask, b.ask)
+        else:
+            h = self.d * BP
+            bid, ask = sim.round_bid(b.mid * (1 - h), tick), sim.round_ask(b.mid * (1 + h), tick)
+        if bid >= b.ask:
+            bid = b.ask - tick
+        if ask <= b.bid:
+            ask = b.bid + tick
+        q = self.q_base(b.mid)
+        nb, ns = self.caps(b, q)
+        return self.two_sided(b, [(bid, ask, "0")], q, u, nb, ns), 0.0
+
+
 def efficiency_ratio(closes: list[float]) -> float:
     if len(closes) < 3:
         return 0.0
@@ -153,7 +189,8 @@ class DGridPolicy(Policy):
             self.sub.on_fill(side, px, qty, tag, t, pos_after)
 
 
-sim.POLICIES.update({"tmid": TMidPolicy, "rsiskew": RsiSkewPolicy, "dgrid": DGridPolicy})
+sim.POLICIES.update({"tmid": TMidPolicy, "rsiskew": RsiSkewPolicy, "dgrid": DGridPolicy, "vmid": VMidPolicy})
 sim.CACHEABLE.add("tmid")
 
-__all__ = ["BUY", "SELL", "DGridPolicy", "RsiSkewPolicy", "TMidPolicy", "efficiency_ratio", "tightest_pair"]
+__all__ = ["BUY", "SELL", "DGridPolicy", "RsiSkewPolicy", "TMidPolicy", "VMidPolicy", "efficiency_ratio",
+           "tightest_pair"]

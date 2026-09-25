@@ -582,7 +582,11 @@ def cmd_farm(a: argparse.Namespace) -> None:
                 print(f"{m} {r['setting']} @ {r['leverage']:g}x:  {r['command']}")
     elif a.action == "synth":
         out = base / "synthetic" / (a.label or "study")
-        kw = {"profiles": tuple(a.profiles)} if a.profiles else {}
+        kw: dict[str, Any] = {"profiles": tuple(a.profiles)} if a.profiles else {}
+        if a.regimes:
+            kw["regimes"] = tuple(a.regimes)
+        if a.informed:
+            kw["informed"] = tuple(a.informed)
         rows = synth_study(out, hours=a.hours, workers=workers, **kw)
         print(f"{len(rows)} synthetic paper runs in {out / 'results.json'}")
 
@@ -785,6 +789,9 @@ def build_parser() -> argparse.ArgumentParser:
     sp.add_argument("--label", help="analyze: write into RUN_DIR/variants/LABEL instead of the run folder; "
                                     "synth: the study's folder name")
     sp.add_argument("--profiles", nargs="*", help="synth: model market types (bot/farm/synth.py PROFILES)")
+    sp.add_argument("--regimes", nargs="*", help="synth: chop, trend, mixed (bot/farm/synth.py REGIMES)")
+    sp.add_argument("--informed", nargs="*", type=float,
+                    help="synth: toxicity levels, the informed taker's cost threshold in bps (default 2.5 and 0.5)")
     sp = add("pilot", cmd_pilot, "one deployment at a time: status, approve N [--live], close")
     sp.add_argument("action", choices=["status", "approve", "close"])
     sp.add_argument("n", nargs="?", type=int, default=1, help="approve: which of the top 3")

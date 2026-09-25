@@ -75,17 +75,20 @@ def synth_summary(rows: list[dict[str, Any]], lev: float = 10.0) -> str:
         rs = [r for r in rows if r["profile"] == pn]
         agg = sorted(by_setting(rs), key=lambda r: -(r["turnover_per_h"] or 0))
         lines += [f"## Market type `{pn}`: all regimes and flow levels", "", fmt_table(agg, COLS, 100), ""]
-    lines += ["## Toxic flow: cost per $1M by informed-flow level (all market types and regimes)", ""]
-    tox = by_setting(rows, ("setting", "informed_p"))
+    lines += ["## Toxic flow: by the informed taker's cost threshold (bps; lower = more toxic), all market types and "
+              "regimes", ""]
+    tox = by_setting(rows, ("setting", "informed_edge_bps"))
     piv: dict[str, dict[str, Any]] = {}
     for r in tox:
+        e = f"{r['informed_edge_bps']:g}"
         d = piv.setdefault(r["setting"], {"setting": r["setting"], "family": r["family"]})
-        d[f"cpm_i{int(r['informed_p'] * 100)}"] = r["cpm"]
-        d[f"to_i{int(r['informed_p'] * 100)}"] = r["turnover_per_h"]
-    inf_levels = sorted({int(r["informed_p"] * 100) for r in rows})
+        d[f"cpm_{e}"] = r["cpm"]
+        d[f"to_{e}"] = r["turnover_per_h"]
+        d[f"be_{e}"] = r["near_be"]
+    edges = sorted({f"{r['informed_edge_bps']:g}" for r in rows}, key=float, reverse=True)
     cols = [("setting", "setting"), ("family", "family")]
-    for i in inf_levels:
-        cols += [(f"to_i{i}", f"turnover/h @{i}%"), (f"cpm_i{i}", f"CPM @{i}%")]
+    for e in edges:
+        cols += [(f"to_{e}", f"turnover/h @{e}bp"), (f"cpm_{e}", f"CPM @{e}bp"), (f"be_{e}", f"near BE @{e}bp")]
     lines += [fmt_table(sorted(piv.values(), key=lambda r: r["setting"]), cols, 100), ""]
     lines += ["## Regime: cost per $1M by regime (all market types and flow levels)", ""]
     reg = by_setting(rows, ("setting", "regime"))

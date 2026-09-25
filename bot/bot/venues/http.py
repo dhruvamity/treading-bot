@@ -24,8 +24,9 @@ class HttpClient:
 
     async def session(self) -> aiohttp.ClientSession:
         if self._session is None or self._session.closed:
+            # trust_env: honour HTTPS_PROXY / NO_PROXY when set (a machine whose traffic must go through a proxy)
             self._session = aiohttp.ClientSession(timeout=self._timeout, headers={"User-Agent": self._ua},
-                                                  json_serialize=lambda o: orjson.dumps(o).decode())
+                                                  json_serialize=lambda o: orjson.dumps(o).decode(), trust_env=True)
         return self._session
 
     async def close(self) -> None:
