@@ -8,7 +8,7 @@
 #   docker compose logs -f scout                     what it is doing
 #   cat data/scout/report.txt                        the latest ranking (best per market, and each at max leverage)
 #   ls data/scout/reports/                           the last ranking of each UTC day
-#   docker compose down                              stop (a scan in progress finishes, buffers are written out)
+#   docker compose down                              stop (a scan in progress stops at once, buffers are written out)
 #
 # Needs no keys and places no orders. Disk: about 0.2-0.5 GB/day for the scout with depth recording (the default
 # here; drop "--depth" for about 0.1 GB/day), plus about 1.5-2.5 GB/day for the research recorder if enabled.
@@ -19,12 +19,12 @@ services:
     image: arcus-scout
     container_name: arcus-scout
     restart: unless-stopped
-    command: ["scout", "run", "--depth", "--workers", "${SCOUT_WORKERS:-6}", "--capital", "${SCOUT_CAPITAL:-auto}"]
+    command: ["scout", "run", "--depth", "--workers", "${SCOUT_WORKERS:-auto}", "--capital", "${SCOUT_CAPITAL:-auto}"]
     volumes:
       - ./data:/app/data
       - ./state:/app/state
       - ./logs:/app/logs
-    stop_grace_period: 2m          # a scan in progress finishes and the recorder writes out its buffers
+    stop_grace_period: 2m          # the recorder writes out its buffers (a scan in progress stops at once)
     logging:
       driver: json-file
       options: {max-size: "20m", max-file: "5"}

@@ -107,7 +107,7 @@ class Watcher:
         risk = tuple(_risk(v))
         for r in risk:
             if r not in m.risk:
-                await self._say(f"🔴 <b>{name}</b>: {r}. Quoting stopped; /status for details, /resume after you "
+                await self._say(f"🔴 <b>{name}</b>: {r}. Quoting stopped; /status for details, /resumeaftersl after you "
                                 "have checked.", critical=r.startswith(("SAFE", "STOPPED")))
         if m.risk and not risk and v.running:
             await self._say(f"🟢 <b>{name}</b>: safety stops cleared, quoting allowed again.")

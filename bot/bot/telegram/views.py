@@ -176,56 +176,59 @@ def fill_line(f: dict[str, Any]) -> str:
             f"({usd(f['price'] * f['size'], sign=False)}{'' if f['maker'] else ', TAKER'})")
 
 
-HELP = """<b>Bot control</b>
+HELP = """<b>What you can do</b> (or tap /menu)
 
-<b>Pick what to run</b>
-/scout — the 3 best setups right now (backtested), with Run buttons
-/pilot — what is deployed, how it is doing, close it
+<b>Choose and start</b>
+/top3 — the 3 best setups right now; tap Run → Paper or LIVE
+/openpositions — what is running, today vs its backtest; Close & stop
 
-<b>See</b>
-/status — is it running, today's PnL, fills, volume
-/pnl — PnL breakdown by market
-/positions · /orders · /sessions
-/logs [n] — latest decisions · /report [YYYY-MM-DD]
+<b>Check</b>
+/status — running? today's profit, fills, volume
+/balance — money in the account, deposits vs trading profit, change over time
+/positions · /orders — what you hold, what is waiting on the book
+/yesterdayreport — yesterday's full report
 
 <b>Control</b>
-/pause [MARKET] — stop quoting (exits keep working)
-/unpause [MARKET] — quote again
-/stop — shut the bot down (cancels quotes, keeps positions)
-/resume — clear a safety stop after you have looked at why
-/run &lt;session&gt; [live] — start a bot (live needs doctor + a code)
-/doctor &lt;session&gt; — live readiness check
+/pauseneworders — stop new orders (closing orders keep working) · /unpause
+/stop — shut the bot down (orders cancelled, position kept)
+/resumeaftersl — trade again after a safety stop, once you know why
 
-<b>Emergency</b> (real accounts, asks to confirm)
-/cancelall [arcus|lighter_rh] — cancel every open order
-/flatten [arcus|lighter_rh] [taker] — close every position
+<b>Emergency</b> (asks you to confirm)
+/cancelall — cancel every order · /closeall — close every position (<code>/closeall taker</code>: at once)
 
-<b>Alerts</b>
-/alerts — settings · /mute [minutes] · /unmute
+<b>Settings</b>
+/settings — what you can change · /set &lt;name&gt; &lt;value&gt;, e.g. <code>/set trade_share 50</code>
+/scannow — look for setups now
 
-Commands act on the running bot (live first). Add paper/testnet/live to pick one, e.g. <code>/status paper</code>."""
+<b>More</b>
+/pnl (profit by market) · /logs (the bot's recent decisions) · /sessions · /run &lt;session&gt; · /doctor
+&lt;session&gt; · /alerts · /mute [minutes] · /unmute
+Add paper or live to pick a bot, e.g. <code>/status paper</code>. Old names (/scout, /pilot, /pause, /flatten…) still
+work."""
 
+# Telegram's "/" list: the everyday commands (everything in HELP still works)
 COMMANDS: list[tuple[str, str]] = [
-    ("scout", "Best 3 setups right now, with Run buttons"), ("pilot", "What is deployed and how it is doing"),
-    ("status", "Is it running, today's PnL, fills, volume"), ("pnl", "PnL by market"),
-    ("positions", "Open positions"), ("orders", "Open orders"), ("sessions", "Configured sessions"),
-    ("pause", "Stop quoting (exits keep working)"), ("unpause", "Quote again"), ("stop", "Shut the bot down"),
-    ("resume", "Clear a safety stop"), ("run", "Start a session"), ("doctor", "Live readiness check"),
-    ("cancelall", "Cancel every open order (confirm)"), ("flatten", "Close every position (confirm)"),
-    ("logs", "Latest decisions"), ("report", "Daily report"), ("alerts", "Alert settings"),
-    ("mute", "Mute non-critical alerts"), ("unmute", "Unmute alerts"), ("menu", "Buttons"), ("help", "Help"),
+    ("top3", "Best 3 setups now, with Run buttons"), ("openpositions", "What is running and how it is doing"),
+    ("status", "Running? today's profit, fills, volume"), ("balance", "Money in the account and its history"),
+    ("positions", "What you hold"), ("orders", "Orders waiting on the book"),
+    ("pauseneworders", "Stop new orders (closing orders keep working)"), ("unpause", "Place orders again"),
+    ("stop", "Shut the bot down (position kept)"), ("closeall", "Close every position (confirm)"),
+    ("cancelall", "Cancel every order (confirm)"), ("resumeaftersl", "Trade again after a safety stop"),
+    ("yesterdayreport", "Yesterday's report"), ("settings", "What you can change"),
+    ("set", "Change a setting: /set name value"), ("scannow", "Look for setups now"), ("menu", "Buttons"),
+    ("help", "All commands"),
 ]
 
 
 def menu_keyboard() -> Keyboard:
     return [
-        [("Top 3 now", "scout"), ("Deployed", "pilot")],
-        [("📊 Status", "status"), ("💰 PnL", "pnl")],
+        [("🏆 Top 3 now", "top3"), ("▶️ Running now", "openpositions")],
+        [("📊 Status", "status"), ("💰 Balance", "balance")],
         [("📦 Positions", "positions"), ("📋 Orders", "orders")],
-        [("⏸ Pause all", "pause"), ("▶️ Unpause all", "unpause")],
-        [("🛑 Stop bot", "stop"), ("🗂 Sessions", "sessions")],
-        [("❌ Cancel all", "cancelall"), ("🧯 Flatten", "flatten")],
-        [("🔔 Alerts", "alerts"), ("📜 Logs", "logs")],
+        [("⏸ Pause new orders", "pauseneworders"), ("▶️ Unpause", "unpause")],
+        [("⚙️ Settings", "settings"), ("🔎 Scan now", "scannow")],
+        [("❌ Cancel all orders", "cancelall"), ("🧯 Close all positions", "closeall")],
+        [("🛑 Stop bot", "stop"), ("🔔 Alerts", "alerts")],
     ]
 
 
@@ -256,7 +259,7 @@ def candidate_lines(top: list[dict[str, Any]]) -> str:
 
 def pick_keyboard(top: list[dict[str, Any]]) -> Keyboard:
     row = [(f"Run #{i}", f"pick {i}") for i in range(1, len(top) + 1)]
-    return [row, [("Deployed", "pilot"), ("☰ Menu", "menu")]] if row else [[("☰ Menu", "menu")]]
+    return [row, [("Deployed", "openpositions"), ("☰ Menu", "menu")]] if row else [[("☰ Menu", "menu")]]
 
 
 def scout_text(scan: dict[str, Any] | None, now: float) -> str:
@@ -292,7 +295,7 @@ def pilot_text(pilot: Any) -> str:
     st = pilot.state()
     a = st.get("active")
     if not a:
-        return "<b>Deployed:</b> nothing. /scout to pick one."
+        return "<b>Deployed:</b> nothing. /top3 to pick one."
     running = pilot.control.is_running(a["mode"])
     rev = st.get("last_review") or {}
     state = ("paused by the scout: " + escape(st["paused_by_scout"])) if st.get("paused_by_scout") else \
@@ -310,4 +313,56 @@ def pilot_text(pilot: Any) -> str:
 
 
 def pilot_keyboard() -> Keyboard:
-    return [[("Top 3 now", "scout"), ("Close & stop", "pilotclose")], [("🔄 Refresh", "pilot"), ("☰ Menu", "menu")]]
+    return [[("Top 3 now", "top3"), ("Close & stop", "pilotclose")], [("🔄 Refresh", "openpositions"), ("☰ Menu", "menu")]]
+
+
+# ------------------------------------------------------------------ balance and settings
+def balance_text(snap: dict[str, float] | None, summary: dict[str, Any], held: dict[str, Any] | None,
+                 live_capital: str | None, account: int) -> str:
+    """/balance: the account now (or the last reading), deposits vs trading PnL, the change over 1/7/30 days, and the
+    capital the scout and the live bot size for."""
+    last = summary.get("latest") or {}
+    if snap and snap.get("equity"):
+        head = f"<b>💰 Balance</b> (subaccount {account}, read now)"
+        eq, free, nd = snap["equity"], snap.get("free"), snap.get("net_deposits")
+    elif last:
+        when = dt.datetime.fromtimestamp(last["ts"], dt.UTC).strftime("%m-%d %H:%M")
+        head = f"<b>💰 Balance</b> (subaccount {account}; could not read it now, last reading {when} UTC)"
+        eq, free, nd = last["equity"], last.get("free"), last.get("net_deposits")
+    else:
+        return ("<b>💰 Balance</b>: no reading yet. The account could not be read (is ARCUS_ADDRESS in .env, and has "
+                "it been funded?), and no balance has been logged.")
+    lines = [head, f"Equity <b>{usd(eq, sign=False)}</b>" + (f" · free {usd(free, sign=False)}" if free else "")]
+    if nd is not None:
+        lines.append(f"Deposited, net of withdrawals {usd(nd, sign=False)} → trading PnL <b>{usd(eq - nd)}</b>")
+    changes = []
+    for key, name in (("1d", "24 h"), ("7d", "7 d"), ("30d", "30 d")):
+        c = summary.get(key)
+        if c:
+            t = f"{name} {usd(c['equity_change'])}"
+            if c.get("pnl_change") is not None and abs(c["pnl_change"] - c["equity_change"]) > 0.005:
+                t += f" (trading {usd(c['pnl_change'])})"
+            changes.append(t)
+    if changes:
+        lines.append("Change: " + " · ".join(changes))
+    if held:
+        since = dt.datetime.fromtimestamp(held.get("ts", 0), dt.UTC).strftime("%m-%d %H:%M")
+        lines.append(f"Scans size for {usd(held['usd'], sign=False)} ({escape(str(held.get('source')))}, since "
+                     f"{since} UTC); it follows the balance once it moves 25% or more, at most once a day")
+    if live_capital:
+        lines.append(f"The live bot sizes for {usd(float(live_capital), sign=False)} (re-read at 00:00 UTC)")
+    lines.append(f"<i>{summary.get('rows_30d', 0)} readings in the last 30 days (state/balances.jsonl)</i>")
+    return "\n".join(lines)
+
+
+def settings_text(over: dict[str, Any], defaults: dict[str, Any]) -> str:
+    from bot.common.settings import SETTINGS, show
+
+    rows = ["<b>⚙️ Settings</b> — change with <code>/set name value</code>, undo with <code>/set name default</code>"]
+    for name, s in SETTINGS.items():
+        cur = over.get(name, defaults.get(name))
+        mark = " <i>(changed)</i>" if name in over else ""
+        rows.append(f"\n<b>{name}</b> = {escape(show(name, cur))}{mark}\n{escape(s.help)}. "
+                    f"<i>Applies: {escape(s.applies)}.</i>")
+    rows.append("\nLive trading itself stays switched on or off in .env on the server (BOT_PILOT_LIVE), not here.")
+    return "\n".join(rows)

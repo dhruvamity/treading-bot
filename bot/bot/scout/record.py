@@ -16,6 +16,7 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import json
+import math
 import shutil
 import time
 from pathlib import Path
@@ -203,7 +204,9 @@ class ScoutRecorder:
         try:
             while not self._stop.is_set():
                 with contextlib.suppress(TimeoutError):
-                    await asyncio.wait_for(self._stop.wait(), timeout=min(self.flush_s, MARKETS_EVERY_S))
+                    left = duration_s - (time.time() - start) if duration_s is not None else math.inf
+                    await asyncio.wait_for(self._stop.wait(), timeout=max(0.1, min(self.flush_s, MARKETS_EVERY_S,
+                                                                                    left)))
                 if time.time() - self._last_flush >= self.flush_s:
                     self.flush()
                 if time.time() - last_mk >= MARKETS_EVERY_S:

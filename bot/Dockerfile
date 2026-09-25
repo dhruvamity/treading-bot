@@ -16,4 +16,4 @@ COPY config ./config
 HEALTHCHECK --interval=5m --timeout=10s --start-period=10m CMD python -c "import json,sys,time; s=json.load(open('/app/data/scout/recorder.json')); sys.exit(0 if time.time()-s['ts']<900 and not s['paused_for_disk'] else 1)"
 
 ENTRYPOINT ["bot"]
-CMD ["scout", "run", "--depth", "--workers", "6"]
+CMD ["scout", "run", "--depth", "--workers", "auto"]

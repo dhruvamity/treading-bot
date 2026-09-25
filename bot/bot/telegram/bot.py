@@ -15,6 +15,7 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import datetime as dt
+import json
 import os
 import secrets
 import time
@@ -23,12 +24,15 @@ from html import escape
 from pathlib import Path
 from typing import Any
 
+from bot.common import settings
 from bot.common.logging import Log, redact_str
+from bot.core.balances import BalanceLog
 from bot.telegram.api import Keyboard, TelegramAPI, TelegramError, split_html
 from bot.telegram.control import MODES, Control
 from bot.telegram.views import (
     COMMANDS,
     HELP,
+    balance_text,
     candidate_lines,
     confirm_keyboard,
     menu_keyboard,
@@ -41,12 +45,16 @@ from bot.telegram.views import (
     refresh_keyboard,
     scout_text,
     sessions_text,
+    settings_text,
     status_text,
 )
 from bot.telegram.watcher import Prefs, Watcher
 
 log = Log("telegram_bot")
 VENUES = ("arcus", "lighter_rh")
+# The commands' earlier names still work (not listed in Telegram's menu), so old habits and old buttons keep working.
+ALIASES = {"scout": "top3", "pilot": "openpositions", "report": "yesterdayreport", "pause": "pauseneworders",
+           "resume": "resumeaftersl", "flatten": "closeall"}
 CONFIRM_TTL_S = 120
 
 
@@ -215,16 +223,18 @@ class TelegramBot:
 
     # ------------------------------------------------------------------ commands
     async def dispatch(self, ctx: Ctx, cmd: str, args: list[str]) -> None:
+        cmd = ALIASES.get(cmd, cmd)
         read = {"start": self.c_menu, "menu": self.c_menu, "help": self.c_help, "status": self.c_status,
-                "scout": self.c_scout, "pilot": self.c_pilot,
+                "top3": self.c_scout, "openpositions": self.c_pilot,
                 "pnl": self.c_pnl, "positions": self.c_positions, "orders": self.c_orders,
-                "sessions": self.c_sessions, "logs": self.c_logs, "report": self.c_report, "ping": self.c_ping,
-                "alerts": self.c_alerts, "mute": self.c_mute, "unmute": self.c_unmute, "ok": self.c_ok,
-                "no": self.c_no}
-        write = {"pause": self.c_pause, "unpause": self.c_unpause, "stop": self.c_stop, "resume": self.c_resume,
-                 "run": self.c_run, "doctor": self.c_doctor, "cancelall": self.c_cancelall,
-                 "flatten": self.c_flatten, "pick": self.c_pick, "deploy": self.c_deploy,
-                 "pilotclose": self.c_pilotclose}
+                "sessions": self.c_sessions, "logs": self.c_logs, "yesterdayreport": self.c_report,
+                "ping": self.c_ping, "alerts": self.c_alerts, "mute": self.c_mute, "unmute": self.c_unmute,
+                "ok": self.c_ok, "no": self.c_no, "balance": self.c_balance, "settings": self.c_settings}
+        write = {"pauseneworders": self.c_pause, "unpause": self.c_unpause, "stop": self.c_stop,
+                 "resumeaftersl": self.c_resume, "run": self.c_run, "doctor": self.c_doctor,
+                 "cancelall": self.c_cancelall, "closeall": self.c_flatten, "pick": self.c_pick,
+                 "deploy": self.c_deploy, "pilotclose": self.c_pilotclose, "set": self.c_set,
+                 "scannow": self.c_scannow}
         if cmd in read:
             await read[cmd](ctx, args)
         elif cmd in write:
@@ -309,6 +319,74 @@ class TelegramBot:
         a = self.pilot.active()
         await self._ask(ctx, "pilotclose", {}, f"Close the {escape(a['market'])} position and stop the bot? It sends "
                         "a reduce-only maker order, then crosses the spread if that does not fill.")
+
+    # ------------------------------------------------------------------ balance and settings
+    def _state_dir(self) -> Path:
+        return Path(self.control.root) / self.control.app.state_dir
+
+    async def c_balance(self, ctx: Ctx, args: list[str]) -> None:
+        """Read the account now, log it (state/balances.jsonl), and show it with its history."""
+        from bot.common.config import load_arcus_config
+        from bot.scout.capital import STATE, account_snapshot
+
+        blog = BalanceLog(self._state_dir() / "balances.jsonl")
+        idx = self.pilot.account_index if self.pilot is not None else 0
+        snap = None
+        try:
+            url = load_arcus_config(Path(self.control.root) / "config" / "venues" / "arcus.yaml").rest.mainnet
+            snap = await account_snapshot(url, idx)
+        except Exception as e:  # show the history even when the account cannot be read right now
+            log.warning("balance_read_failed", reason=type(e).__name__)
+        if snap and snap["equity"] > 0:
+            blog.record(source="telegram", account_index=idx, equity=snap["equity"], free=snap["free"],
+                        net_deposits=snap["net_deposits"])
+        try:
+            held = json.loads((self._state_dir() / STATE).read_text())
+        except (OSError, ValueError):
+            held = None
+        view = self.control.view("live") if self.control.is_running("live") else None
+        live = next((x.get("size_capital") for x in ((view.snapshot or {}).get("sessions") or [])), None) \
+            if view else None
+        await self.reply(ctx, balance_text(snap, blog.summary(), held, live, idx), refresh_keyboard("balance"))
+
+    async def c_settings(self, ctx: Ctx, args: list[str]) -> None:
+        over = settings.load(self._state_dir())
+        await self.reply(ctx, settings_text(over, settings.defaults(self.control.app.sizing, 30, "auto")),
+                         refresh_keyboard("settings"))
+
+    async def c_set(self, ctx: Ctx, args: list[str]) -> None:
+        if len(args) < 2:
+            await self.c_settings(ctx, args)
+            return
+        name, text = args[0].lower(), " ".join(args[1:])
+        over = settings.load(self._state_dir())
+        now = settings.show(name, over[name]) if name in over else "default"
+        if text.lower() == "default":
+            if name not in settings.SETTINGS:
+                await self.reply(ctx, f"Unknown setting {escape(name)}. /settings lists them.")
+                return
+            await self._ask(ctx, "set", {"name": name, "value": None, "reset": True},
+                            f"Put <b>{escape(name)}</b> back to its default (now {escape(now)})?")
+            return
+        try:
+            value = settings.parse(name, text)
+            settings.effective_sizing(self.control.app.sizing, {**over, name: value})   # the whole must be valid
+        except ValueError as e:
+            await self.reply(ctx, f"⚠️ {escape(str(e).splitlines()[-1])}")
+            return
+        s = settings.SETTINGS[name]
+        await self._ask(ctx, "set", {"name": name, "value": value, "reset": False},
+                        f"Set <b>{escape(name)}</b> to <b>{escape(settings.show(name, value))}</b> (now {escape(now)})?"
+                        f"\n{escape(s.help)}. Applies: {escape(s.applies)}.")
+
+    async def c_scannow(self, ctx: Ctx, args: list[str]) -> None:
+        from bot.scout.service import SCAN_NOW
+
+        p = self._state_dir() / SCAN_NOW
+        p.parent.mkdir(parents=True, exist_ok=True)
+        p.touch()
+        await self.reply(ctx, "🔎 The scout starts a scan within 15 s (if it runs on this machine). /top3 shows the "
+                         "result when it is done.")
 
     async def c_menu(self, ctx: Ctx, args: list[str]) -> None:
         await self.reply(ctx, "☰ <b>Menu</b> — pick an action, or /help for every command.", menu_keyboard())
@@ -444,7 +522,7 @@ class TelegramBot:
             await self.reply(ctx, "No bot is running.")
             return
         await self._ask(ctx, "stop", {"mode": mode}, f"Stop the <b>{mode.upper()}</b> bot? It cancels its quotes and "
-                        "keeps positions (close them with /flatten if you want to be flat).")
+                        "keeps positions (close them with /closeall if you want to be flat).")
 
     async def c_resume(self, ctx: Ctx, args: list[str]) -> None:
         mode, rest = await self._need_mode(ctx, args)
@@ -511,16 +589,16 @@ class TelegramBot:
     async def c_cancelall(self, ctx: Ctx, args: list[str]) -> None:
         mode, venue, _ = self._venue_mode(args)
         if mode in (None, "paper"):
-            await self.reply(ctx, "Cancel-all acts on a real account (live or testnet). For paper use /pause or /stop.")
+            await self.reply(ctx, "Cancel-all acts on a real account (live or testnet). For paper use /pauseneworders or /stop.")
             return
         await self._ask(ctx, "cancelall", {"mode": mode, "venue": venue},
                         f"Cancel EVERY open order on {venue} ({'MAINNET' if mode == 'live' else 'testnet'})? "
-                        "A running bot will re-quote on its next tick unless you /pause it first.")
+                        "A running bot will re-quote on its next tick unless you /pauseneworders first.")
 
     async def c_flatten(self, ctx: Ctx, args: list[str]) -> None:
         mode, venue, rest = self._venue_mode(args)
         if mode in (None, "paper"):
-            await self.reply(ctx, "Flatten acts on a real account (live or testnet). On paper, /pause lets the exit "
+            await self.reply(ctx, "Close-all acts on a real account (live or testnet). On paper, /pauseneworders lets the exit "
                              "orders work the position off.")
             return
         taker = any(a.lower() == "taker" for a in rest)
@@ -570,7 +648,7 @@ class TelegramBot:
                 await self.reply(ctx, escape(str(e)))
                 return
             if f"{c['market']}|{c['config']}" != a["key"]:
-                await self.reply(ctx, "The top 3 changed since you picked. Open /scout again.")
+                await self.reply(ctx, "The top 3 changed since you picked. Open /top3 again.")
                 return
             await self.reply(ctx, f"🚀 Deploying {escape(c['market'])} ({'LIVE' if a['live'] else 'paper'})…")
 
@@ -597,6 +675,26 @@ class TelegramBot:
             await self.reply(ctx, f"🚀 Starting <b>{escape(a['name'])}</b> ({'LIVE' if a['live'] else 'paper'}), "
                              f"pid {rec['pid']}. I'll confirm when its heartbeat appears.")
             self._spawn(self._watch_start(ctx, rec, "live" if a["live"] else "paper"))
+        elif p.action == "set":
+            from bot.scout.capital import forget
+            from bot.scout.service import SCAN_NOW
+
+            name = a["name"]
+            try:
+                if a.get("reset"):
+                    settings.reset(self._state_dir(), name)
+                else:
+                    settings.save(self._state_dir(), name, a["value"], self.control.app.sizing)
+            except ValueError as e:
+                await self.reply(ctx, f"⚠️ {escape(str(e))}")
+                return
+            if settings.SETTINGS[name].field:   # a sizing setting: rescan at the new numbers now
+                forget(self._state_dir())
+                (self._state_dir() / SCAN_NOW).touch()
+            over = settings.load(self._state_dir())
+            shown = settings.show(name, over[name]) if name in over else "its default"
+            await self.reply(ctx, f"✅ <b>{escape(name)}</b> is now {escape(shown)}. "
+                             f"Applies: {escape(settings.SETTINGS[name].applies)}.", refresh_keyboard("settings"))
         elif p.action in ("cancelall", "flatten"):
             await self.reply(ctx, "⏳ Sending to the venue…")
 

@@ -13,6 +13,9 @@ Operations for the VPS deployment (`/opt/bot`, systemd). Commands assume `cd /op
 | `bot-guardian` | Separate process watching the LIVE heartbeat (`state/heartbeat.live`). If it is silent for 60 s, or the drawdown limit is hit, it cancels all orders and alerts. | yes (read + cancel) |
 | `bot-telegram` | Telegram control bot (§9): status, pause/stop/run, cancel-all/flatten and live alerts on your phone. | yes, for cancel-all / flatten / doctor |
 
+Without systemd (e.g. a Mac as the server): `bot up` starts the scout, the Telegram bot and, while a live bot runs,
+the guardian in the background; `bot status` shows everything on one screen; `bot down [--all]` stops them.
+
 ```bash
 sudo systemctl status bot-recorder bot bot-guardian
 journalctl -u bot -f -o cat | jq -c 'select(.level!="DEBUG")'     # JSON logs; secrets are redacted
@@ -127,23 +130,27 @@ holds no trading state, so restarting it never touches the bot.
    the group chat can send commands). `BOT_PILOT_LIVE=1` to allow live deployments from the Run buttons.
 4. `$A telegram` (or `sudo systemctl enable --now bot-telegram`). It posts "control bot online" with the status.
 
-**Commands** (`/menu` shows buttons; commands act on the running bot, live first; add `paper`/`testnet`/`live`)
+**Commands** (`/menu` shows buttons; commands act on the running bot, live first; add `paper`/`testnet`/`live`; the earlier
+names `/scout`, `/pilot`, `/report`, `/pause`, `/resume`, `/flatten` still work)
 
 | Command | What happens |
 |---|---|
-| `/scout` | The 3 best setups right now (backtested), with Run buttons: Paper = confirm button, LIVE = `BOT_PILOT_LIVE=1`, doctor, typed code |
-| `/pilot` | What is deployed, today's PnL vs the backtest, the last check; Close & stop |
+| `/top3` | The 3 best setups right now (backtested), with Run buttons: Paper = confirm button, LIVE = `BOT_PILOT_LIVE=1`, doctor, typed code |
+| `/openpositions` | What is deployed, today's PnL vs the backtest, the last check; Close & stop |
 | `/status`, `/pnl`, `/positions`, `/orders` | What is running, today's PnL, fills and maker volume; PnL by market since start |
-| `/sessions`, `/logs [n]`, `/report [date]` | Session files; latest decisions; the daily report |
-| `/pause [MARKET]` | Quoting stops within a second; reduce-only exit orders keep working off any position. Persists across restarts. |
+| `/sessions`, `/logs [n]`, `/yesterdayreport [date]` | Session files; latest decisions; the daily report (yesterday by default) |
+| `/pauseneworders [MARKET]` | Quoting stops within a second; reduce-only exit orders keep working off any position. Persists across restarts. |
 | `/unpause [MARKET]` | Quoting again |
 | `/stop` | Confirm button, then a clean shutdown: quotes cancelled, positions kept. SIGINT fallback after 25 s. |
-| `/resume` | Confirm button: clears safe mode / drawdown stop (same as `bot resume`). Look at `/logs` first. |
+| `/resumeaftersl` | Confirm button: clears safe mode / drawdown stop (same as `bot resume`). Look at `/logs` first. |
 | `/run NAME` / `/run NAME live` | Paper: confirm button. Live: the session needs `live_enabled: true`, `doctor` must pass, then you type a one-time code. |
 | `/doctor NAME` | Live readiness check (reads only) |
 | `/cancelall [venue]` | Confirm button: cancels every open order on the account (live/testnet only) |
-| `/flatten [venue] [taker]` | One-time code: cancels everything, then closes every position reduce-only (maker, or IOC with `taker`) |
+| `/closeall [venue] [taker]` | One-time code: cancels everything, then closes every position reduce-only (maker, or IOC with `taker`) |
 | `/alerts`, `/mute [min]`, `/unmute` | Alert settings |
+| `/balance` | The account read now and logged (state/balances.jsonl): equity, deposits vs trading PnL, 1/7/30-day change |
+| `/settings`, `/set NAME VALUE` | Change capital, trade_share, max_capital, the stops, scan_every, scan_workers (Confirm button; `/set NAME default` undoes) |
+| `/scannow` | Ask the scout for a scan now |
 
 **Alerts it sends by itself** (critical ones ignore `/mute`)
 
@@ -170,13 +177,15 @@ Run these from this folder (`bot/`, where `docker-compose.yml` is), one at a tim
 | `docker compose logs -f scout` | What it is doing |
 | `cat data/scout/report.txt` | The latest ranking: best per market, then each market at its max leverage |
 | `ls data/scout/reports/` | The last scan of each UTC day |
-| `docker compose down` | Stop; it finishes the scan in progress and writes out its buffers |
+| `docker compose down` | Stop; a scan in progress stops at once (finished days stay cached) and the recorder writes out its buffers |
 
 Don't paste trailing `# comments` into zsh: by default it passes them to the command as arguments
 ("no such service: #").
 
 - Seed it with the history from the laptop first: copy `data/scout/tape/` (a few hundred MB) into the same place.
-- `SCOUT_WORKERS=8 docker compose up -d` uses more cores for the scans.
+- Scans use all cores but one by default, at the lowest CPU priority, and one core while a trading bot runs on the
+  same machine; `SCOUT_WORKERS=2 docker compose up -d` caps them. Each 30-minute scan re-runs the last 24 h only for
+  the setups that pass on their full days; the full search over every setup runs once a day.
 - `SCOUT_CAPITAL=500 docker compose up -d` ranks for a $500 account. The default, `auto`, reads the subaccount's
   equity, but the container has no keys, so it uses the $100 paper capital (`sizing` in `config/app.yaml`).
 - Disk: about 0.2-0.5 GB/day with depth recording, about 0.1 GB/day without. Recording pauses by itself under 5 GB free;

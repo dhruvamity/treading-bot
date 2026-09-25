@@ -13,9 +13,10 @@ import math
 from collections import deque
 from dataclasses import dataclass, field, replace
 from decimal import Decimal
+from pathlib import Path
 from typing import Any
 
-from bot.common import sizing
+from bot.common import settings, sizing
 from bot.common.config import DNSession, MMSession, RiskLimitsCfg
 from bot.common.ids import ClientIdFactory
 from bot.common.logging import DecisionLog, Log
@@ -110,6 +111,7 @@ class SessionEngine:
         self.size_capital = self.capital
         self.sized_day: str | None = None
         self.too_small = ""
+        self.settings_dir: Path | None = None   # the runner sets it: the owner's Telegram settings (common/settings)
         self._wire_risk_context()
 
     # ---------------------------------------------------------------- wiring
@@ -183,10 +185,11 @@ class SessionEngine:
         if eq <= 0:
             return  # no account read yet
         self.sized_day = day
-        z = s.sizing
+        z, fixed = self._recipe(s)
         ok, _, ok_market = (self.state.kv_get("sizing_ok") or "").partition(":")
         covered = max(z.backtest_capital_usd, float(ok) if ok and ok_market == self.base else 0.0)
-        cap = sizing.target_capital(eq, frac=z.capital_frac, max_capital=z.max_capital_usd, covered=covered)
+        cap = sizing.target_capital(min(eq, fixed) if fixed else eq, frac=z.capital_frac,
+                                    max_capital=z.max_capital_usd, covered=covered)
         if cap < z.min_capital_usd:
             self.too_small = (f"equity ${eq:,.2f} is under the ${z.min_capital_usd:,.2f} {self.base} needs at this "
                               "leverage (Arcus minimum order)")
@@ -196,7 +199,7 @@ class SessionEngine:
                 self.alerter.warn("sizing", self.too_small)
             return
         self.too_small = ""
-        out = sizing.apply(s, cap)
+        out = sizing.apply(s, cap, z)
         self.size_capital = Decimal(str(round(out.capital, 2)))
         lim = self.risk.market_limits.get((self.venue, self.base))
         if lim is not None:
@@ -208,6 +211,27 @@ class SessionEngine:
         self.decisions.record("resize", msg, venue=self.venue.value, market=self.base, session=self.sid, ts_us=now_us)
         log.info("resize", venue=self.venue.value, market=self.base, session=self.sid,
                  data={"equity": eq, "capital": out.capital, "order": s.order_size_usd, "cap": s.inventory_cap_usd})
+
+    def _recipe(self, s: MMSession) -> tuple[Any, float | None]:
+        """The session's sizing recipe with the owner's Telegram settings applied (share of the balance, the cap, the
+        stops), and a fixed capital if the owner set one (the bot then sizes for at most that)."""
+        z = s.sizing
+        assert z is not None
+        if self.settings_dir is None:
+            return z, None
+        over = settings.load(self.settings_dir)
+        pick: dict[str, Any] = {}
+        if "trade_share" in over:
+            pick["capital_frac"] = over["trade_share"] / 100
+        if "max_capital" in over:
+            pick["max_capital_usd"] = over["max_capital"]
+        for name, fld in (("position_stop", "position_stop_pct"), ("daily_stop", "daily_stop_pct"),
+                          ("kill", "kill_pct")):
+            if name in over:
+                pick[fld] = over[name]
+        z = z.model_copy(update=pick) if pick else z
+        cap = over.get("capital")
+        return z, float(cap) if isinstance(cap, (int, float)) else None
 
     # ---------------------------------------------------------------- context
     def build_ctx(self, now_us: int) -> StrategyContext | None:

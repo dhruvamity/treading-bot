@@ -1,10 +1,11 @@
 """Bot command line (`bot <command>`). Run `bot -h` for the list.
 
-    bot sessions                  what can run
-    bot doctor arcus_btc_mm       is everything ready for live? (reads only)
-    bot run arcus_btc_mm          paper: live market data, simulated orders
-    bot run arcus_btc_mm --live   real money: doctor must pass, then you type LIVE
-    bot status                    what is running
+    bot up                        start everything this machine should run (scout, Telegram, guardian)
+    bot status                    one screen: services, trading bot, what is deployed, last scan, balance
+    bot pilot approve 1 [--live]  trade the scout's #1 setup (paper, or real money)
+    bot pilot close               close the position and stop trading
+    bot down [--all]              stop the services (--all: the trading bot too, positions kept)
+    bot doctor pilot              is everything ready for live? (reads only)
 
 Commands that touch a real account (cancel-all, flatten) ask for CONFIRM.
 """
@@ -234,11 +235,53 @@ def cmd_run(a: argparse.Namespace) -> None:
         sys.exit(2)
 
 
+def cmd_up(a: argparse.Namespace) -> None:
+    """Start, in the background, every service this machine should run (bot/ops.py); then show the status."""
+    from bot import ops
+    from bot.telegram.control import Control
+
+    app = load_app()
+    live = Control(app).is_running("live")
+    for name, why in ops.wanted(app, dict(os.environ), live).items():
+        print(f"{ops.start(app, name)[1]}  [{why}]")
+    for name, why in ops.skipped(dict(os.environ), live).items():
+        print(f"{name}: not started ({why})")
+    print("\n" + ops.dashboard(app, dict(os.environ), Path.cwd()))
+
+
+def cmd_down(a: argparse.Namespace) -> None:
+    """Stop the services; --all also stops the trading bot (quotes cancelled, positions kept) and its guardian."""
+    from bot import ops
+    from bot.telegram.control import Control
+
+    app = load_app()
+    ctl = Control(app)
+    if a.all:
+        for mode in ctl.running_modes():
+            ctl.request_stop(mode, "bot down --all")
+            print(f"{mode} trading bot: stop requested (quotes cancelled, positions kept)")
+        t0 = time.time()
+        while ctl.running_modes() and time.time() - t0 < 30:
+            time.sleep(1)
+        for mode in ctl.running_modes():
+            print(f"{mode} trading bot: still running after 30 s; check `bot status`")
+    names = ["telegram", "scout"] + (["guardian"] if a.all or not ctl.is_running("live") else [])
+    for name in names:
+        print(ops.stop(app, name)[1])
+    if "guardian" not in names:
+        print("guardian: left running, it watches the live bot (bot down --all stops both)")
+
+
 def cmd_status(a: argparse.Namespace) -> None:
     from bot.core.heartbeat import heartbeat_process_alive, read_heartbeat_age_s
     from bot.core.state import StateStore
 
     app = load_app()
+    if not a.json:
+        from bot import ops
+
+        print(ops.dashboard(app, dict(os.environ), Path.cwd()))
+        return
     modes = [a.mode] if a.mode else ["live", "testnet", "paper"]
     out: dict[str, Any] = {}
     for m in modes:
@@ -485,6 +528,15 @@ def cmd_telegram(a: argparse.Namespace) -> None:
     _run(go())
 
 
+def _workers_arg(v: str) -> int | str:
+    if v.lower() == "auto":
+        return "auto"
+    n = int(v)
+    if n < 1:
+        raise argparse.ArgumentTypeError("--workers must be auto or at least 1")
+    return n
+
+
 def cmd_scout(a: argparse.Namespace) -> None:
     """Record every Arcus perp, backtest the strategy menu on each, rank what to run now."""
     from bot.scout.scan import scan, table
@@ -513,13 +565,20 @@ def cmd_scout(a: argparse.Namespace) -> None:
                 if pid.read_text() == str(os.getpid()):
                     pid.unlink()
     elif a.action == "scan":
+        from bot.common import settings
         from bot.scout.capital import account_equity, choose
+        from bot.scout.service import scan_workers
+        from bot.telegram.control import Control
 
-        spec = a.capital or app.sizing.capital_usd
+        over = settings.load(app.state_dir)
+        z = settings.effective_sizing(app.sizing, over)
+        spec = a.capital or over.get("capital") or z.capital_usd
         eq = _run(account_equity(load_arcus_config().rest.mainnet)) if str(spec).lower() == "auto" else None
-        cap, src = choose(spec, eq, app.sizing)
-        res = scan(root / "data" / "scout", workers=a.workers, markets=a.markets or None, ladder=not a.max_only,
-                   capital=cap, pct=app.sizing.pct(), capital_source=src)
+        cap, src = choose(spec, eq, z)
+        n = scan_workers(a.workers if a.workers != "auto" else over.get("scan_workers"),
+                         bool(Control(app).running_modes()))
+        res = scan(root / "data" / "scout", workers=n, markets=a.markets or None, ladder=not a.max_only,
+                   capital=cap, pct=z.pct(), capital_source=src, shortlist=not a.full)
         save_scan(root, res)
         print(table(res, a.limit))
     elif a.action == "limits":
@@ -530,7 +589,8 @@ def cmd_scout(a: argparse.Namespace) -> None:
         from bot.scout.bootstrap import import_arcusmm
         from bot.scout.tape import TapeStore
 
-        rows = import_arcusmm(Path(a.src), TapeStore(root / "data" / "scout" / "tape"), workers=a.workers)
+        rows = import_arcusmm(Path(a.src), TapeStore(root / "data" / "scout" / "tape"),
+                              workers=a.workers if isinstance(a.workers, int) else 4)
         print(f"imported {len(rows)} market-day files from {a.src}")
 
 
@@ -719,8 +779,12 @@ def build_parser() -> argparse.ArgumentParser:
     sp.add_argument("--adopt-positions", action="store_true", help="an existing position is the bot's to manage")
     sp.add_argument("--seconds", type=float, help="stop after this long")
     sp.add_argument("--state-db", help=argparse.SUPPRESS)
-    sp = add("status", cmd_status, "what is running per mode: heartbeat, open orders, positions")
+    sp = add("up", cmd_up, "start everything this machine should run: scout, Telegram bot, guardian (background)")
+    sp = add("down", cmd_down, "stop the scout and the Telegram bot; --all also stops the trading bot (positions kept)")
+    sp.add_argument("--all", action="store_true")
+    sp = add("status", cmd_status, "one screen: services, trading bot, what is deployed, last scan, balance")
     sp.add_argument("--mode", choices=["live", "testnet", "paper"])
+    sp.add_argument("--json", action="store_true", help="the per-mode details as JSON (heartbeat, orders, positions)")
     sp = add("selftest", cmd_selftest, "prove Arcus accepts every signed request the bot sends (no trading)")
     sp.add_argument("--account", type=int, help="subaccount (default: the one your key is bound to)")
     sp.add_argument("--market", default="BTC")
@@ -746,7 +810,10 @@ def build_parser() -> argparse.ArgumentParser:
                          "most capital each market can use; import: old recordings")
     sp.add_argument("src", nargs="?", default="../../arcus-mm", help="import: the arcus-mm folder")
     sp.add_argument("--every-min", type=float, default=30)
-    sp.add_argument("--workers", type=int, default=4)
+    sp.add_argument("--workers", type=_workers_arg, default="auto",
+                    help="processes a scan may use: auto (all cores but one; one while a bot runs here) or a number")
+    sp.add_argument("--full", action="store_true",
+                    help="scan: re-run the last 24 h for every setting, not only those passing on their full days")
     sp.add_argument("--markets", nargs="*")
     sp.add_argument("--limit", type=int, default=25)
     sp.add_argument("--max-only", action="store_true",

@@ -386,3 +386,32 @@ async def test_scout_run_button_needs_confirm_and_deploys_paper(tmp_path: Path) 
     assert calls == [(1, False)]
     await bot.handle(press("deploy 1 live"))
     assert "Live is off" in api.texts()                                 # BOT_PILOT_LIVE not set
+
+
+# ------------------------------------------------------------------------------------------------ command names
+async def test_the_renamed_commands_work_and_the_old_names_still_do(tmp_path: Path) -> None:
+    import re
+
+    from bot.telegram.bot import ALIASES
+    from bot.telegram.views import COMMANDS, HELP, menu_keyboard
+
+    names = [n for n, _ in COMMANDS]
+    assert {"top3", "openpositions", "yesterdayreport", "pauseneworders", "resumeaftersl", "closeall"} <= set(names)
+    assert not set(ALIASES) & set(names)                     # old names work but are not in Telegram's menu
+    assert all(re.fullmatch(r"[a-z0-9_]{1,32}", n) for n in names)   # Telegram's rule for command names
+    for old in ALIASES:
+        assert f"/{old} " not in HELP and f"/{old}\n" not in HELP
+    buttons = {data.split()[0] for row in menu_keyboard() for _, data in row}
+    assert not buttons & set(ALIASES)                        # the menu buttons use the new names
+
+    app = _app(tmp_path)
+    _running_paper(tmp_path, app)
+    bot, api, ctl = _bot(tmp_path, app)
+    await bot.handle(msg("/pauseneworders AMD"))
+    assert json.loads(ctl._kv_get("paper", "paused") or "{}") == {"AMD": "Telegram (owner)"}
+    await bot.handle(msg("/pause"))                          # the old name: same command
+    assert set(json.loads(ctl._kv_get("paper", "paused") or "{}")) == {"AMD", "*"}
+    await bot.handle(msg("/yesterdayreport"))
+    assert "report" in api.sent[-1][1].lower()
+    await bot.handle(msg("/closeall"))
+    assert "real account" in api.sent[-1][1]                 # paper: close-all is refused, as flatten was
