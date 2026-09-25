@@ -348,6 +348,15 @@ def test_calendar_sessions_and_ist() -> None:
     assert in_ist_windows(ist, ["22:00-12:00"])  # wraps midnight
     assert in_ist_windows(ist, [])
 
+    us = ["09:00-16:30"]
+    assert cal.in_skip_window(et(2026, 9, 23, 9), us) == "09:00-16:30"      # a trading day, 09:00 New York
+    assert cal.in_skip_window(et(2026, 9, 23, 8, 59), us) is None
+    assert cal.in_skip_window(et(2026, 9, 23, 16, 30), us) is None           # the end is not in the window
+    assert cal.in_skip_window(et(2026, 9, 26, 12), us) is None               # Saturday
+    assert cal.in_skip_window(et(2026, 11, 26, 12), us) is None              # Thanksgiving
+    assert cal.in_skip_window(et(2026, 11, 27, 9, 30), us) == "09:00-16:30"  # an early close still opens
+    assert cal.in_skip_window(et(2026, 12, 7, 10), us) and cal.in_skip_window(et(2026, 12, 7, 10), []) is None
+
 
 def test_alerter_rate_limit_and_redaction() -> None:
     a = Alerter(min_interval_s=30)

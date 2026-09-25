@@ -8,9 +8,11 @@ from bot.common.config import MMSession
 
 
 def make_strategy(session: MMSession) -> Any:
+    from bot.strategies.anchor import AnchorStrategy
     from bot.strategies.grid import GridStrategy
     from bot.strategies.mid import MidStrategy
     from bot.strategies.rgrid import RGridStrategy
     from bot.strategies.signal import SignalStrategy
 
-    return {"mid": MidStrategy, "grid": GridStrategy, "rgrid": RGridStrategy, "signal": SignalStrategy}[session.mode](session)
+    return {"mid": MidStrategy, "grid": GridStrategy, "rgrid": RGridStrategy, "signal": SignalStrategy,
+            "anchor": AnchorStrategy}[session.mode](session)

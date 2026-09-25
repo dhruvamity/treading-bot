@@ -49,21 +49,29 @@ from bot.common.sizing import Pct, bucket, min_capital, venue_min_usd
 from bot.scout.sim import Config, MarketInfo, Risk, S, Sim, SimParams, Window
 from bot.scout.tape import US_DAY, TapeStore, day_start_us, day_str
 
-SIM_VERSION = "6"          # bump when the simulator changes, so cached day results are recomputed
+SIM_VERSION = "7"          # bump when the simulator changes, so cached day results are recomputed
 ALIVE_MARKET = "BTC-USD"   # busiest book: its rows show when the recorder was up
 LEV_CAPS = {"BTC-USD": 20.0, "ETH-USD": 20.0}   # owner: the crypto majors never above 20x
 LADDER = (20.0, 10.0, 5.0, 2.0)                 # tested below each market's maximum
 HOLIDAYS_CSV = Path(__file__).resolve().parents[2] / "config" / "calendars" / "nyse_holidays.csv"
+US_SESSION = ("09:00-16:30",)   # New York time on NYSE trading days: the cash session, half an hour either side
+SKIP_US = ", skip US session"
 MENU: list[Config] = [
     *(Config(f"deep {d:g}bp", "mid", spacing_bps=d) for d in (1, 1.5, 2, 3, 5)),
     *(Config(f"deep {d:g}bp, no pause", "mid", spacing_bps=d, safety=False) for d in (1.5, 3)),
     Config("deep 3bp, skew", "mid", spacing_bps=3, kappa=1.0),
     *(Config(f"deep {d:g}bp x2", "mid", spacing_bps=d, levels=2, level_step_bps=3) for d in (2, 4)),
-    *(Config(f"touch {d:g}bp", "mid", style="normal", spacing_bps=d) for d in (1, 3)),
+    Config("touch 1bp", "mid", style="normal", spacing_bps=1),
     Config("improve touch", "mid", style="aggressive"),
-    *(Config(f"grid {d:g}bp", "grid", spacing_bps=d, levels=3) for d in (10, 25)),
+    # quotes around the last fill, soft reset after a 0.1% run against the position (the Grid of Tread users)
+    *(Config(f"anchor {d:g}bp", "anchor", spacing_bps=d, reset_pct=0.1, safety=False) for d in (3, 5)),
     *(Config(f"rgrid {d:g}bp", "rgrid", spacing_bps=d) for d in (5, 15)),
     Config("rsi signal", "signal"),
+    # the same settings with no new quotes while US stocks trade (most of the losses on stock and index perps)
+    Config("deep 3bp, skew" + SKIP_US, "mid", spacing_bps=3, kappa=1.0, skip_et=US_SESSION),
+    Config("deep 1.5bp, no pause" + SKIP_US, "mid", spacing_bps=1.5, safety=False, skip_et=US_SESSION),
+    Config("touch 1bp" + SKIP_US, "mid", style="normal", spacing_bps=1, skip_et=US_SESSION),
+    Config("improve touch" + SKIP_US, "mid", style="aggressive", skip_et=US_SESSION),
 ]
 BY_NAME = {c.name: c for c in MENU}
 
@@ -111,13 +119,15 @@ def leverages(m: dict[str, Any]) -> list[tuple[float, float]]:
     return [(lev, off)] + [(x, min(x, off)) for x in LADDER if x < lev - 1e-9]
 
 
-def load_holidays(path: Path | None = None) -> list[str]:
-    """NYSE holidays (no session that day). The project's config/ from the working directory, else the package's."""
+def load_holidays(path: Path | None = None, *, full_only: bool = False) -> list[str]:
+    """NYSE holidays (no session that day). The project's config/ from the working directory, else the package's.
+    full_only: leave out the early-close days (they still have a session: the skip windows apply)."""
     for p in ([path] if path else [Path("config/calendars/nyse_holidays.csv"), HOLIDAYS_CSV]):
         try:
-            return [ln.split(",")[0] for ln in p.read_text().splitlines()[1:] if ln.strip()]
+            rows = [ln.split(",") for ln in p.read_text().splitlines()[1:] if ln.strip()]
         except OSError:
             continue
+        return [r[0] for r in rows if not (full_only and len(r) > 2 and r[2].strip())]
     return []
 
 
@@ -250,7 +260,8 @@ def _run_window(args: tuple[Any, ...]) -> dict[str, list[dict[str, Any]]]:
     store = TapeStore(root)
     tape = store.load_range(market, start - 2 * 3600 * S, end)
     alive = store.load_range(ALIVE_MARKET, start - 2 * 3600 * S, end).bbo["ts"]
-    w = Window(tape, start, end, alive_ts=alive, rth=session_mask(rth_spec, holidays))
+    w = Window(tape, start, end, alive_ts=alive, rth=session_mask(rth_spec, holidays),
+               holidays=load_holidays(full_only=True))
     out: dict[str, list[dict[str, Any]]] = {}
     for r in risks:
         res = []
@@ -772,11 +783,11 @@ def table(res: dict[str, Any], limit: int = 25) -> str:
         lines.append(f"last 24 h re-run for the {res['rechecked_24h']} of {res.get('setups', '?')} setups that pass "
                      "on their full days (24h shows - for the rest)")
     lines.append("")
-    head = (f"{'':3}{'market':<12} {'setting':<30} {'uses':>7} {'order':>6} {'fills/d':>7} {'volume/d':>9} "
+    head = (f"{'':3}{'market':<12} {'setting':<42} {'uses':>7} {'order':>6} {'fills/d':>7} {'volume/d':>9} "
             f"{'pnl/d':>7} {'worst':>7} {'24h':>6}  why not")
 
     def rows(cs: list[dict[str, Any]]) -> list[str]:
-        return [f"{i:>2} {c['market']:<12} {c['config']:<30} {c.get('used_usd', 0):>7,.0f} "
+        return [f"{i:>2} {c['market']:<12} {c['config']:<42} {c.get('used_usd', 0):>7,.0f} "
                 f"{c.get('order_usd', 0):>6,.0f} {c['fills_day']:>7.0f} {c['volume_day']:>9,.0f} "
                 f"{c['pnl_day']:>+7.2f} {c['worst_day']:>+7.2f} "
                 f"{(format(c['recent_pnl'], '+6.2f') if c.get('recent_checked', True) else '-'):>6}  "

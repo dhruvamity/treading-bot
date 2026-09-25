@@ -17,6 +17,7 @@ STRATEGY_CODES = {
     "grid": "g",
     "rgrid": "r",
     "signal": "s",
+    "anchor": "a",
     "manual": "x",
     "probe": "q",
     "guardian": "z",

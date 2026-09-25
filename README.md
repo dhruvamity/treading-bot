@@ -64,7 +64,7 @@ interval without editing files). [Section 9](#9-the-telegram-bot) has them all.
 ```mermaid
 flowchart LR
     A[Arcus WebSocket<br/>best bid/offer + trades<br/>all perps] --> B[Scout recorder<br/>data/scout/tape]
-    B --> C[Backtest every 30 min<br/>18 settings x leverage ladder<br/>x every market]
+    B --> C[Backtest every 30 min<br/>21 settings x leverage ladder<br/>x every market]
     C --> D[GO checks + ranking<br/>data/scout/report.txt]
     D --> E[Top 3 offered<br/>CLI or Telegram]
     E -->|you approve| F[Pilot writes<br/>config/sessions/pilot.yaml]
@@ -216,7 +216,7 @@ best per market (any leverage up to the max):
 
 | Column | Meaning |
 |---|---|
-| setting | The strategy setting ([section 7.2](#72-the-scout-menu-18-settings)) and the leverage it was sized at |
+| setting | The strategy setting ([section 7.2](#72-the-scout-menu-21-settings)) and the leverage it was sized at |
 | order | Dollar size of each order |
 | fills/d, volume/d | Average maker fills and maker volume (USD) per full day |
 | pnl/d, worst | Average and worst daily PnL in USD, after fees and after closing any leftover position |
@@ -317,7 +317,11 @@ For each market, each setting and each UTC day (each day starts flat, with 2 hou
   governor doubles the requote tolerance when actions per filled dollar get too high and allows cancels only when the
   pool is nearly empty, exactly like the live governor.
 - **Risk rules.** The same stops as live ([section 6.1](#61-the-stops-backtest-and-live)), plus the safety
-  pause, the liquidation-distance cut and liquidation itself.
+  pause (its move and spread rules; the recorded books carry no depth, so pilot sessions run without the live
+  thin-depth rule too), the liquidation-distance cut and liquidation itself.
+- **Skip windows.** The "skip US session" settings place no new quotes from 09:00 to 16:30 New York time on NYSE
+  trading days (DST handled, full holidays excluded); a position is worked off with a reduce-only maker order at
+  the touch, as during a safety pause. The live engine applies the same rule (`session.skip_et`).
 - **Session hours.** Stock, index and commodity perps (RWA) need 1.5× the initial margin to open positions outside
   their session (04:00–20:00 New York time on weekdays; weekends and NYSE holidays are off-hours). The backtest
   shrinks the inventory cap and the order size there, as the live bot does.
@@ -513,7 +517,7 @@ re-computes the dollars from the account's equity at start and at 00:00 UTC ([4.
 | Position stop | 1% | $1 | The open position is down 1% of the capital from its average entry: cancel quotes, exit with a reduce-only maker order at the touch, cross the spread with a taker order after 20 s if it has not filled, then pause 60 s |
 | Daily stop | 2% | $2 | The day's PnL is below −2%: close the position the same way, no new orders until 00:00 UTC, then resume by itself |
 | Kill | 10% | $10 | Equity more than 10% below its peak: close everything with a taker order and stop until you resume it |
-| Safety pause | on | — | Spread over 3× its 1-hour median (and more than 1 bp above it) or a 1-second move over 6σ: no quotes for 30 s |
+| Safety pause | on | — | Spread over 3× its 1-hour median (and more than 1 bp above it) or a 1-second move over 6σ: no quotes for 30 s. Hand-written sessions also pause when the depth within 25 bps falls under 30% of its median; pilot sessions do not, because the backtest cannot model it |
 | Liquidation distance | 4σ | — | Distance to liquidation below 4σ of 1-hour moves: cut half the position at market; re-armed above 6σ |
 | Position caps | 1.2× / 1.25× | — | No new order that could take the position past 1.2× the cap; the risk engine rejects anything past 1.25× |
 
@@ -570,7 +574,7 @@ drawdown 10%.
 - **Requote tolerance.** A live order is kept (keeping its queue place) while it is within max(2 ticks,
   0.25 × half-spread) of the wanted price and within 20% of the wanted size; otherwise it is replaced.
 
-### 7.2 The scout menu (18 settings)
+### 7.2 The scout menu (21 settings)
 
 Every setting runs at every leverage on the ladder, so the report labels look like `deep 3bp, skew @ 10x`.
 
@@ -580,11 +584,16 @@ Every setting runs at every leverage on the ladder, so the report labels look li
 | `deep 1.5bp, no pause`, `deep 3bp, no pause` | same, safety pause off | as above, also through volatile moments |
 | `deep 3bp, skew` | mid, passive, κ 1 | as `deep 3bp`, quotes shifted against inventory |
 | `deep 2bp x2`, `deep 4bp x2` | mid, passive, 2 levels | levels at d and d + 3 bps each side |
-| `touch 1bp`, `touch 3bp` | mid, normal | mid ± max(d, half the spread) |
+| `touch 1bp` | mid, normal | mid ± max(1 bp, half the spread): at the touch when the spread is over 2 bps |
 | `improve touch` | mid, aggressive | one tick inside the best bid and ask |
-| `grid 10bp`, `grid 25bp` | grid, 3 levels | static geometric grid |
+| `anchor 3bp`, `anchor 5bp` | anchor, safety pause off | around the **last fill** ± d, soft reset after a 0.1% run against it ([7.7](#77-anchor-quotes-around-the-last-fill-mode-anchor)) |
 | `rgrid 5bp`, `rgrid 15bp` | rgrid | trailing grid that cuts losing inventory |
 | `rsi signal` | signal | RSI mean reversion with maker entries |
+| `deep 3bp, skew, skip US session`, `deep 1.5bp, no pause, skip US session`, `touch 1bp, skip US session`, `improve touch, skip US session` | as the setting without it | the same quotes, but none from 09:00 to 16:30 New York time on NYSE trading days ([7.8](#78-what-tradefi-users-run-and-what-carries-over)) |
+
+On 2026-09-25 `grid 10bp`, `grid 25bp` and `touch 3bp` left the menu: across 4 days, 19 markets and five
+capital/stop scenarios they never made any of the three lists (`touch 3bp` quotes exactly like `deep 3bp` whenever
+the spread is under 6 bps). The `grid` mode itself is still there for hand-written sessions.
 
 ### 7.3 Mid (`mode: mid`)
 
@@ -640,6 +649,41 @@ RSI mean reversion, one position at a time:
   `max_hold_min` (120).
 - A cooldown (`cooldown_s`, 300 s) after each trade. Few orders, so it is light on the order budget.
 
+### 7.7 Anchor, quotes around the last fill (`mode: anchor`)
+
+The "Grid" that Tread.fi users run ("Grid +3", "Grid +5"): the reference price is your **last fill**, not the mid.
+
+- **Flat:** one bid and one ask at mid ± max(d, half the spread).
+- **Holding a position:** bid = last fill × (1 − d), ask = last fill × (1 + d). A sell never goes below the last buy
+  + d and a buy never above the last sell − d, so every completed round trip earns d. Each fill moves the reference,
+  so a falling market fills one more clip every d, up to the inventory cap.
+- **Soft reset:** once the mid has run more than `reset_threshold_pct` (the menu uses 0.1%) against the position
+  from the last fill, the grid has stalled: it stops adding and closes with a reduce-only maker order at the touch.
+  Flat again, it starts over around the mid. The position, daily and kill stops still apply on top.
+- d = `spacing_bps`. Safety pause off in the menu settings. After a restart with a position, its average entry
+  stands in for the last fill.
+- Measured: without the soft reset the grid stalls in trends and loses 2.4–4.0 bps per dollar traded; with it at 0.1%
+  it was about breakeven on stock perps at $300 (+0.27 bps with a 5% position stop). It earns its keep on NVDA and
+  SLV; on QQQ and SPY the deep quotes still did better.
+
+### 7.8 What Tread.fi users run, and what carries over
+
+In September 2026 the owner collected 46 posts from Tread.fi users and the Tread team (settings, screenshots, costs
+per $1M). Every idea was backtested on the recorded Arcus books (4 full days, 19 markets, about $30 and $300 of capital,
+the owner's stops) before anything changed. Arcus differs from their venues in two ways that matter: the maker fee
+is 0 (their costs include about 1 bp of fees), and its books are thin (QQQ trades about $1M a day, RiseX BTC about
+$40M).
+
+| Tread practice | On Arcus | What changed |
+|---|---|---|
+| "Avoid market hours with the grid bot during US equities market hours" (Tread team); "wait an hour after the open" | Confirmed. With stops wide open, the two hours after the US open lost $52 of the $60 the deep quotes lost on weekdays; weekends made money. With the real stops, skipping 09:00–16:30 New York time improved 339 of 455 market × setting × leverage combinations and cut the loss from 1.19 to 0.72 bps per dollar traded, keeping about 70% of the volume | Four "skip US session" settings; the scout picks them where they win (NVDA's top pick in the first test scan) |
+| Grid +N: quotes referenced to the last fill, soft reset | Works with the soft reset, mainly on NVDA and SLV | `anchor 3bp`, `anchor 5bp` |
+| Don't close aggressively on red PnL; stop loss 5–25% of margin per run | The 1% position stop is a 5 bp move on a full position at 25x on about $30: it fires several times a day and pays the taker fee each time. With the position stop at 5% the top two volume picks (QQQ, SPY) cost $0.03–0.04 per $1,000 instead of $0.10–0.12, with more volume | Nothing forced: `/set position_stop 5` if you accept the larger swings |
+| Mid −1 / "aggressive" for volume at $120–370 per $1M | Our `improve touch` / `touch 1bp` cost $0.03–0.13 per $1,000 ($30–130 per $1M): about their trading loss, without their fees | Live fix: `touch 1bp` sometimes quoted one tick behind the touch (float rounding); it now sits where the backtest assumes |
+| Pausing on volatility | The pause pulled quotes exactly when sweeps revert, where the deep quote earns: `deep 3bp, no pause` beat `deep 3bp` on QQQ | Pilot sessions no longer pause on thin depth, which the backtest cannot see |
+| BTC / crypto majors with DGrid | Lost in every hour of the day on Arcus (−2.3 bps) | Nothing: the volume list may still pick BTC within your budget |
+| Several small bots, DN (two-venue) bots, Blend with an outside price | Not allowed (one setup at a time, Arcus only) | Nothing |
+
 ---
 
 ## 8. Session files (configuration)
@@ -651,7 +695,7 @@ A session is one YAML file in `bot/config/sessions/`. The pilot writes `pilot.ya
 |---|---|
 | `session_id`, `venue`, `market` | Name, `arcus`, and the base asset (e.g. `QQQ` for QQQ-USD) |
 | `account_index` | Arcus subaccount 0–9 (must match the one your key is bound to; `bot keys`) |
-| `mode` | `mid`, `grid`, `rgrid` or `signal` |
+| `mode` | `mid`, `grid`, `rgrid`, `signal` or `anchor` |
 | `live_enabled` | Part of the live lock: required for unattended live starts |
 | `capital_usd`, `leverage_max` | Capital, and the leverage the runner sets on Arcus before quoting |
 | `order_size_usd`, `inventory_cap_usd` | Order size per level per side, and the inventory cap (`auto` = derived) |
@@ -663,9 +707,9 @@ A session is one YAML file in `bot/config/sessions/`. The pilot writes `pilot.ya
 | `stop_loss_pct`, `take_profit_pct` | Session-level stop and take-profit, in % of capital |
 | `participation_cap_pct` | Widen when your share of market volume is higher than this |
 | `safety_pause` | `move_sigma_1s`, `spread_x_median`, `depth_frac_min`, `resume_s` |
-| `session` | `duration`, `repeat`, `windows_ist` (trading windows) and `skip_events` (`cpi`, `fomc`, `nfp`, `earnings`) |
+| `session` | `duration`, `repeat`, `windows_ist` (trading windows, IST), `skip_et` (New York windows on NYSE trading days with no new quotes, e.g. `["09:00-16:30"]`) and `skip_events` (`cpi`, `fomc`, `nfp`, `earnings`) |
 | `off_hours` | `spacing_mult`, `size_mult`, `allow_mid` for RWA perps outside their session |
-| `reset_threshold_pct`, `recentre_after_s`, `recentre_inventory`, `rgrid_*` | Grid and RGrid ([7.4](#74-grid-mode-grid), [7.5](#75-rgrid-trailing-grid-mode-rgrid)) |
+| `reset_threshold_pct`, `recentre_after_s`, `recentre_inventory`, `rgrid_*` | Grid and RGrid ([7.4](#74-grid-mode-grid), [7.5](#75-rgrid-trailing-grid-mode-rgrid)); for anchor, `reset_threshold_pct` is the soft reset ([7.7](#77-anchor-quotes-around-the-last-fill-mode-anchor)) |
 | `signal`, `auto_spacing` | Signal's settings; the Grid/RGrid spacing when `spacing_bps: auto` |
 
 To change the account-wide numbers the scout uses (capital, stops), edit `Risk` in `bot/scout/sim.py`; to change the
@@ -838,11 +882,11 @@ Files: `data/scout/tape/<MARKET>/<YYYY-MM-DD>/{bbo,trades,depth}-*.npz`. Arcus s
 Each scan (the first one 10 s after start):
 
 1. Takes every market with at least one full recorded UTC day.
-2. Backtests **all 18 settings** ([7.2](#72-the-scout-menu-18-settings)) at **every leverage on the ladder**: the
+2. Backtests **all 21 settings** ([7.2](#72-the-scout-menu-21-settings)) at **every leverage on the ladder**: the
    market's maximum, then 20x, 10x, 5x and 2x (BTC and ETH at most 20x). It sizes them for the **capital** in
    `SCOUT_CAPITAL` (default `auto`: the Docker container has no keys, so that means the $100 paper capital; set
    `SCOUT_CAPITAL=500` to rank for a $500 account). With today's 58 markets that is 178
-   market-leverage pairs and **3,204 backtests per window**.
+   market-leverage pairs and **3,738 backtests per window**.
 3. The windows are each of the last **7 full days** (computed once per day, then cached) and the **last 24 hours**.
    The last 24 hours is re-run only for the setups that pass on their full days (about 3–6% of them, measured), and
    for whatever is deployed: a setup that already fails on its full days cannot become GO, so re-running it would

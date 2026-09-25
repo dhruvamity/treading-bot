@@ -127,7 +127,8 @@ Doc conflicts (so modify stays off):
 
 - The live safety pause fired about 16–24 times an hour on QQQ (08:00–12:00 UTC). On the recorded tape the simulator,
   which models the same spread rule, pauses 2–13 times an hour for those hours. First recount on the next run: only
-  pauses for venue `arcus` (the Lighter ones above no longer happen). Live also pauses on thin depth (< 30% of the
-  median), which the simulator does not model. Either drop that rule for pilot runs or add it to the simulator (a full
-  re-backtest), so live matches the backtest.
+  pauses for venue `arcus` (the Lighter ones above no longer happen). Live also paused on thin depth (< 30% of the
+  median), which the simulator does not model. Resolved on the `scout-menu-from-research` branch: pilot sessions set
+  `depth_frac_min: 0`, so live pauses on exactly the move and spread rules the backtest has. (Backtests on the same
+  days also showed the pause costing money on the deep quote: `deep 3bp, no pause` beat `deep 3bp` on QQQ.)
 - `bot selftest --allow-funded` with a resting order, to confirm modify by orderId before `use_modify` is turned on.

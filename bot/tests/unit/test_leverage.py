@@ -11,7 +11,7 @@ from zoneinfo import ZoneInfo
 import numpy as np
 import pytest
 
-from bot.common.config import MMSession
+from bot.common.config import MMSession, SessionWindowCfg
 from bot.core.book import ArcusBookSync, L2Book, SyncResult
 from bot.core.marketdata import MarketView
 from bot.scout.pilot import session_for
@@ -104,6 +104,24 @@ def test_pilot_session_carries_leverage_and_sizes() -> None:
                                                                    rel_tol=1e-3)
     assert math.isclose(sess.off_hours.size_mult, 33.33 / 50, rel_tol=1e-3)
     assert (sess.daily_stop_usd, sess.pos_stop_usd, sess.kill_usd) == (2.0, 1.0, 10.0)
+
+
+def test_pilot_sessions_match_the_backtest_rules() -> None:
+    s = MMSession.model_validate(session_for("NVDA-USD", BY_NAME["anchor 3bp"], Risk(), live=False))
+    assert (s.mode, s.spacing_bps, s.reset_threshold_pct, s.session.skip_et) == ("anchor", 3, 0.1, [])
+    assert s.safety_pause.move_sigma_1s >= 1e9 and s.safety_pause.spread_x_median >= 1e9   # anchor: no pause
+    assert make_strategy(s).name == "anchor"
+    s = MMSession.model_validate(session_for("QQQ-USD", BY_NAME["touch 1bp, skip US session"], Risk(), live=False))
+    assert s.session.skip_et == ["09:00-16:30"] and (s.mode, s.execution_style) == ("mid", "normal")
+    assert s.safety_pause.move_sigma_1s == 6 and s.safety_pause.spread_x_median == 3   # the backtest's pause rules
+    for cfg in BY_NAME.values():   # the backtest has no thin-depth rule, so no pilot session has one either
+        assert MMSession.model_validate(session_for("QQQ-USD", cfg, Risk(), live=False)).safety_pause.depth_frac_min == 0
+
+
+@pytest.mark.parametrize("bad", ["9-16", "16:30-09:00", "09:00-09:00", "25:00-26:00"])
+def test_skip_windows_must_be_same_day_new_york_times(bad: str) -> None:
+    with pytest.raises(ValueError):
+        SessionWindowCfg(skip_et=[bad])
 
 
 def test_live_strategy_uses_the_off_hours_cap() -> None:
