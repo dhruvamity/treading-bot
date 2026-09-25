@@ -46,3 +46,22 @@ median 0.3`. The owner expected thousands of dollars of volume a day.
 - The backtest counts a fill only when a taker trades through our price, so it undercounts orders that join or
   improve the best price (they also fill when the queue ahead is used up). A queue-position fill model would rank
   `touch 0bp` and `improve touch` higher; it needs a full re-backtest.
+
+## Later the same run: stuck holding a long (reported by the server agent)
+
+The run traded normally until about 21:56 UTC (20 fills, $3,382 of maker volume, one position stop at 21:31). It
+then held a long of 0.558 QQQ (~$416) and placed no order for over an hour. After the US close the off-hours cap
+(16.67x, ~$373) was below the position, so the bid was off and the only quote left was the sell that would reduce
+the long. The bot's own pre-trade check refused it about 4,900 times (`free_collateral`: it wanted ~$20 of margin with ~$12 free):
+it charged initial margin on the whole order as if it opened a position, and QQQ's off-hours margin had gone up.
+Arcus charges initial margin only to open or add to a position; off-hours a position above the higher requirement
+"can still be reduced or closed" (docs, concepts/perpetuals/margin). None of these refusals reached Arcus, and
+nothing alerted.
+
+Fixes:
+- `RiskEngine.check`: only the part of an order that opens or adds to the position (after other resting orders on
+  the same side) needs free collateral and OI-cap headroom; the leverage cap applies only to orders that increase the
+  position.
+- Refusals by the bot's own checks are counted per day (`/dashboard`: "⚠️ N orders refused by the bot's own checks:
+  reason") and send one Telegram warning when 30 or more come in a minute, at most every 30 minutes per check. The
+  dashboard also shows how much of the day a buy and a sell actually rested on the book.

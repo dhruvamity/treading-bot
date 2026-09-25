@@ -112,6 +112,28 @@ def test_pretrade_collateral_and_oi_cap() -> None:
     assert e.value.check == "oi_cap"
 
 
+def test_an_order_that_reduces_the_position_needs_no_margin() -> None:
+    """2026-09-25, live QQQ after the US close: long $416, ~$12 of free collateral at the off-hours margin; the reducing
+    sell was refused as if it opened a position (it wanted ~$20) ~4,900 times and the bot could not work it off."""
+    r = engine(position=lambda v, b: D("0.004"))                        # long 0.004 BTC (~$344)
+    r.market_limits[(Venue.ARCUS, "BTC")] = MarketLimits(position_cap_usd=D(500), leverage_cap=D(5))
+    r.ctx.account = lambda v: AccountSnapshot(D(30), D("0.01"))       # no free collateral; 11.5x > the 5x cap
+    r.check(req(Side.SELL, "86001.0", "0.002"), BTC)                   # reduces: passes margin, OI and leverage
+    r.check(req(Side.SELL, "86001.0", "0.004"), BTC)                   # closes it: passes too
+    with pytest.raises(PreTradeReject) as e:
+        r.check(req(Side.SELL, "86001.0", "0.006"), BTC)               # flips to short 0.002: that part needs margin
+    assert e.value.check == "free_collateral" and "needs $" in str(e.value)
+    with pytest.raises(PreTradeReject) as e:
+        r.check(req(Side.BUY, "85990.0", "0.00012"), BTC)              # adds to the long: refused
+    assert e.value.check == "free_collateral"
+    covered = engine(position=lambda v, b: D("0.004"), open_notional=lambda v, b, s, x: D(344))
+    covered.market_limits[(Venue.ARCUS, "BTC")] = MarketLimits(position_cap_usd=D(500), leverage_cap=D(20))
+    covered.ctx.account = lambda v: AccountSnapshot(D(30), D("0.01"))
+    with pytest.raises(PreTradeReject) as e:                           # resting sells already cover the long:
+        covered.check(req(Side.SELL, "86001.0", "0.002"), BTC)         # another sell would open a short
+    assert e.value.check == "free_collateral"
+
+
 # ------------------------------------------------------------------------------------------------ kill switches (C6)
 def test_kill_session_sl_daily_loss_drawdown() -> None:
     r = RiskEngine(limits=RiskLimitsCfg())
