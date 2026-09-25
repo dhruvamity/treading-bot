@@ -38,6 +38,12 @@ FARM_MENU: list[Entry] = [
           "one tick inside the best bid and ask"),
     Entry(Config("mid0 skipUS", "tmid", spacing_bps=0, safety=False, skip_et=US_SESSION), "aggressive",
           "S28 + S02/S21 'avoid NYC hours'"),
+    # ---- research additions (not in the posts): Mid 0 only while the market is calm (research/REPORT.md)
+    Entry(Config("mid0 vgate", "vmid", spacing_bps=3, level_step_bps=0.25, safety=False), "aggressive",
+          "S28 + S02 'stable market' + S07 'Mid 4-5 bps when volatile'",
+          "Mid 0 while 1-min volatility x 0.25 < 0.5 bp and no trend; else up to 3 bps"),
+    Entry(Config("mid vadapt", "vmid", spacing_bps=5, level_step_bps=0.5, safety=False), "mid",
+          "S07, S11 'scale spread with ATR'", "spacing = 0.5 x 1-min volatility, 0 to 5 bps; 5 bps in a trend"),
     # ---- Mid +k: a fixed distance from the mid
     *(Entry(_mid(k), "mid", src) for k, src in ((1, "S34, S29"), (2, "S37"), (3, "S07"), (4, "S07"), (5, "S07"))),
     Entry(Config("mid+1 skew", "mid", spacing_bps=1, kappa=1.0, safety=False), "mid", "S34 + inventory skew"),

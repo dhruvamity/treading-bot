@@ -259,7 +259,8 @@ class Farm:
                 tag = f"{k * self.every_min / 60:05.2f}"
                 rows = await loop.run_in_executor(None, functools.partial(
                     analyze_window, self.run_dir, self.scout / "tape", self.scout / "markets.json", start, due,
-                    capital=self.capital, workers=self.workers, max_markets=self.max_markets, hour_tag=tag))
+                    capital=self.capital, workers=self.workers, hour_tag=tag,
+                    max_markets=10_000 if final else self.max_markets))   # the last analysis: every market
                 log.info("farm_analysis", data={"hour": tag, "rows": len(rows)})
                 series = final or k % max(1, round(SERIES_EVERY_H * 60 / self.every_min)) == 0
                 await loop.run_in_executor(None, functools.partial(
