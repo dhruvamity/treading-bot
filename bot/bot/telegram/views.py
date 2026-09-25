@@ -71,6 +71,45 @@ def day_pnl(v: ModeView) -> float | None:
     return sum(vals) if vals else None
 
 
+def money(x: float | None) -> str:
+    """Whole dollars for volumes: $5,369."""
+    return "—" if x is None else f"${float(x):,.0f}"
+
+
+def positions_of(v: ModeView) -> list[dict[str, Any]]:
+    """Open positions, one per venue and market: size, mark (the bot's), entry (the positions table). A market the
+    status lists twice is shown once; with no status from the runner, the positions table alone."""
+    entries: dict[tuple[str, str], tuple[float, float | None]] = {}
+    for k, val in v.positions.items():               # "arcus:QQQ" -> "-0.15 @ 745.69"
+        venue, _, base = k.partition(":")
+        size_s, _, entry_s = val.partition("@")
+        try:
+            entry = float(entry_s) if entry_s.strip() not in ("", "None") else None
+            entries[(venue, base)] = (float(size_s), entry)
+        except ValueError:
+            continue
+    out: dict[tuple[str, str], dict[str, Any]] = {}
+    markets = (v.snapshot or {}).get("markets") or []
+    for m in markets:
+        size = float(m.get("position") or 0)
+        key = (str(m.get("venue") or "arcus"), str(m["market"]))
+        if size and key not in out:
+            out[key] = {"venue": key[0], "market": key[1], "size": size,
+                        "mark": float(m["mark"]) if m.get("mark") else None, "entry": entries.get(key, (0, None))[1]}
+    if not markets:
+        for key, (size, entry) in entries.items():
+            if size:
+                out[key] = {"venue": key[0], "market": key[1], "size": size, "mark": None, "entry": entry}
+    return list(out.values())
+
+
+def _pos_line(p: dict[str, Any], venue: bool = False) -> str:
+    side = "long" if p["size"] > 0 else "short"
+    where = f" ({p['venue']})" if venue else ""
+    val = f" {usd(abs(p['size'] * p['mark']), sign=False)}" if p.get("mark") else f" {abs(p['size']):.6g}"
+    return f"{escape(p['market'])}{where} {side}{val}"
+
+
 def status_text(views: list[ModeView]) -> str:
     if not views:
         return "No bot has run on this machine yet. Start one with /run &lt;session&gt;."
@@ -78,75 +117,70 @@ def status_text(views: list[ModeView]) -> str:
     for v in views:
         icon, state = state_of(v)
         snap = v.snapshot or {}
-        head = f"{icon} <b>{v.mode.upper()}</b> — {escape(state)}"
+        head = f"{icon} <b>{v.mode.upper()}</b> · {escape(state)}"
         if v.running and snap.get("started_us"):
-            head += f"\nup {ago((snap.get('ts_us', 0) - snap['started_us']) / 1e6)} · pid {v.pid}"
-        lines = [head]
+            head += f" · up {ago((snap.get('ts_us', 0) - snap['started_us']) / 1e6)}"
+        lines = []
         if v.running and v.snapshot_age_s is not None and v.snapshot_age_s > 30:
             lines.append(f"⚠️ status not updated for {ago(v.snapshot_age_s)}")
         fills = sum(int(d["fills"]) for d in v.today.values())
         vol = sum(d["maker_volume"] for d in v.today.values())
-        dp = day_pnl(v)
-        lines.append(f"Today (UTC): PnL <b>{usd(dp)}</b> · {fills} fills · {usd(vol, sign=False)} maker volume")
-        rows = []
-        for m in snap.get("markets", []):
-            t = v.today.get(m["market"], {})
-            pos = float(m.get("position") or 0)
-            mark = float(m["mark"]) if m.get("mark") else 0.0
-            q = "✓" if m.get("quoting") else "✗"
-            rows.append(f"{m['market']:<6} pos {usd(pos * mark, sign=True):>9} fills {int(t.get('fills', 0)):>4} "
-                        f"vol {usd(t.get('maker_volume', 0.0), sign=False):>9} {q}")
-        if rows:
-            lines.append("<pre>" + escape("\n".join(rows)) + "</pre>")
-        if v.open_orders:
-            lines.append(f"Open orders: {len(v.open_orders)}")
+        lines.append(f"Today <b>{usd(day_pnl(v))}</b> · {fills} fills · {money(vol)} volume")
+        pos = positions_of(v)
+        venues = len({p["venue"] for p in pos}) > 1
+        n = len(v.open_orders)
+        lines.append((", ".join(_pos_line(p, venues) for p in pos) or "Flat")
+                     + f" · {n} open order{'' if n == 1 else 's'}")
         if v.resume_pending:
             lines.append("Resume requested, applies on the next tick")
-        parts.append("\n".join(lines))
-    return "\n\n".join(parts)
+        parts.append(head + "\n<blockquote>" + "\n".join(lines) + "</blockquote>")
+    return "\n".join(parts)
 
 
 def pnl_text(v: ModeView) -> str:
     snap = v.snapshot or {}
-    head = f"<b>PnL — {v.mode.upper()}</b> (since the bot started; today's fills from the database)"
-    rows = [f"{'mkt':<6} {'net':>9} {'spread':>8} {'inv':>8} {'fees':>7} {'fills':>6} {'volume':>10}"]
-    tot = 0.0
+    head = f"<b>PnL — {v.mode.upper()}</b> <i>(since the bot started)</i>"
+    cards, tot = [], 0.0
     for m in snap.get("markets", []):
         tot += float(m.get("net") or 0)
-        rows.append(f"{m['market']:<6} {usd(m.get('net')):>9} {usd(m.get('spread_capture')):>8} "
-                    f"{usd(m.get('inventory_mtm')):>8} {usd(m.get('fees'), sign=False):>7} {m.get('fills', 0):>6} "
-                    f"{usd(m.get('maker_volume'), sign=False):>10}")
-    if len(rows) == 1:
+        cards.append(f"<blockquote><b>{escape(m['market'])}</b> <b>{usd(m.get('net'))}</b>\n"
+                     f"spread {usd(m.get('spread_capture'))} · inventory {usd(m.get('inventory_mtm'))} · "
+                     f"fees {usd(m.get('fees'), sign=False)}\n"
+                     f"{m.get('fills', 0)} fills · {money(float(m.get('maker_volume') or 0))} maker volume</blockquote>")
+    if not cards:
         return head + "\nNo PnL yet (the bot publishes it every 5 s while running)."
-    dp = day_pnl(v)
-    sess = [f"{escape(s['session'])}: day {usd(s.get('day_pnl'))}, since start {usd(s.get('pnl'))}"
-            for s in snap.get("sessions", [])]
-    return (f"{head}\n<pre>{escape(chr(10).join(rows))}</pre>\nTotal since start: <b>{usd(tot)}</b> · "
-            f"today: <b>{usd(dp)}</b>\n" + "\n".join(sess))
+    return (head + "\n" + "".join(cards) + f"Since start <b>{usd(tot)}</b> · today <b>{usd(day_pnl(v))}</b>")
 
 
 def positions_text(v: ModeView) -> str:
-    snap = v.snapshot or {}
-    rows = []
-    for m in snap.get("markets", []):
-        pos = float(m.get("position") or 0)
-        if pos == 0:
-            continue
-        mark = float(m["mark"]) if m.get("mark") else 0.0
-        rows.append(f"{m['venue']}:{m['market']:<6} {pos:+.6g} ≈ {usd(pos * mark)} @ {m.get('mark') or '?'}")
-    if not rows and v.positions:  # runner not publishing: fall back to the positions table
-        rows = [f"{k:<16} {val}" for k, val in v.positions.items()]
-    if not rows:
+    pos = positions_of(v)
+    if not pos:
         return f"<b>Positions — {v.mode.upper()}</b>\nFlat."
-    return f"<b>Positions — {v.mode.upper()}</b>\n<pre>{escape(chr(10).join(rows))}</pre>"
+    cards = []
+    for p in pos:
+        lines = [f"<b>{escape(p['market'])}</b> {'long' if p['size'] > 0 else 'short'} {abs(p['size']):.6g}"
+                 + (f" ≈ {usd(abs(p['size'] * p['mark']), sign=False)}" if p.get("mark") else "")
+                 + (f" <i>({escape(p['venue'])})</i>" if p["venue"] != "arcus" else "")]
+        if p.get("entry") and p.get("mark"):
+            lines.append(f"entry {p['entry']:g} → {p['mark']:g} · <b>{usd(p['size'] * (p['mark'] - p['entry']))}</b>")
+        cards.append("<blockquote>" + "\n".join(lines) + "</blockquote>")
+    return f"<b>Positions — {v.mode.upper()}</b>\n" + "".join(cards)
 
 
 def orders_text(v: ModeView, limit: int = 30) -> str:
     if not v.open_orders:
         return f"<b>Open orders — {v.mode.upper()}</b>\nNone."
-    rows = [f"{o['market']:<6} {o['side']:<4} {o['size']:>12} @ {o['price']:<12} {o['tag']}" for o in v.open_orders[:limit]]
+    by_market: dict[str, list[dict[str, str]]] = {}
+    for o in v.open_orders[:limit]:
+        by_market.setdefault(o["market"], []).append(o)
+    cards = []
+    for market, rows in by_market.items():   # asks on top, highest price first, like a book
+        rows.sort(key=lambda o: (o["side"].lower() != "sell", -float(o["price"] or 0)))
+        cards.append(f"<blockquote><b>{escape(market)}</b>\n" + "\n".join(
+            f"{'🔴' if o['side'].lower() == 'sell' else '🟢'} {o['side'].upper()} {float(o['size']):.6g} @ "
+            f"{escape(o['price'])}" + (f" · {escape(o['tag'])}" if o["tag"] else "") for o in rows) + "</blockquote>")
     more = f"\n… and {len(v.open_orders) - limit} more" if len(v.open_orders) > limit else ""
-    return f"<b>Open orders — {v.mode.upper()}</b> ({len(v.open_orders)})\n<pre>{escape(chr(10).join(rows))}</pre>{more}"
+    return f"<b>Open orders — {v.mode.upper()}</b> ({len(v.open_orders)})\n" + "".join(cards) + more
 
 
 def sessions_text(sessions: list[dict[str, Any]], runs: list[dict[str, Any]]) -> str:
