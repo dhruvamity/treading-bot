@@ -523,6 +523,9 @@ class AnchorPolicy(Policy):
 
 POLICIES: dict[str, type[Policy]] = {"mid": MidPolicy, "grid": GridPolicy, "rgrid": RGridPolicy,
                                      "signal": SignalPolicy, "anchor": AnchorPolicy}
+# modes whose quotes depend only on (best bid, best ask, position, session scale): the simulator re-uses the last
+# quotes while those are unchanged
+CACHEABLE: set[str] = {"mid"}
 
 
 # ------------------------------------------------------------------------------------------------ simulator
@@ -645,7 +648,10 @@ class Sim:
         self.cfg, self.risk, self.mi = cfg, risk, mi
         self.sp = sp or SimParams()
 
-    def run(self, w: Window, *, tail_s: int = 6 * 3600) -> Result:
+    def run(self, w: Window, *, tail_s: int = 6 * 3600, trace: dict[str, list[Any]] | None = None) -> Result:
+        """trace (research): when given, every fill is appended to trace["fills"] as (t, side, px, qty, maker,
+        tag) and a snapshot to trace["minutes"] at each whole minute as (t, equity change, position USD, maker USD,
+        maker fills, taker USD, fees, state)."""
         cfg, risk, mi, sp = self.cfg, self.risk, self.mi, self.sp
         res = Result(w.market, cfg.name, w.start_us, w.end_us)
         if not w.n or not w.ok.any():
@@ -735,6 +741,8 @@ class Sim:
             else:
                 res.taker_fills += 1
                 res.taker_usd += qty * px
+            if trace is not None:
+                trace["fills"].append((t, side, px, qty, maker, tag))
             policy.on_fill(side, px, qty, tag, t, new)
 
         def taker(qty_signed: float, i: int, t: int) -> None:
@@ -833,6 +841,9 @@ class Sim:
                     tail_eq0 = eq
                 if eq - start_eq < res.min_equity_delta:
                     res.min_equity_delta = eq - start_eq
+                if trace is not None and t % (60 * S) == 0:
+                    trace["minutes"].append((t, eq - start_eq, pos * mid, res.maker_usd, res.maker_fills,
+                                             res.taker_usd, res.fees, state))
                 d = t // (86_400 * S)
                 if d != day:
                     day, day_eq = d, eq
@@ -894,7 +905,7 @@ class Sim:
                 elif state == "normal":
                     if AGE[i] <= sp.gap_s and not (cfg.safety and PAUSED[i]) and not (SKIP and SKIP[i]):
                         key = (BID[i], ASK[i], st["pos"], policy.scale)
-                        if cfg.mode == "mid" and key == cache_key:
+                        if cfg.mode in CACHEABLE and key == cache_key:
                             q, tq = cache_q, 0.0
                         else:
                             sig = math.sqrt(vol_1m) if vol_1m else 0.0

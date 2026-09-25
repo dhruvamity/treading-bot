@@ -539,6 +539,41 @@ def cmd_scout(a: argparse.Namespace) -> None:
         print(f"imported {len(rows)} market-day files from {a.src}")
 
 
+def cmd_farm(a: argparse.Namespace) -> None:
+    """Paper-trade the Tread.fi strategy menu on live Arcus data (run), on a recorded run (analyze), or on synthetic
+    markets (synth). Results, candles and fills go to the run folder (bot/farm/service.py)."""
+    import numpy as np
+
+    from bot.farm.service import Farm, analyze_window, run_dir_for, synth_study
+
+    workers = a.workers if isinstance(a.workers, int) else max(1, (os.cpu_count() or 2) - 1)
+    base = Path(a.out)
+    if a.action == "run":
+        cfg = load_arcus_config()
+        setup_logging(load_app().logs_dir)
+        run_dir = Path(a.run_dir) if a.run_dir else run_dir_for(base)
+        print(f"farm: recording all Arcus perps into {run_dir}, paper-trading the menu every {a.every_min:g} min "
+              f"for {a.hours:g} h; Ctrl-C stops it")
+        _run(Farm(run_dir, hours=a.hours, every_min=a.every_min, capital=a.capital, workers=workers,
+                  max_markets=a.max_markets, rest_url=cfg.rest.mainnet, ws_url=cfg.ws.mainnet, git=not a.no_git,
+                  push=not a.no_push).run())
+    elif a.action == "analyze":
+        run_dir = Path(a.run_dir)
+        st = json.loads((run_dir / "run.json").read_text())
+        tape = run_dir / "scout" / "tape"
+        ends = [int(np.load(p)["ts"].max()) for p in tape.rglob("bbo-*.npz")]
+        end = max(ends) if ends else int(time.time() * 1e6)
+        rows = analyze_window(run_dir, tape, run_dir / "scout" / "markets.json",
+                              int(st["started_us"]) + int(st.get("warmup_s", 1800)) * 1_000_000, end,
+                              capital=a.capital or float(st["capital"]), workers=workers,
+                              max_markets=a.max_markets, only=a.markets or None)
+        print(f"{len(rows)} paper runs; see {run_dir / 'LEADERBOARD.md'}")
+    elif a.action == "synth":
+        out = base / "synthetic"
+        rows = synth_study(out, hours=a.hours, workers=workers)
+        print(f"{len(rows)} synthetic paper runs in {out / 'results.json'}")
+
+
 def cmd_pilot(a: argparse.Namespace) -> None:
     """One deployment at a time: status, approve one of the scout's top 3, close."""
     from bot.scout.pilot import Pilot, describe
@@ -718,6 +753,18 @@ def build_parser() -> argparse.ArgumentParser:
     sp.add_argument("--capital",
                     help="the capital to backtest at: auto (the subaccount's equity; paper capital if unfunded) or "
                          "a dollar amount (default: config/app.yaml sizing.capital_usd)")
+    sp = add("farm", cmd_farm, "paper-trade the Tread.fi strategy menu: run (live Arcus data), analyze, synth")
+    sp.add_argument("action", choices=["run", "analyze", "synth"])
+    sp.add_argument("run_dir", nargs="?", help="run: resume this run folder; analyze: the run folder")
+    sp.add_argument("--hours", type=float, default=15.0, help="run: how long to record; synth: hours per tape")
+    sp.add_argument("--every-min", type=float, default=60.0, help="run: minutes between analyses")
+    sp.add_argument("--capital", type=float, default=100.0, help="capital of each paper account (USD)")
+    sp.add_argument("--max-markets", type=int, default=20, help="the busiest markets to paper-trade")
+    sp.add_argument("--markets", nargs="*", help="analyze: only these markets")
+    sp.add_argument("--workers", type=_workers_arg, default="auto")
+    sp.add_argument("--out", default="../research/runs", help="folder for new runs (and synthetic/)")
+    sp.add_argument("--no-git", action="store_true", help="run: do not commit the results")
+    sp.add_argument("--no-push", action="store_true", help="run: commit but do not push")
     sp = add("pilot", cmd_pilot, "one deployment at a time: status, approve N [--live], close")
     sp.add_argument("action", choices=["status", "approve", "close"])
     sp.add_argument("n", nargs="?", type=int, default=1, help="approve: which of the top 3")
