@@ -161,6 +161,20 @@ def test_finished_tape_skips_the_current_hour(tmp_path: Path) -> None:
     assert got == [f"bbo-rec010203-{hour - 2}.npz", f"bbo-rec010203-{hour - 1}.npz"]
 
 
+def test_git_commit_push_takes_paths_relative_to_the_working_directory(tmp_path: Path,
+                                                                       monkeypatch: pytest.MonkeyPatch) -> None:
+    repo = tmp_path / "repo"
+    (repo / "bot").mkdir(parents=True)
+    for cmd in (["init", "-q"], ["config", "user.email", "t@t"], ["config", "user.name", "t"]):
+        subprocess.run(["git", "-C", str(repo), *cmd], check=True)
+    (repo / "research" / "runs" / "r").mkdir(parents=True)
+    (repo / "research" / "runs" / "r" / "LEADERBOARD.md").write_text("x\n")
+    monkeypatch.chdir(repo / "bot")                       # the farm runs from bot/ with --out ../research/runs
+    out = service.git_commit_push(service.repo_root(Path("../research/runs/r")) or repo,
+                                  [Path("../research/runs/r/LEADERBOARD.md")], "t", push=False)
+    assert out == "committed"
+
+
 def test_farm_loop_records_analyses_and_commits(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     """The run loop with a stand-in recorder: it analyses on schedule and commits the run folder to git."""
     repo = tmp_path / "repo"

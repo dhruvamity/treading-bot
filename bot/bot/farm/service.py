@@ -81,7 +81,8 @@ def repo_root(p: Path) -> Path | None:
 
 def git_commit_push(repo: Path, paths: list[Path], message: str, *, push: bool = True) -> str:
     """Stage `paths`, commit, push the current branch (retrying on network errors). Returns what happened."""
-    rel = [str(p.relative_to(repo)) for p in paths if p.exists()]
+    repo = repo.resolve()
+    rel = [str(p.resolve().relative_to(repo)) for p in paths if p.exists()]   # relative paths too (a cwd run dir)
     if not rel:
         return "nothing to add"
     trailer = ("\n\nCo-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>\n"
@@ -215,8 +216,8 @@ class Farm:
         paths += finished_tape(self.scout / "tape", time.time())
         try:
             out = git_commit_push(self.repo, paths, f"Paper farm {self.run_dir.name}: {what}", push=self.push)
-        except (subprocess.SubprocessError, OSError) as e:
-            out = f"git failed: {e}"
+        except Exception as e:   # a failed commit must never stop the recording
+            out = f"git failed: {type(e).__name__}: {e}"
         log.info("farm_git", data={"what": what, "result": out})
 
     async def run(self) -> None:
