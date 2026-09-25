@@ -599,6 +599,39 @@ def cmd_farm(a: argparse.Namespace) -> None:
         for m in a.markets or ["QQQ-USD"]:
             for r in prepare(run_dir / "crosscheck" / m, Path.cwd(), m, meta[m], capital=a.capital):
                 print(f"{m} {r['setting']} @ {r['leverage']:g}x:  {r['command']}")
+    elif a.action == "paperrun":
+        from bot.farm.crosscheck import prepare_scout
+        from bot.scout.scan import market_meta
+
+        run_dir = Path(a.run_dir)
+        meta = market_meta(run_dir / "scout" / "markets.json")
+        runs = []
+        for m in a.markets or ["BTC-USD"]:
+            r = prepare_scout(run_dir / "paper-engine", Path.cwd(), m, meta[m], setting=a.setting,
+                              leverage="max" if a.leverage == "max" else float(a.leverage), capital=a.capital)
+            runs.append(r)
+            print(f"{m} {a.setting} @ {r['leverage']:g}x: order ${r['order_usd']:,.0f}, home {r['home']}")
+        (run_dir / "paper-engine" / "runs.json").write_text(json.dumps(runs, indent=1))
+        print(f"run them: sh scripts/paper_engines.sh {run_dir / 'paper-engine'} SECONDS")
+    elif a.action == "engines":
+        from bot.farm.engines import collect, commit_paths
+        from bot.farm.service import git_commit_push, repo_root
+
+        run_dir = Path(a.run_dir)
+        eng = run_dir / "paper-engine"
+        while True:
+            rows = collect(eng)
+            print(f"{time.strftime('%H:%M', time.gmtime())} {len(rows)} paper engines -> {eng / 'SUMMARY.md'}",
+                  flush=True)
+            repo = repo_root(run_dir)
+            if a.loop and repo is not None and not a.no_git:
+                print(git_commit_push(repo, commit_paths(eng), f"Paper engines {run_dir.name}: {len(rows)} runs",
+                                      push=not a.no_push), flush=True)
+            if not a.loop or not any((p / "state" / "heartbeat.paper").exists() and
+                                     time.time() - (p / "state" / "heartbeat.paper").stat().st_mtime < 120
+                                     for p in eng.iterdir() if p.is_dir()):
+                break
+            time.sleep(a.loop * 60)
     elif a.action == "synth":
         out = base / "synthetic" / (a.label or "study")
         kw: dict[str, Any] = {"profiles": tuple(a.profiles)} if a.profiles else {}
@@ -790,8 +823,8 @@ def build_parser() -> argparse.ArgumentParser:
                     help="the capital to backtest at: auto (the subaccount's equity; paper capital if unfunded) or "
                          "a dollar amount (default: config/app.yaml sizing.capital_usd)")
     sp = add("farm", cmd_farm, "paper-trade the Tread.fi strategy menu: run (live Arcus data), analyze, synth, "
-                               "crosscheck (sessions for the live engine's paper mode)")
-    sp.add_argument("action", choices=["run", "analyze", "synth", "crosscheck"])
+                               "crosscheck / paperrun (sessions for the live engine's paper mode), engines (collect)")
+    sp.add_argument("action", choices=["run", "analyze", "synth", "crosscheck", "paperrun", "engines"])
     sp.add_argument("run_dir", nargs="?", help="run: resume this run folder; analyze: the run folder")
     sp.add_argument("--hours", type=float, default=15.0, help="run: how long to record; synth: hours per tape")
     sp.add_argument("--every-min", type=float, default=60.0, help="run: minutes between analyses")
@@ -808,6 +841,9 @@ def build_parser() -> argparse.ArgumentParser:
     sp.add_argument("--label", help="analyze: write into RUN_DIR/variants/LABEL instead of the run folder; "
                                     "synth: the study's folder name")
     sp.add_argument("--profiles", nargs="*", help="synth: model market types (bot/farm/synth.py PROFILES)")
+    sp.add_argument("--setting", default="touch 0bp", help="paperrun: the scout menu setting (as /run takes it)")
+    sp.add_argument("--leverage", default="max", help="paperrun: max or a number")
+    sp.add_argument("--loop", type=float, default=0, help="engines: collect and commit every N minutes")
     sp.add_argument("--regimes", nargs="*", help="synth: chop, trend, mixed (bot/farm/synth.py REGIMES)")
     sp.add_argument("--informed", nargs="*", type=float,
                     help="synth: toxicity levels, the informed taker's cost threshold in bps (default 2.5 and 0.5)")

@@ -16,8 +16,10 @@ import asyncio
 import contextlib
 import random
 import time
+import urllib.request
 from collections.abc import Awaitable, Callable
 from typing import Any
+from urllib.parse import urlparse
 
 import aiohttp
 import orjson
@@ -27,6 +29,16 @@ from bot.common.ratelimit import RollingWindow
 
 MessageHandler = Callable[[dict[str, Any], int], Awaitable[None] | None]
 
+
+
+def ws_proxy(url: str) -> str | None:
+    """The HTTP proxy for a ws:// or wss:// URL from HTTPS_PROXY / HTTP_PROXY, honouring NO_PROXY. aiohttp's
+    trust_env looks proxies up by URL scheme and has none for ws(s), so behind a proxy a WebSocket would otherwise
+    try to connect directly (and be refused where only the proxy may reach the internet)."""
+    u = urlparse(url)
+    if not u.hostname or urllib.request.proxy_bypass(u.hostname):
+        return None
+    return urllib.request.getproxies().get("https" if u.scheme == "wss" else "http")
 
 class ReconnectingWS:
     def __init__(
@@ -146,7 +158,8 @@ class ReconnectingWS:
     async def _connect_once(self) -> None:
         if self._session is None or self._session.closed:
             self._session = aiohttp.ClientSession(trust_env=True)   # HTTPS_PROXY / NO_PROXY when set
-        async with self._session.ws_connect(self.url, heartbeat=20.0, max_msg_size=0, compress=15) as ws:
+        async with self._session.ws_connect(self.url, heartbeat=20.0, max_msg_size=0, compress=15,
+                                            proxy=ws_proxy(self.url)) as ws:
             self._ws = ws
             self.connected_at = time.monotonic()
             self.log.info("ws_connected", data={"url": self.url, "subs": len(self._subs)})
