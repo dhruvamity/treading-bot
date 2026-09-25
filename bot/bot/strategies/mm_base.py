@@ -92,9 +92,10 @@ class MMBase:
     def clip_to_bounds(self, ctx: StrategyContext, side: Side, price: float) -> float | None:
         """Arcus off-hours: never price past the current trading bound."""
         v = ctx.view
-        if side is Side.BUY and v.lower_bound is not None and price < float(v.lower_bound):
+        # docs (real-world-assets): fills AT or beyond a bound are rejected, so a quote on the bound is pointless too
+        if side is Side.BUY and v.lower_bound is not None and price <= float(v.lower_bound):
             return None
-        if side is Side.SELL and v.upper_bound is not None and price > float(v.upper_bound):
+        if side is Side.SELL and v.upper_bound is not None and price >= float(v.upper_bound):
             return None
         return price
 

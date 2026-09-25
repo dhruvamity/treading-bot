@@ -20,11 +20,11 @@ from __future__ import annotations
 
 import time
 from collections.abc import Callable, Sequence
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from decimal import Decimal
 from enum import StrEnum
 
-from bot.common.errors import PreTradeReject
+from bot.common.errors import PreTradeReject, RateLimited
 from bot.common.ids import ClientIdFactory
 from bot.common.logging import DecisionLog, Log
 from bot.venues.base import TIF, Market, OrderRequest, OrderStatus, Side, Venue
@@ -190,6 +190,7 @@ class OrderManager:
         self.in_flight: dict[str, int] = {}   # client id -> when its request was sent (us)
         self.now_fn = now_fn
         self._resync_at: dict[Venue, int] = {}
+        self.backoff_until: dict[tuple[Venue, str], int] = {}   # (venue, "order" | "cancel") -> us: a 429's retry hint
 
     def _dec(self, kind: str, reason: str, **kw: object) -> None:
         self.decisions.record(kind, reason, ts_us=self.now_fn() if self.now_fn else None, **kw)  # type: ignore[arg-type]
@@ -212,6 +213,20 @@ class OrderManager:
         now = self._now()
         for c in client_ids:
             self.in_flight[c] = now
+
+    def _rate_limited(self, venue: Venue, pool: str, e: Exception) -> None:
+        """A 429 on an order write: wait the venue's retryAfterMs (docs: rate-limits, "Handling rate limits") before
+        sending on that pool again, instead of retrying every tick."""
+        if isinstance(e, RateLimited):
+            wait_us = max(1000, int(e.retry_after_ms)) * 1000
+            pools = ("order", "cancel") if e.reason in (None, "ip") else (pool,)   # the IP bucket blocks both
+            for p in pools:
+                self.backoff_until[(venue, p)] = max(self.backoff_until.get((venue, p), 0), self._now() + wait_us)
+            log.warning("rate_limited", venue=venue.value, reason=str(e.reason), data={"pool": pool,
+                                                                                       "retry_after_ms": e.retry_after_ms})
+
+    def backing_off(self, venue: Venue, pool: str) -> bool:
+        return self._now() < self.backoff_until.get((venue, pool), 0)
 
     def resync(self, venue: Venue, why: str) -> None:
         """Ask the runner to reconcile this venue now (its loop checks every 5 s); at most once per IN_FLIGHT_MAX_S."""
@@ -253,7 +268,11 @@ class OrderManager:
     async def sync(self, venue: Venue, m: Market, desired: Sequence[DesiredOrder], bbo: BBOTicks, params: PlanParams,
                    *, why: str) -> SyncResult:
         res = SyncResult()
+        if self.backing_off(venue, "order"):   # the order pool (or the IP bucket) said wait: leave resting orders be
+            params = replace(params, allow_places=False, allow_modifies=False)
         actions = plan(desired, self.live_view(venue, m), m, bbo, params)
+        if self.backing_off(venue, "cancel"):
+            actions = [a for a in actions if a.kind is not ActionKind.CANCEL]
         if not actions:
             return res
         adapter = self.adapters[venue]
@@ -271,6 +290,7 @@ class OrderManager:
                 res.actions += cancels
             except Exception as e:   # refused: leave them for IN_FLIGHT_MAX_S and let reconciliation say what is left
                 res.errors.append(f"cancel: {e}")
+                self._rate_limited(venue, "cancel", e)
                 self.resync(venue, f"cancel refused: {str(e)[:120]}")
         for a in modifies:
             assert a.desired is not None and a.client_id is not None
@@ -288,6 +308,7 @@ class OrderManager:
                 res.actions.append(a)
             except Exception as e:   # refused (e.g. not found): no retry every tick; reconcile instead
                 res.errors.append(f"modify {a.client_id}: {e}")
+                self._rate_limited(venue, "order", e)
                 self._mark([a.client_id])
                 self.resync(venue, f"modify refused: {str(e)[:120]}")
         reqs: list[OrderRequest] = []
@@ -313,6 +334,7 @@ class OrderManager:
                 res.actions += places
             except Exception as e:
                 res.errors.append(f"place: {e}")
+                self._rate_limited(venue, "order", e)
                 for r in reqs:
                     self.state.event("place_failed", venue=venue.value, client_id=r.client_id, err=str(e)[:200])  # type: ignore[attr-defined]
         self._record_budget(venue, len(places), len(modifies), len(cancels))

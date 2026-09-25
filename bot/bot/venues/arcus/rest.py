@@ -25,8 +25,8 @@ log = Log("arcus.rest")
 WEIGHTS: dict[str, int] = {
     "/": 1, "/v1/time": 1, "/v1/compliance": 1, "/health": 0,
     "/v1/bbo": 2, "/v1/mids": 2, "/v1/account": 2, "/v1/positions": 2, "/v1/order": 2, "/v1/feetiers": 2,
-    "/v1/leverages": 2, "/v1/accountStats": 2, "/v1/rateLimit": 2,
-    "/v1/prices": 20, "/v1/markets": 20, "/v1/trade": 20, "/v1/trades": 20, "/v1/candles": 20,
+    "/v1/leverages": 2, "/v1/account/stats": 2, "/v1/rateLimit": 2,
+    "/v1/prices": 20, "/v1/markets": 20, "/v1/trade": 20, "/v1/fill": 20, "/v1/trades": 20, "/v1/candles": 20,
     "/v1/portfolio": 20, "/v1/openOrders": 20, "/v1/orders": 20, "/v1/fills": 20, "/v1/funding": 20,
     "/v1/fundingRates": 20, "/v1/accountTransferUpdates": 20, "/v1/apiKeys": 20, "/v1/createApiKey": 20,
     "/v1/revokeApiKey": 20,
@@ -44,6 +44,9 @@ def _weight_key(path: str) -> str:
         return "/v1/l2OrderBook"
     if path.startswith("/v1/bbo/"):
         return "/v1/bbo"
+    for prefix in ("/v1/order/", "/v1/trade/", "/v1/fill/"):   # single-object reads by id
+        if path.startswith(prefix):
+            return prefix.rstrip("/")
     return path
 
 
@@ -225,7 +228,9 @@ class ArcusRest:
             b = self._order_body(account_index, f, ts, cid)
             b["signature"] = signer.sign(sg.place_payload(self.address, account_index, ts, f, cid))
             elems.append(b)
-        return dict(await self._post_signed("/v1/batchPlaceOrders", {"orders": elems}, ts, elems[0]["signature"]))
+        resp = dict(await self._post_signed("/v1/batchPlaceOrders", {"orders": elems}, ts, elems[0]["signature"]))
+        self.ip.charge(len(elems) // 40)   # 0 while batches stay at <= 39 orders
+        return resp
 
     async def modify_order(self, account_index: int, f: sg.OrderFields, *, order_id: str | None,
                            client_id: str | None, echo_client_id: bool = False) -> dict[str, Any]:
@@ -278,7 +283,9 @@ class ArcusRest:
             b["signature"] = signer.sign(sg.cancel_payload(self.address, account_index, ts, mid, order_id=oid,
                                                            client_id=None if oid else cid))
             elems.append(b)
-        return dict(await self._post_signed("/v1/batchCancelOrders", {"cancels": elems}, ts, elems[0]["signature"]))
+        resp = dict(await self._post_signed("/v1/batchCancelOrders", {"cancels": elems}, ts, elems[0]["signature"]))
+        self.ip.charge(len(elems) // 40)   # docs (rate-limits): a batch of N costs floor(N/40) IP weight after the fact
+        return resp
 
     async def _scheme2(self, action: str, body: dict[str, Any]) -> dict[str, Any]:
         signer = self._require_write()
