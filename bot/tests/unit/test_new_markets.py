@@ -191,8 +191,34 @@ def test_a_new_listing_needs_three_full_days() -> None:
     assert listed_days_ago({}, now) is None
     d = day_start_us("2026-09-22")        # pre-listed in May, first seen by the recorder (up since 09-19) on 09-22
     may = {"addedTimestamp": 1778786860}
-    assert round(listed_days_ago(may, d + 2 * US_DAY, "2026-09-22", "2026-09-19") or 0) == 2
-    assert (listed_days_ago(may, d, "2026-09-19", "2026-09-19") or 0) > 100   # recorded from the start: not new
+    up = day_start_us("2026-09-19") + 12 * 3600 * S
+    assert round(listed_days_ago(may, d + 2 * US_DAY, d, up) or 0) == 2
+    assert (listed_days_ago(may, d, up + 300 * S, up) or 0) > 100   # picked up with the rest at start: not new
+
+
+def test_imported_history_does_not_make_other_markets_look_new(tmp_path: Path) -> None:
+    # 2026-09-26 on the server: the arcus-mm import holds BTC books from 09-19, the scout's recorder started on 09-23,
+    # and every market outside the import (MSFT, listed for months) was flagged "new market (trading 3 days)"
+    st = TapeStore(tmp_path)
+
+    def bbo(market: str, part: str, t0: int) -> None:
+        ts = np.arange(t0, t0 + 3600 * S, 60 * S, dtype=np.int64)
+        st.write_part(market, "bbo", part, {"ts": ts, "bid": np.full(len(ts), 99.0), "ask": np.full(len(ts), 101.0),
+                                            "bid_sz": np.ones(len(ts)), "ask_sz": np.ones(len(ts))})
+
+    start = day_start_us("2026-09-23") + (20 * 3600 + 36 * 60) * S          # the recorder's first row
+    bbo("BTC-USD", "arcusmm-raw-2026-09-19", day_start_us("2026-09-19"))     # imported history
+    bbo("BTC-USD", "rec203603-497276", start)
+    bbo("MSFT-USD", "rec203603-497276", start + 90 * S)
+    bbo("KBONK-USD", "rec073000-497310", day_start_us("2026-09-25") + 7 * 3600 * S)   # turned ONLINE later
+    bbo("OLD-USD", "arcusmm-raw-2026-09-19", day_start_us("2026-09-19"))     # imported only: no recorder rows
+    assert st.first_recorded_us("BTC-USD") == start and st.first_recorded_us("OLD-USD") is None
+    now = day_start_us("2026-09-26")
+    listed_long_ago = {"addedTimestamp": 1778786860}
+    msft, kbonk = (listed_days_ago(listed_long_ago, now, st.first_recorded_us(m), st.first_recorded_us("BTC-USD"))
+                   for m in ("MSFT-USD", "KBONK-USD"))
+    assert (msft or 0) > 100
+    assert kbonk is not None and 0.5 < kbonk < 1
 
 
 def test_the_pilot_pauses_a_deployment_whose_market_goes_offline(tmp_path: Path) -> None:

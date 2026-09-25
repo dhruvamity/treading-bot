@@ -14,8 +14,8 @@ the recorded days), past which the sizes stop growing and the stops apply to the
 A candidate is GO only when all three checks pass (percentages are of the capital the sizes use):
 - long window (up to the last 7 full days): average PnL/day >= -0.25% (close to breakeven or better), at most one
   daily stop, never the kill, at least half the days not negative, and at least 5 fills a day; a market trading for
-  under 21 days (listed recently, or first seen after the recorder started) needs 3 full days, and a market's first
-  recorded day counts only if it covers 20 h;
+  under 21 days (listed recently, or first seen by the recorder over an hour after it started) needs 3 full days,
+  and a market's first recorded day counts only if it covers 20 h;
 - short window (the last 24 h, re-run each scan): PnL >= -0.25%, and still at least 30% of its usual fills (the flow is
   still there), with the last 6 h not worse than -0.50%;
 - market now (last 60 minutes of 1-min mids): not trending (efficiency ratio < 0.5), volatility not above 2x its
@@ -78,6 +78,7 @@ BY_NAME = {c.name: c for c in MENU}
 # GO thresholds (see module docstring; the PnL ones are % of capital, in sizing.Pct)
 NEW_LISTING_DAYS = 21      # Arcus addedTimestamp this recent: a new listing ...
 NEW_LISTING_MIN_DAYS = 3   # ... needs this many full days before it can be GO (listing-week flow is unusual)
+RECORDER_GRACE_S = 3600    # the recorder subscribes every ONLINE market within minutes of starting
 MAX_DAY_STOPS = 1
 MIN_FILLS_DAY = 5
 MIN_FLOW_FRAC = 0.30
@@ -496,11 +497,13 @@ class Candidate:
         return asdict(self)
 
 
-def listed_days_ago(meta: dict[str, Any], now_us: int, first_seen: str | None = None,
-                    recorder_first: str | None = None) -> float | None:
+def listed_days_ago(meta: dict[str, Any], now_us: int, first_seen_us: int | None = None,
+                    recorder_start_us: int | None = None) -> float | None:
     """How long the market has been trading, in days: since Arcus listed it (addedTimestamp), or since the recorder
-    first saw it when that came after the recorder started (a market pre-listed OFFLINE for months keeps its old
-    addedTimestamp when it finally turns ONLINE). None when neither says it is new."""
+    first saw it when that was over RECORDER_GRACE_S after the recorder started (a market pre-listed OFFLINE for
+    months keeps its old addedTimestamp when it finally turns ONLINE). Both times come from the recorder's own files
+    (TapeStore.first_recorded_us): imported history starts earlier for some markets only, which made every other
+    market look new. None when neither says it is new."""
     ages = []
     try:
         added = float(meta.get("addedTimestamp") or 0)
@@ -508,8 +511,8 @@ def listed_days_ago(meta: dict[str, Any], now_us: int, first_seen: str | None = 
         added = 0.0
     if added > 0:
         ages.append((now_us / 1e6 - added) / 86400)
-    if first_seen and recorder_first and first_seen > recorder_first:
-        ages.append((now_us - day_start_us(first_seen)) / US_DAY)
+    if first_seen_us and recorder_start_us and first_seen_us > recorder_start_us + RECORDER_GRACE_S * S:
+        ages.append((now_us - first_seen_us) / US_DAY)
     return min(ages) if ages else None
 
 
@@ -700,8 +703,8 @@ def scan(root: Path, *, now_us: int | None = None, markets: list[str] | None = N
                  shortlist=shortlist, volume_cost=volume_cost)
     have = [m for m in sc.store.markets() if m in mis and (not markets or m in markets) and sc.store.days(m)]
     t0 = time.time()
-    rec_first = next(iter(sc.store.days(ALIVE_MARKET)), None)
-    listed = {m: listed_days_ago(meta[m], now_us, next(iter(sc.store.days(m)), None), rec_first) for m in have}
+    started = sc.store.first_recorded_us(ALIVE_MARKET)
+    listed = {m: listed_days_ago(meta[m], now_us, sc.store.first_recorded_us(m), started) for m in have}
     bt = sc.backtest(have, now_us, mis, meta, always=always, listed=listed, stop=stop)
     cands: list[Candidate] = []
     for m in have:
