@@ -4,6 +4,7 @@
     bot status                    one screen: services, trading bot, what is deployed, last scan, balance
     bot dashboard                 live screen, every 10 s: today's volume and PnL, the capital's profit or loss
     bot pilot approve 1 [--live]  trade the scout's #1 setup (paper, or real money)
+        [--list volume|aggressive] [--max-lev]   from another top 3, or at the market's maximum leverage
     bot pilot close               close the position and stop trading
     bot down [--all]              stop the services (--all: the trading bot too, positions kept)
     bot doctor pilot              is everything ready for live? (reads only)
@@ -611,7 +612,8 @@ def cmd_scout(a: argparse.Namespace) -> None:
         n = scan_workers(a.workers if a.workers != "auto" else over.get("scan_workers"),
                          bool(Control(app).running_modes()))
         res = scan(root / "data" / "scout", workers=n, markets=a.markets or None, ladder=not a.max_only,
-                   capital=cap, pct=z.pct(), capital_source=src, shortlist=not a.full)
+                   capital=cap, pct=z.pct(), capital_source=src, shortlist=not a.full,
+                   volume_cost=settings.volume_cost(over))
         save_scan(root, res)
         print(table(res, a.limit))
     elif a.action == "limits":
@@ -642,12 +644,17 @@ def cmd_pilot(a: argparse.Namespace) -> None:
         if act:
             print("running:", pilot.control.is_running(act["mode"]), "| paused by scout:",
                   st.get("paused_by_scout") or "no", "| last check:", st.get("last_review"))
-        scan = pilot.latest_scan()
-        print("\ntop 3 now:" if scan and scan.get("top") else "\nnothing passes all checks right now")
-        for i, c in enumerate((scan or {}).get("top") or [], 1):
-            print(f"  {i}. {describe(c)}")
+        from bot.scout.profiles import PROFILES
+
+        for p in PROFILES.values():
+            top = pilot.top(p.key)
+            budget = f" (at most ${pilot.budget():.2f} per $1,000)" if p.budget else ""
+            print(f"\n{p.title} top 3{budget}:" if top else f"\n{p.title}: nothing right now{budget}")
+            for i, c in enumerate(top, 1):
+                print(f"  {i}. {describe(c)}")
     elif a.action == "approve":
-        c = pilot.pick(a.n)
+        lev = "max" if a.max_lev else "rec"
+        c = pilot.pick(a.n, a.list, lev)
         print(describe(c))
         cap = (pilot.latest_scan() or {}).get("capital") or {}
         if cap:
@@ -661,7 +668,7 @@ def cmd_pilot(a: argparse.Namespace) -> None:
             if input("REAL MONEY. Type LIVE to deploy: ").strip() != "LIVE":
                 print("aborted")
                 sys.exit(1)
-        print(_run(pilot.approve(a.n, live=a.live, by="cli")))
+        print(_run(pilot.approve(a.n, live=a.live, by="cli", profile=a.list, lev=lev)))
     elif a.action == "close":
         print(_run(pilot.close(by="cli")))
 
@@ -862,6 +869,9 @@ def build_parser() -> argparse.ArgumentParser:
     sp.add_argument("action", choices=["status", "approve", "close"])
     sp.add_argument("n", nargs="?", type=int, default=1, help="approve: which of the top 3")
     sp.add_argument("--live", action="store_true", help="real money (needs BOT_PILOT_LIVE=1 and typing LIVE)")
+    sp.add_argument("--list", default="breakeven", choices=["breakeven", "volume", "aggressive"],
+                    help="which top 3: breakeven (default), volume or aggressive (bot/scout/profiles.py)")
+    sp.add_argument("--max-lev", action="store_true", help="the same setting at the market's maximum leverage")
     sp = add("resume", cmd_resume, "clear safe mode / stops (after investigation)")
     sp.add_argument("--venue")
     sp.add_argument("--all", action="store_true")

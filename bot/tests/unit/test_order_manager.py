@@ -203,16 +203,47 @@ class _Silent(_Race):
         return []
 
 
-async def test_a_lost_ack_frees_the_order_after_the_limit(tmp_path: object) -> None:
+async def test_a_lost_ack_is_reconciled_not_modified_blindly(tmp_path: object) -> None:
+    """No venue ack: after the in-flight window the order is still left alone (modifying an order that may never
+    have landed only gets "order could not be found", every tick) and a reconciliation is asked for. Once the venue
+    lists it, it is managed as usual."""
     from bot.core.order_manager import IN_FLIGHT_MAX_S
+    from bot.venues.base import OrderState, OrderStatus
 
     om, ad, clock = _om(tmp_path, _Silent)
     bbo = BBOTicks(MID - 1, MID + 1)
     p = PlanParams(tol_ticks=2)
     await om.sync(Venue.ARCUS, M, [d(Side.BUY, MID - 20, "b0")], bbo, p, why="t")  # type: ignore[attr-defined]
     cid = ad.sent[0].split()[1]  # type: ignore[attr-defined]
-    await om.sync(Venue.ARCUS, M, [d(Side.BUY, MID - 80, "b0")], bbo, p, why="t")  # type: ignore[attr-defined]
-    assert ad.sent == [f"place {cid}"]  # type: ignore[attr-defined]  # still in flight: left alone
     clock[0] += int((IN_FLIGHT_MAX_S + 1) * 1e6)
+    for _ in range(3):
+        await om.sync(Venue.ARCUS, M, [d(Side.BUY, MID - 80, "b0")], bbo, p, why="t")  # type: ignore[attr-defined]
+    assert ad.sent == [f"place {cid}"] and getattr(ad, "resync_requested", False)  # type: ignore[attr-defined]
+    o = ad.state.orders[cid]  # type: ignore[attr-defined]
+    ad.state.on_update(OrderState(cid, "v1", OrderStatus.OPEN, D(0), None, None, 0, Venue.ARCUS, o.req.base,  # type: ignore[attr-defined]
+                                  o.req.side, o.req.price, o.req.size, o.req.tif, False, o.req.tag))   # reconciled
     await om.sync(Venue.ARCUS, M, [d(Side.BUY, MID - 80, "b0")], bbo, p, why="t")  # type: ignore[attr-defined]
     assert ad.sent[-1] == f"modify {cid}"  # type: ignore[attr-defined]
+
+
+class _Refuses(_Race):
+    """A venue that acks the order but refuses every modify (the live "order could not be found")."""
+
+    async def modify(self, cid: str, price: D, size: D) -> None:
+        self.sent.append(f"modify {cid}")
+        raise RuntimeError("Order could not be found")
+
+
+async def test_a_refused_modify_is_not_retried_every_tick(tmp_path: object) -> None:
+    from bot.core.order_manager import IN_FLIGHT_MAX_S
+
+    om, ad, clock = _om(tmp_path, _Refuses)
+    bbo = BBOTicks(MID - 1, MID + 1)
+    p = PlanParams(tol_ticks=2)
+    await om.sync(Venue.ARCUS, M, [d(Side.BUY, MID - 20, "b0")], bbo, p, why="t")  # type: ignore[attr-defined]
+    for _ in range(10):                                  # ten ticks, one second apart
+        clock[0] += 1_000_000
+        await om.sync(Venue.ARCUS, M, [d(Side.BUY, MID - 80, "b0")], bbo, p, why="t")  # type: ignore[attr-defined]
+    mods = [x for x in ad.sent if x.startswith("modify")]  # type: ignore[attr-defined]
+    assert len(mods) == 2 and getattr(ad, "resync_requested", False)   # once, then once more after the back-off
+    assert len(mods) <= 10 / IN_FLIGHT_MAX_S

@@ -6,11 +6,15 @@ Files (paths relative to the project root):
   state/pilot_events.jsonl      what happened; the Telegram bot posts every new line
   config/sessions/pilot.yaml    the session the runner starts with, rewritten on each approval
 
+Three lists (bot/scout/profiles.py): breakeven (the scan's GO top 3, offered after each scan), volume and aggressive
+(the most volume within the owner's cost per $1,000, /set volume_cost). Each pick runs at the list's recommended
+leverage or, when the owner chooses, at the market's maximum (the same setting's max-leverage backtest).
+
 After every scan, review():
-- nothing running: offer the top 3 when they differ from the last offer;
-- running and still GO: nothing to do;
-- running and NO-GO: pause quoting on it (the runner's reduce-only exit works any position off), say why, and offer
-  the current top 3. It unpauses by itself once the same setting is GO on two scans in a row;
+- nothing running: offer the breakeven top 3 when they differ from the last offer;
+- running and still in its list (judged by the list it was picked from): nothing to do;
+- running and out of its list: pause quoting on it (the runner's reduce-only exit works any position off), say why,
+  and offer the current top 3. It unpauses by itself once it is back in its list on two scans in a row;
 - another GO candidate with at least 1.5x its maker volume: suggest a switch. The bot never switches on its own.
 Approving a different candidate closes the current position first (runner "close" command), then starts the new one.
 
@@ -31,8 +35,10 @@ from typing import Any
 
 import yaml
 
+from bot.common import settings
 from bot.common.config import SizingDefaults
 from bot.common.sizing import INV_BUFFER
+from bot.scout import profiles
 from bot.scout.scan import BY_NAME
 from bot.scout.sim import Config, Risk
 from bot.telegram.control import Control
@@ -173,6 +179,10 @@ class Pilot:
         a: dict[str, Any] | None = self.state().get("active")
         return a
 
+    def budget(self) -> float:
+        """The owner's cost budget for the volume lists (/set volume_cost), in dollars per $1,000 of volume."""
+        return settings.volume_cost(settings.load(self.root / "state"))
+
     def running(self) -> bool:
         a = self.active()
         return a is not None and self.control.is_running(a["mode"])
@@ -196,6 +206,11 @@ class Pilot:
             self.save(st)
             return out
         cand = next((c for c in scan.get("all", []) if c["market"] == a["market"] and c["config"] == a["config"]), None)
+        prof = profiles.profile_of(a.get("profile"))
+        budget = self.budget()
+        why_not = profiles.verdict(cand, prof, budget) if cand is not None else ["not in scan"]
+        if prof.key != "breakeven":
+            top = profiles.top(scan, prof, budget)
         base = base_of(a["market"])
         if a["market"] in (scan.get("offline") or []):
             st["go_streak"] = 0
@@ -207,10 +222,10 @@ class Pilot:
                                       "closed with reduce-only orders once it trades again.", top=top))
         elif cand is None:
             out.append(self.event("review", f"{a['market']} is not in this scan (no fresh data?). Leaving it as is."))
-        elif not cand["go"]:
+        elif why_not:
             st["go_streak"] = 0
             if not st.get("paused_by_scout"):
-                why = "; ".join(cand["reasons"])
+                why = "; ".join(why_not)
                 self.control.set_pause(a["mode"], base, f"scout: {why}")
                 st["paused_by_scout"] = why
                 out.append(self.event("paused", f"Paused {a['market']} ({a['config']}): {why}. Any position is being "
@@ -223,8 +238,8 @@ class Pilot:
             if st.get("paused_by_scout") and st["go_streak"] >= RESUME_AFTER_GO_SCANS:
                 self.control.clear_pause(a["mode"], base)
                 st.pop("paused_by_scout", None)
-                out.append(self.event("resumed", f"{a['market']} ({a['config']}) passes all checks again: quoting "
-                                      "resumed."))
+                out.append(self.event("resumed", f"{a['market']} ({a['config']}) is back in the {prof.title} list: "
+                                      "quoting resumed."))
             best = next((c for c in top if c["market"] != a["market"]), None)
             if best and best["volume_day"] >= SWITCH_X * max(cand["volume_day"], 1.0) and \
                     st.get("suggested") != f"{best['market']}|{best['config']}":
@@ -232,23 +247,38 @@ class Pilot:
                 out.append(self.event("suggest", f"{best['market']} ({best['config']}) now backtests at "
                                       f"${best['volume_day']:,.0f}/day vs ${cand['volume_day']:,.0f}/day for "
                                       f"{a['market']}. Switch only if you approve.", top=top))
-        st["last_review"] = {"ts": time.time(), "go": bool(cand and cand["go"]),
-                             "reasons": cand["reasons"] if cand else ["not in scan"]}
+        st["last_review"] = {"ts": time.time(), "go": bool(cand is not None and not why_not),
+                             "reasons": why_not, "profile": prof.key}
         self.save(st)
         return out
 
     # ---------------------------------------------------------------- approve / close
-    def pick(self, k: int) -> dict[str, Any]:
+    def top(self, profile: str = "breakeven") -> list[dict[str, Any]]:
+        """The list's top 3 from the last scan (breakeven: the scan's own GO top 3)."""
+        scan = self.latest_scan()
+        prof = profiles.profile_of(profile)
+        if prof.key == "breakeven":
+            return list((scan or {}).get("top") or [])
+        return profiles.top(scan, prof, self.budget())
+
+    def pick(self, k: int, profile: str = "breakeven", lev: str = "rec") -> dict[str, Any]:
+        """Candidate k of a list; lev "max": the same market and setting at the market's maximum leverage."""
         scan = self.latest_scan()
         if not scan:
             raise ValueError("no scan yet: start `bot scout run` and wait for the first scan")
         if time.time() - scan["ts_us"] / 1e6 > MAX_SCAN_AGE_S:
             raise ValueError("the last scan is over 90 minutes old; is `bot scout run` running?")
-        top = scan.get("top") or []
+        prof = profiles.profile_of(profile)
+        top = self.top(prof.key)
         if not 1 <= k <= len(top):
-            raise ValueError(f"pick 1-{len(top)}" if top else "nothing passes the checks right now")
+            raise ValueError(f"pick 1-{len(top)}" if top else f"nothing is in the {prof.title} list right now")
         c: dict[str, Any] = top[k - 1]
-        return c
+        if lev == "max":
+            m = profiles.at_max(scan, c)
+            if m is None:
+                raise ValueError(f"{c['market']} has no maximum-leverage backtest for {c.get('setting') or c['config']}")
+            c = m
+        return {**c, "profile": prof.key, "lev": lev}
 
     def write_session(self, c: dict[str, Any], *, live: bool) -> Path:
         cfg = BY_NAME[c.get("setting") or c["config"]]
@@ -261,9 +291,9 @@ class Pilot:
         self.session_path.write_text(head + yaml.safe_dump(s, sort_keys=False))
         return self.session_path
 
-    async def approve(self, k: int, *, live: bool, by: str, wait_close_s: float = 660.0,
-                      wait_start_s: float = 90.0) -> str:
-        c = self.pick(k)
+    async def approve(self, k: int, *, live: bool, by: str, profile: str = "breakeven", lev: str = "rec",
+                      wait_close_s: float = 660.0, wait_start_s: float = 90.0) -> str:
+        c = self.pick(k, profile, lev)
         mode = "live" if live else "paper"
         st = self.state()
         a = st.get("active")
@@ -280,7 +310,8 @@ class Pilot:
         self.control.clear_sizing_ok(mode)
         rec = self.control.start_run(SESSION, live=live)
         st.update(active={"market": c["market"], "config": c["config"], "mode": mode, "since": time.time(), "by": by,
-                          "backtest": c, "pid": rec["pid"], "log": rec["log"]}, go_streak=0)
+                          "backtest": c, "pid": rec["pid"], "log": rec["log"], "profile": c["profile"],
+                          "lev": c["lev"]}, go_streak=0)
         st.pop("paused_by_scout", None)
         st.pop("suggested", None)
         self.save(st)
@@ -288,7 +319,9 @@ class Pilot:
         while time.time() - t0 < wait_start_s:
             await asyncio.sleep(3)
             if self.control.is_running(mode):
-                self.event("deployed", f"Running {describe(c)} in {mode.upper()} (approved by {by}).")
+                prof = profiles.profile_of(c["profile"])
+                self.event("deployed", f"Running {describe(c)} in {mode.upper()}, from the {prof.icon} {prof.title} "
+                           f"list{' at the maximum leverage' if c['lev'] == 'max' else ''} (approved by {by}).")
                 if live:   # the live bot's independent watchdog (bot/ops.py); best effort, never blocks the deploy
                     with contextlib.suppress(Exception):
                         from bot import ops

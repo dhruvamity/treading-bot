@@ -106,7 +106,8 @@ async def run_service(root: Path, pilot: Pilot, *, rest_url: str, ws_url: str, e
                 n = scan_workers(want_workers, bool(pilot.control.running_modes()))
                 res = await loop.run_in_executor(None, functools.partial(
                     scan, root / "data" / "scout", workers=n, ladder=ladder, capital=cap, pct=z.pct(),
-                    capital_source=src, always={(a["market"], a["config"])} if a else None, stop=halt))
+                    capital_source=src, always={(a["market"], a["config"])} if a else None, stop=halt,
+                    volume_cost=settings.volume_cost(over)))
                 save_scan(root, res)
                 events = pilot.review(res)
                 log.info("scout_scan", data={"took_s": res["took_s"], "go": len(res["top"]), "capital": cap,

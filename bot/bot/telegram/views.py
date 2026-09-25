@@ -212,8 +212,11 @@ def fill_line(f: dict[str, Any]) -> str:
 
 HELP = """<b>What you can do</b> (or tap /menu)
 
-<b>Choose and start</b>
-/top3 — the 3 best setups right now; tap Run → Paper or LIVE
+<b>Choose and start</b> (tap Run → recommended or max leverage → Paper or LIVE)
+/top3 — the 3 best setups that are about breakeven or better
+/volume — the 3 with the most volume for at most your cost per $1,000 (<code>/set volume_cost 0.15</code>)
+/aggressive — aggressive Mid: quotes at the best price and flips fast, within the same cost
+(/volume and /aggressive also start a fresh scan and post its top 3 when it is done)
 /openpositions — what is running, today vs its backtest; Close & stop
 
 <b>Check</b>
@@ -244,7 +247,10 @@ work."""
 # Telegram's "/" list: the everyday commands (everything in HELP still works)
 COMMANDS: list[tuple[str, str]] = [
     ("dashboard", "Live screen: today's volume, PnL, capital (every 10 s)"),
-    ("top3", "Best 3 setups now, with Run buttons"), ("openpositions", "What is running and how it is doing"),
+    ("top3", "Best 3 setups now, about breakeven, with Run buttons"),
+    ("volume", "Best 3 for the most volume within your cost"),
+    ("aggressive", "Best 3 for aggressive Mid (fast flipping)"),
+    ("openpositions", "What is running and how it is doing"),
     ("status", "Running? today's profit, fills, volume"), ("balance", "Money in the account and its history"),
     ("positions", "What you hold"), ("orders", "Orders waiting on the book"),
     ("pauseneworders", "Stop new orders (closing orders keep working)"), ("unpause", "Place orders again"),
@@ -260,6 +266,7 @@ def menu_keyboard() -> Keyboard:
     return [
         [("📺 Live dashboard", "dashboard")],
         [("🏆 Top 3 now", "top3"), ("▶️ Running now", "openpositions")],
+        [("🔥 Volume top 3", "volume"), ("⚡ Aggressive Mid", "aggressive")],
         [("📊 Status", "status"), ("💰 Balance", "balance")],
         [("📦 Positions", "positions"), ("📋 Orders", "orders")],
         [("⏸ Pause new orders", "pauseneworders"), ("▶️ Unpause", "unpause")],
@@ -283,7 +290,14 @@ def confirm_keyboard(pid: str) -> Keyboard:
 
 
 # ------------------------------------------------------------------ scout / pilot
-def candidate_lines(top: list[dict[str, Any]]) -> str:
+def cost_text(c: dict[str, Any]) -> str:
+    from bot.scout.profiles import cost_1k
+
+    x = cost_1k(c)
+    return "" if x is None else "makes money" if x == 0 else f"costs ${x:.2f} per $1,000"
+
+
+def candidate_lines(top: list[dict[str, Any]], *, cost: bool = False) -> str:
     if not top:
         return "Nothing passes all checks right now."
     rows = []
@@ -294,9 +308,67 @@ def candidate_lines(top: list[dict[str, Any]]) -> str:
                 f"{' (max leverage)' if c.get('at_max') else ''}{uses}\n") if c.get("order_usd") else ""
         rows.append(f"<b>{i}. {escape(c['market'])}</b> — {escape(c['config'])}\n{size}"
                     f"   {c['fills_day']:.0f} fills/day · {usd(c['volume_day'], sign=False)} maker volume/day\n"
-                    f"   PnL {usd(c['pnl_day'])}/day (worst day {usd(c['worst_day'])}, {c['days']} days) · "
-                    f"last 24 h {usd(c['recent_pnl'])}")
+                    f"   PnL {usd(c['pnl_day'])}/day (worst day {usd(c['worst_day'])}, {c['days']} days)"
+                    + (f" · {cost_text(c)}" if cost and cost_text(c) else "")
+                    + (f" · last 24 h {usd(c['recent_pnl'])}" if c.get("recent_checked", True) else ""))
     return "\n".join(rows)
+
+
+def profile_text(scan: dict[str, Any] | None, profile: str, budget: float, now: float) -> str:
+    """One list's top 3 (bot/scout/profiles.py): what it is for, the scan it comes from, the candidates."""
+    from bot.scout import profiles as P
+
+    p = P.profile_of(profile)
+    if not scan:
+        return "No scan yet. Start the scout on the server: <code>bot up</code> (it scans every 30 min)."
+    top = P.top(scan, p, budget) if p.budget else list(scan.get("top") or [])
+    cap = (scan.get("capital") or {}).get("usd")
+    head = [f"{p.icon} <b>{p.title}</b> — top 3", f"<i>{escape(p.blurb)}</i>",
+            f"Scan {ago(now - scan['ts_us'] / 1e6)} ago · {scan.get('markets')} markets"
+            + (f" · {usd(float(cap), sign=False)} capital" if cap else "")
+            + (f" · budget ${budget:.2f} per $1,000 (/set volume_cost)" if p.budget else "")]
+    if top:
+        body = candidate_lines(top, cost=p.budget)
+    elif p.budget:
+        near = P.nearest(scan, p, budget)
+        body = "Nothing fits the budget right now."
+        if near:
+            body += ("\n\n<i>Cheapest that pass every other check:</i>\n" + "\n".join(
+                f"· {escape(c['market'])} {escape(c['config'])}: {money(c['volume_day'])}/day, {cost_text(c)}"
+                for c in near) + f"\n<code>/set volume_cost {max((P.cost_1k(c) or 0) for c in near) + 0.005:.2f}"
+                f"</code> lets them in.")
+    else:
+        body = "Nothing passes all checks right now: no setup is about breakeven or better and still working now."
+        near = [c for c in scan.get("ranked", []) if not c["go"] and c.get("days")][:3]
+        if near:
+            body += "\n\n<i>Closest that failed:</i>\n" + "\n".join(
+                f"· {escape(c['market'])} {escape(c['config'])}: {escape('; '.join(c['reasons'])[:120])}" for c in near)
+            body += "\n\n🔥 /volume and ⚡ /aggressive list setups that cost a little for more volume."
+    return "\n".join(head) + "\n\n" + body + "\n\n<i>Run → recommended or maximum leverage → Paper or LIVE.</i>"
+
+
+def profile_keyboard(profile: str, top: list[dict[str, Any]]) -> Keyboard:
+    from bot.scout.profiles import PROFILES
+
+    rows: Keyboard = []
+    if top:
+        rows.append([(f"Run #{i}", f"pick {profile} {i}") for i in range(1, len(top) + 1)])
+    rows.append([(f"{p.icon} {p.title.split()[0]}", f"top3 {p.key}") for p in PROFILES.values() if p.key != profile])
+    rows.append([("🔄 Fresh scan", f"rescan {profile}"), ("☰ Menu", "menu")])
+    return rows
+
+
+def leverage_keyboard(profile: str, k: int, rec: dict[str, Any], mx: dict[str, Any] | None) -> Keyboard:
+    rows: Keyboard = [[(f"✅ Recommended {rec['leverage']:g}x", f"lev {profile} {k} rec")]]
+    if mx is not None and not rec.get("at_max"):
+        rows[0].append((f"🚀 Max {mx['leverage']:g}x", f"lev {profile} {k} max"))
+    rows.append([("✖️ Cancel", "no")])
+    return rows
+
+
+def run_keyboard(profile: str, k: int, lev: str, live_ok: bool) -> Keyboard:
+    return [[("Paper", f"deploy {profile} {k} {lev} paper")]
+            + ([("LIVE", f"deploy {profile} {k} {lev} live")] if live_ok else []), [("✖️ Cancel", "no")]]
 
 
 def pick_keyboard(top: list[dict[str, Any]]) -> Keyboard:
@@ -347,7 +419,12 @@ def pilot_text(pilot: Any) -> str:
     view = pilot.control.view(a["mode"]) if running else None
     today = day_pnl(view) if view is not None else None
     checks = "passing" if rev.get("go") else "failing: " + escape("; ".join(rev.get("reasons") or [])[:200])
-    return (f"<b>Deployed:</b> {escape(a['market'])} — {escape(a['config'])} ({a['mode'].upper()}), since {since} UTC\n"
+    from bot.scout.profiles import profile_of
+
+    prof = profile_of(a.get("profile"))
+    lst = f" · {prof.icon} {prof.title} list" + (" · max leverage" if a.get("lev") == "max" else "")
+    return (f"<b>Deployed:</b> {escape(a['market'])} — {escape(a['config'])} ({a['mode'].upper()}){lst}, "
+            f"since {since} UTC\n"
             f"State: {state}\n"
             f"Today: {usd(today)} · backtest expected {usd(bt.get('pnl_day'))}/day, "
             f"{usd(bt.get('volume_day'), sign=False)} volume/day\n"

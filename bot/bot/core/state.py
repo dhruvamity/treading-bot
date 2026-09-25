@@ -64,6 +64,9 @@ class LocalOrder:
         return max(Decimal(0), self.req.size - self.filled)
 
 
+PENDING_GRACE_S = 10.0   # reconcile leaves an unacknowledged order alone this long after it was sent
+
+
 @dataclass
 class ReconcileReport:
     unknown_live: list[OrderState] = field(default_factory=list)
@@ -251,12 +254,20 @@ class StateStore:
             else:
                 seen.add(cid)
                 self.on_update(st)
+        now = now_us()
         for o in self.open_orders(venue):
-            if o.req.client_id not in seen and o.status is not OrderStatus.PENDING_NEW:
-                rep.missing_local.append(o.req.client_id)
-                o.status = OrderStatus.CANCELED
-                o.reject_reason = "reconcile_missing"
-                self._save_order(o)
+            if o.req.client_id in seen:
+                continue
+            # A placement (or a cancel-replace modify) can still be on its way for a few seconds; past that, an order
+            # the venue does not list is gone, whether or not its ack ever arrived. Skipping PENDING_NEW for good
+            # left orders whose placement errored as permanent ghosts: the strategy kept modifying them by clientId
+            # ("order could not be found") and never placed a real quote again.
+            if o.status is OrderStatus.PENDING_NEW and now - max(o.created_us, o.updated_us) < PENDING_GRACE_S * 1e6:
+                continue
+            rep.missing_local.append(o.req.client_id)
+            o.status = OrderStatus.CANCELED
+            o.reject_reason = "reconcile_missing"
+            self._save_order(o)
         vpos = {p.base: p for p in venue_positions}
         bases = {b for (v, b) in self.positions if v is venue} | set(vpos)
         for b in bases:

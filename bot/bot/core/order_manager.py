@@ -6,7 +6,11 @@
 - otherwise modify (Arcus/Lighter both support it) or cancel + place;
 - unmatched live orders are cancelled; in-flight (unacked) orders are never touched twice. An order counts as in
   flight from just before its request is sent until the venue's first update for it, or IN_FLIGHT_MAX_S at most: on a
-  fast venue the update can arrive before the request returns, and an order must never stay frozen because of that;
+  fast venue the update can arrive before the request returns, and an order must never stay frozen because of that.
+  An order the venue never acknowledged (still PENDING_NEW past that window) is left alone and a reconciliation is
+  asked for: modifying it by clientId would only get "order could not be found", every tick;
+- a modify or cancel the venue refuses is not retried on the next tick: the order is left alone for IN_FLIGHT_MAX_S
+  and the adapter is asked to reconcile (the order may be gone, or its id unknown);
 - a post-only order that would cross the CURRENT BBO is re-priced one tick behind the touch, never sent crossing;
 - venue minimums (Arcus $5 opening, Lighter $10 + min base), max size and per-market open-order caps are enforced;
 - actions are ordered cancels -> modifies -> places.
@@ -23,7 +27,7 @@ from enum import StrEnum
 from bot.common.errors import PreTradeReject
 from bot.common.ids import ClientIdFactory
 from bot.common.logging import DecisionLog, Log
-from bot.venues.base import TIF, Market, OrderRequest, Side, Venue
+from bot.venues.base import TIF, Market, OrderRequest, OrderStatus, Side, Venue
 
 log = Log("order_manager")
 IN_FLIGHT_MAX_S = 5.0   # an order with no venue update after this long is managed again (a lost ack must not freeze it)
@@ -185,6 +189,7 @@ class OrderManager:
         self.account_index = account_index or {}
         self.in_flight: dict[str, int] = {}   # client id -> when its request was sent (us)
         self.now_fn = now_fn
+        self._resync_at: dict[Venue, int] = {}
 
     def _dec(self, kind: str, reason: str, **kw: object) -> None:
         self.decisions.record(kind, reason, ts_us=self.now_fn() if self.now_fn else None, **kw)  # type: ignore[arg-type]
@@ -208,6 +213,17 @@ class OrderManager:
         for c in client_ids:
             self.in_flight[c] = now
 
+    def resync(self, venue: Venue, why: str) -> None:
+        """Ask the runner to reconcile this venue now (its loop checks every 5 s); at most once per IN_FLIGHT_MAX_S."""
+        now = self._now()
+        if now - self._resync_at.get(venue, 0) < IN_FLIGHT_MAX_S * 1e6:
+            return
+        self._resync_at[venue] = now
+        ad = self.adapters.get(venue)
+        if ad is not None:
+            ad.resync_requested = True  # type: ignore[attr-defined]
+        log.warning("resync_requested", venue=venue.value, reason=why)
+
     def new_client_id(self, venue: Venue) -> str:
         f = self.ids[venue]
         return f.arcus() if venue is Venue.ARCUS else str(f.lighter())
@@ -219,8 +235,12 @@ class OrderManager:
             if r.tif not in (TIF.POST_ONLY, TIF.GTT):
                 continue
             rem = o.remaining
+            busy = self.is_in_flight(r.client_id)
+            if not busy and o.status is OrderStatus.PENDING_NEW:   # no ack yet: let reconciliation say what it is
+                busy = True
+                self.resync(venue, f"no venue ack for {r.client_id}")
             out.append(LiveOrderView(r.client_id, r.side, int(r.price / m.tick_size), int(rem / m.step_size), r.tag,
-                                     r.reduce_only, self.is_in_flight(r.client_id)))
+                                     r.reduce_only, busy))
         return out
 
     def to_request(self, venue: Venue, m: Market, d: DesiredOrder, reason: str, client_id: str | None = None) -> OrderRequest:
@@ -249,10 +269,9 @@ class OrderManager:
             try:
                 await adapter.cancel(ids)  # type: ignore[attr-defined]
                 res.actions += cancels
-            except Exception as e:
-                for c in ids:
-                    self.in_flight.pop(c, None)   # not accepted: try again on the next tick
+            except Exception as e:   # refused: leave them for IN_FLIGHT_MAX_S and let reconciliation say what is left
                 res.errors.append(f"cancel: {e}")
+                self.resync(venue, f"cancel refused: {str(e)[:120]}")
         for a in modifies:
             assert a.desired is not None and a.client_id is not None
             req = self.to_request(venue, m, a.desired, f"{why}: {a.reason}", a.client_id)
@@ -267,8 +286,10 @@ class OrderManager:
                 await adapter.modify(a.client_id, req.price, req.size)  # type: ignore[attr-defined]
                 self.state.on_modify_intent(a.client_id, req.price, req.size, req.reason)  # type: ignore[attr-defined]
                 res.actions.append(a)
-            except Exception as e:
+            except Exception as e:   # refused (e.g. not found): no retry every tick; reconcile instead
                 res.errors.append(f"modify {a.client_id}: {e}")
+                self._mark([a.client_id])
+                self.resync(venue, f"modify refused: {str(e)[:120]}")
         reqs: list[OrderRequest] = []
         for a in places:
             assert a.desired is not None

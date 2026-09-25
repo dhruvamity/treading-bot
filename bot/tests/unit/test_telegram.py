@@ -75,6 +75,7 @@ class FakeAPI:
     def __init__(self) -> None:
         self.sent: list[tuple[Any, str, Any]] = []
         self.edits: list[tuple[Any, int, str]] = []
+        self.edit_keyboards: list[Any] = []
 
     async def send(self, chat_id: Any, text: str, *, keyboard: Any = None, silent: bool = False) -> dict[str, Any]:
         self.sent.append((chat_id, text, keyboard))
@@ -82,6 +83,7 @@ class FakeAPI:
 
     async def edit(self, chat_id: Any, message_id: int, text: str, *, keyboard: Any = None) -> None:
         self.edits.append((chat_id, message_id, text))
+        self.edit_keyboards.append(keyboard)
 
     async def answer(self, callback_id: str, text: str = "") -> None:
         return None
@@ -371,12 +373,12 @@ async def test_scout_run_button_needs_confirm_and_deploys_paper(tmp_path: Path) 
     (tmp_path / "data" / "scout").mkdir(parents=True)
     (tmp_path / "data" / "scout" / "latest.json").write_text(json.dumps(_scan([_cand("NVDA-USD", "deep 3bp")])))
     await bot.handle(msg("/scout"))
-    assert "NVDA-USD" in api.texts() and api.sent[-1][2][0][0] == ("Run #1", "pick 1")
-    await bot.handle(press("pick 1"))
-    assert "Paper" in str(api.edits[-1]) or "deploy 1 paper" in str(api.sent[-1][2])
+    assert "NVDA-USD" in api.texts() and api.sent[-1][2][0][0] == ("Run #1", "pick breakeven 1")
+    await bot.handle(press("pick 1"))                                   # a button from before the lists still works
+    assert "deploy breakeven 1 rec paper" in str(api.edit_keyboards[-1])   # no max-leverage backtest: to Run
     calls: list[tuple[int, bool]] = []
 
-    async def fake_approve(k: int, *, live: bool, by: str) -> str:
+    async def fake_approve(k: int, *, live: bool, by: str, profile: str = "breakeven", lev: str = "rec") -> str:
         calls.append((k, live))
         return "ok"
     pilot.approve = fake_approve  # type: ignore[method-assign]

@@ -136,6 +136,7 @@ names `/scout`, `/pilot`, `/report`, `/pause`, `/resume`, `/flatten` still work)
 | Command | What happens |
 |---|---|
 | `/top3` | The 3 best setups right now (backtested), with Run buttons: Paper = confirm button, LIVE = `BOT_PILOT_LIVE=1`, doctor, typed code |
+| `/volume`, `/aggressive` | The volume lists (bot/scout/profiles.py): most volume within `volume_cost` per $1,000, any setting or aggressive Mid only. Each also asks the scout for a scan (state/scan_now) and posts the fresh top 3; Run → Recommended or Max leverage → Paper/LIVE |
 | `/openpositions` | What is deployed, today's PnL vs the backtest, the last check; Close & stop |
 | `/dashboard` | One message edited every 10 s and pinned (state/telegram_dashboard.json, survives a restart): today's volume and pace, today's PnL from the balance history (deposits excluded), position, equity and capital P/L. ⏹ / ▶️ buttons; `bot dashboard` is the terminal version |
 | `/status`, `/pnl`, `/positions`, `/orders` | What is running, today's PnL, fills and maker volume; PnL by market since start |
@@ -150,7 +151,7 @@ names `/scout`, `/pilot`, `/report`, `/pause`, `/resume`, `/flatten` still work)
 | `/closeall [venue] [taker]` | One-time code: cancels everything, then closes every position reduce-only (maker, or IOC with `taker`) |
 | `/alerts`, `/mute [min]`, `/unmute` | Alert settings |
 | `/balance` | The account read now and logged (state/balances.jsonl): equity, deposits vs trading PnL, 1/7/30-day change |
-| `/settings`, `/set NAME VALUE` | Change capital, trade_share, max_capital, the stops, scan_every, scan_workers (Confirm button; `/set NAME default` undoes) |
+| `/settings`, `/set NAME VALUE` | Change capital, trade_share, max_capital, the stops, scan_every, scan_workers, volume_cost (Confirm button; `/set NAME default` undoes) |
 | `/scannow` | Ask the scout for a scan now |
 
 **Alerts it sends by itself** (critical ones ignore `/mute`)

@@ -16,12 +16,13 @@ from typing import Any
 from bot.common.config import SizingDefaults
 
 FILE = "settings.json"
+DEFAULT_VOLUME_COST = 0.15   # dollars per $1,000 of volume the volume lists may cost (about 1.5 bp)
 
 
 @dataclass(frozen=True)
 class Setting:
     name: str
-    kind: str          # money_auto | money_none | pct | minutes | workers
+    kind: str          # money_auto | money_none | pct | minutes | workers | per1k
     lo: float
     hi: float
     help: str
@@ -46,6 +47,9 @@ SETTINGS: dict[str, Setting] = {s.name: s for s in (
     Setting("scan_every", "minutes", 10, 240, "Minutes between scout scans", "after the current wait"),
     Setting("scan_workers", "workers", 1, 32,
             "CPU cores a scan may use: auto = all but one, and one while a bot runs on this machine", "next scan"),
+    Setting("volume_cost", "per1k", 0.01, 5,
+            "The most the Volume and Aggressive Mid lists may cost: dollars lost per $1,000 traded (0.15 = 1.5 bp)",
+            "those lists at once; the next scan also re-checks the last 24 h of the settings it lets in"),
 )}
 
 
@@ -123,6 +127,11 @@ def scout_options(overrides: dict[str, Any]) -> tuple[float | None, int | str | 
     return overrides.get("scan_every"), overrides.get("scan_workers")
 
 
+def volume_cost(overrides: dict[str, Any]) -> float:
+    """The owner's budget for the volume lists, in dollars per $1,000 of volume."""
+    return float(overrides.get("volume_cost") or DEFAULT_VOLUME_COST)
+
+
 def show(name: str, value: Any) -> str:
     s = SETTINGS[name]
     if value is None:
@@ -135,6 +144,8 @@ def show(name: str, value: Any) -> str:
         return f"{float(value):g}%"
     if s.kind == "minutes":
         return f"{int(value)} min"
+    if s.kind == "per1k":
+        return f"${float(value):.2f} per $1,000"
     return str(value)
 
 
@@ -142,4 +153,4 @@ def defaults(base: SizingDefaults, every_min: float, workers: int | str | None) 
     """What each setting is when the owner has not changed it."""
     return {"capital": base.capital_usd, "trade_share": base.capital_frac * 100, "max_capital": base.max_capital_usd,
             "position_stop": base.position_stop_pct, "daily_stop": base.daily_stop_pct, "kill": base.kill_pct,
-            "scan_every": every_min, "scan_workers": workers or "auto"}
+            "scan_every": every_min, "scan_workers": workers or "auto", "volume_cost": DEFAULT_VOLUME_COST}
