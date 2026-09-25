@@ -80,7 +80,7 @@ def test_dgrid_picks_grid_in_chop_and_rgrid_in_a_trend() -> None:
 
 def test_menu_names_and_modes() -> None:
     assert len(BY_NAME) == len(FARM_MENU) >= 25
-    assert {e.cfg.mode for e in FARM_MENU} <= {"tmid", "mid", "anchor", "rgrid", "dgrid", "rsiskew"}
+    assert {e.cfg.mode for e in FARM_MENU} <= {"tmid", "vmid", "mid", "anchor", "rgrid", "dgrid", "rsiskew"}
     assert all(e.sources for e in FARM_MENU)
 
 
