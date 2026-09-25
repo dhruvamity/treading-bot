@@ -1,8 +1,8 @@
 """Market data hub (P2 task 1): one in-memory view per venue/market, fed identically by live WebSocket
-callbacks or by the simulator's event stream.
+callbacks or by the test simulator's event stream.
 
 Derived at 1 s: mid, spread (bps), depth at q and 5q, EWMA realised vol at 1 s / 1 min / 1 h (as fractions per
-horizon), rolling medians for the safety pause, 1-minute bars for Signal/Autopilot features, and staleness.
+horizon), rolling medians for the safety pause, 1-minute bars for Signal, and staleness.
 """
 
 from __future__ import annotations
@@ -76,7 +76,6 @@ class MarketView:
     price_ts_us: int = 0
     predicted_funding_h: float | None = None
     last_funding_h: float | None = None
-    premium: float | None = None
     is_outside_rth: bool = False
     upper_bound: Decimal | None = None
     lower_bound: Decimal | None = None

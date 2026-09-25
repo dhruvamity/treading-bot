@@ -1,7 +1,9 @@
 """Guardian (P2 task 7): an independent process with its own venue connections.
 
-- Watches the bot heartbeat (written every 5 s). Stale for 60 s -> cancel-all on both venues + CRIT alert.
-  (The Arcus dead man's switch fires on its own too; the guardian covers Lighter and the 10-fires/day cap.)
+- Watches the bot heartbeat (written every 5 s). Stale for 60 s -> cancel-all + CRIT alert. (The Arcus dead man's
+  switch fires on its own too; the guardian covers its 10-fires/day cap and a bot that hangs with the switch armed.)
+- A bot stopped on purpose (Telegram /stop, close, `bot down --all`) writes a last heartbeat saying so after it has
+  pulled its quotes: the guardian then exits quietly instead of alarming.
 - Watches account equity from public reads; drawdown beyond the hard limit -> cancel-all and flatten:
   reduce-only maker orders first, IOC reduce-only after 30 s.
 - NEVER places a risk-increasing order: every order it sends is reduce-only.
@@ -19,7 +21,7 @@ from bot.common.ids import ClientIdFactory
 from bot.common.logging import Log
 from bot.common.time import now_us
 from bot.core.alerts import Alerter, Level
-from bot.core.heartbeat import read_heartbeat_age_s
+from bot.core.heartbeat import read_heartbeat, read_heartbeat_age_s
 from bot.venues.base import TIF, Market, OrderRequest, Position, Side, Venue
 
 log = Log("guardian")
@@ -52,8 +54,8 @@ def flatten_orders(positions: Sequence[Position], markets: dict[str, Market], mi
             px = m.round_price(mid, is_bid=side is Side.BUY)
             tif = TIF.POST_ONLY
         size = (abs(p.size) / m.step_size).to_integral_value() * m.step_size
-        cid = ids.arcus() if venue is Venue.ARCUS else str(ids.lighter())
-        out.append(OrderRequest(venue, p.base, side, px, size, tif, reduce_only=True, client_id=cid, tag="guardian_flatten",
+        out.append(OrderRequest(venue, p.base, side, px, size, tif, reduce_only=True, client_id=ids.arcus(),
+                                tag="guardian_flatten",
                                 reason="guardian flatten (reduce-only)"))
     assert all(o.reduce_only for o in out), "guardian may only send reduce-only orders"
     return out
@@ -70,6 +72,8 @@ class Guardian:
     taker_after_s: float = 30.0
     fired_heartbeat: bool = False
     fired_drawdown: bool = False
+    stood_down: bool = False
+    started_us: int = field(default_factory=now_us)
     ids: ClientIdFactory = field(default_factory=lambda: ClientIdFactory("guardian", now_us() // 60_000_000 % 10**7))
 
     async def cancel_all_everywhere(self, why: str) -> None:
@@ -104,13 +108,22 @@ class Guardian:
 
     async def check_once(self) -> list[str]:
         actions: list[str] = []
-        age = read_heartbeat_age_s(self.heartbeat_file)
-        if age > self.heartbeat_timeout_s and not self.fired_heartbeat:
-            self.fired_heartbeat = True
-            actions.append("heartbeat_cancel_all")
-            await self.cancel_all_everywhere(f"bot heartbeat silent for {age:.0f}s")
-        elif age <= self.heartbeat_timeout_s:
-            self.fired_heartbeat = False
+        hb = read_heartbeat(self.heartbeat_file) or {}
+        if hb.get("stopped"):
+            # The bot stopped on purpose and pulled its quotes: nothing to alarm about. Stand down once that stop is
+            # newer than this guardian (an older one only means its bot has not written a heartbeat yet).
+            if int(str(hb.get("ts_us") or 0)) >= self.started_us:
+                self.stood_down = True
+                log.info("guardian_stood_down", reason=str(hb["stopped"]))
+                return ["stood_down"]
+        else:
+            age = read_heartbeat_age_s(self.heartbeat_file)
+            if age > self.heartbeat_timeout_s and not self.fired_heartbeat:
+                self.fired_heartbeat = True
+                actions.append("heartbeat_cancel_all")
+                await self.cancel_all_everywhere(f"bot heartbeat silent for {age:.0f}s")
+            elif age <= self.heartbeat_timeout_s:
+                self.fired_heartbeat = False
         for gv in self.venues:
             try:
                 bal = await gv.adapter.balances()  # type: ignore[attr-defined]
@@ -130,7 +143,7 @@ class Guardian:
 
     async def run(self) -> None:
         log.info("guardian_started", data={"venues": [g.venue.value for g in self.venues]})
-        while True:
+        while not self.stood_down:
             try:
                 await self.check_once()
             except Exception as e:

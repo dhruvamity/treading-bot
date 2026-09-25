@@ -46,7 +46,7 @@ from zoneinfo import ZoneInfo
 import numpy as np
 
 from bot.common.sizing import Pct, bucket, min_capital, venue_min_usd
-from bot.scout.sim import Config, MarketInfo, Result, Risk, S, Sim, SimParams, Window
+from bot.scout.sim import Config, MarketInfo, Risk, S, Sim, SimParams, Window
 from bot.scout.tape import US_DAY, TapeStore, day_start_us, day_str
 
 SIM_VERSION = "6"          # bump when the simulator changes, so cached day results are recomputed
@@ -708,10 +708,6 @@ def scan(root: Path, *, now_us: int | None = None, markets: list[str] | None = N
             "ranked": [c.as_dict() for c in ranked],
             "at_max": [c.as_dict() for c in best_at_max(cands)],
             "all": [c.as_dict() for c in cands]}
-
-
-def as_result(d: dict[str, Any]) -> Result:
-    return Result(**d)
 
 
 def limits(root: Path, markets: list[str] | None = None, now_us: int | None = None) -> list[dict[str, Any]]:

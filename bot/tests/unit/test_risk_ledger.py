@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import json
 from decimal import Decimal as D
 from pathlib import Path
 
@@ -12,7 +13,7 @@ from bot.common.config import RiskLimitsCfg, SafetyPauseCfg
 from bot.common.errors import PreTradeReject
 from bot.common.ids import ClientIdFactory
 from bot.core.alerts import Alerter
-from bot.core.budget import ArcusGovernor, BudgetMode, LighterGovernor
+from bot.core.budget import ArcusGovernor, BudgetMode
 from bot.core.calendar import TradingCalendar, in_ist_windows
 from bot.core.dms import DeadMansSwitch
 from bot.core.guardian import GuardedVenue, Guardian, flatten_orders
@@ -35,27 +36,27 @@ def fill(side: Side, px: str, sz: str, *, fee: str = "0", liq: bool = False, tid
 # ------------------------------------------------------------------------------------------------ ledger (C5)
 def test_ledger_identity_and_terms() -> None:
     lg = Ledger()
-    seq = [(Side.BUY, "100", "1", "100.5", "0.01", "strategy"), (Side.SELL, "101", "1", "100.5", "0.01", "strategy"),
-           (Side.SELL, "99", "2", "100", "0.02", "hedge"), (Side.BUY, "98", "1", "97.9", "0", "strategy")]
+    seq = [(Side.BUY, "100", "1", "100.5", "0.01"), (Side.SELL, "101", "1", "100.5", "0.01"),
+           (Side.SELL, "99", "2", "100", "0.02"), (Side.BUY, "98", "1", "97.9", "0")]
     cash = D(0)
     fees = D(0)
     pos = D(0)
-    for i, (side, px, sz, mid, fee, kind) in enumerate(seq):
-        lg.on_fill(fill(side, px, sz, fee=fee, tid=str(i)), D(mid), kind=kind)
+    for i, (side, px, sz, mid, fee) in enumerate(seq):
+        lg.on_fill(fill(side, px, sz, fee=fee, tid=str(i)), D(mid))
         cash -= D(sz) * side.sign * D(px)
         fees += D(fee)
         pos += D(sz) * side.sign
     lg.on_funding(Venue.ARCUS, "BTC", D("0.37"))
     liq = fill(Side.BUY, "105", "1", fee="1.05", liq=True, tid="L")
-    lg.on_fill(liq, D("104"), kind="liquidation")
+    lg.on_fill(liq, D("104"))
     cash -= D("105")
     pos += 1
     mark = D("103")
     b = lg.breakdown(Venue.ARCUS, "BTC", mark)
     d_equity = cash + pos * mark + D("0.37") - fees - D("1.05")
     assert b.net == d_equity  # exact identity
-    assert b.spread_capture == D("0.5") + D("0.5") + D("-0.1")
-    assert b.hedge_cost == D("2") and b.liquidation_loss == D("1") + D("1.05")  # costs are positive
+    assert b.spread_capture == D("0.5") + D("0.5") + D("-2") + D("-0.1")
+    assert b.liquidation_loss == D("1") + D("1.05")  # costs are positive
     assert b.volume == D("100") + D("101") + D("198") + D("98") + D("105")
     assert b.cpm is not None
 
@@ -115,11 +116,11 @@ def test_pretrade_collateral_and_oi_cap() -> None:
 def test_kill_session_sl_daily_loss_drawdown() -> None:
     r = RiskEngine(limits=RiskLimitsCfg())
     ds = r.on_pnl(venue=Venue.ARCUS, session_id="s", session_pnl=D("-3.6"), session_margin=D(35), stop_loss_pct=10,
-                  take_profit_pct=None, day_pnl=D("-3.6"), capital=D(100), equity=D("96.4"), is_dn=False, ts_us=T0)
+                  take_profit_pct=None, day_pnl=D("-3.6"), capital=D(100), equity=D("96.4"), ts_us=T0)
     acts = {d.action for d in ds}
     assert RiskAction.FLATTEN_SESSION in acts and RiskAction.STOP_VENUE_DAY in acts
     ds = r.on_pnl(venue=Venue.ARCUS, session_id="s", session_pnl=D(0), session_margin=D(35), stop_loss_pct=10,
-                  take_profit_pct=None, day_pnl=D(0), capital=D(100), equity=D("86"), is_dn=False, ts_us=T0)
+                  take_profit_pct=None, day_pnl=D(0), capital=D(100), equity=D("86"), ts_us=T0)
     assert any(d.action is RiskAction.STOP_ALL for d in ds)  # peak 96.4 -> 86 is > 10% of $100
     with pytest.raises(PreTradeReject):
         r.check(req(Side.BUY, "85990.0", "0.00012"), BTC)
@@ -127,14 +128,14 @@ def test_kill_session_sl_daily_loss_drawdown() -> None:
     assert Venue.ARCUS not in r.venue_stopped_day
 
 
-def test_kill_take_profit_and_dn_drawdown() -> None:
+def test_kill_take_profit_and_kill_usd() -> None:
     r = RiskEngine(limits=RiskLimitsCfg())
     ds = r.on_pnl(venue=Venue.ARCUS, session_id="s", session_pnl=D("3.6"), session_margin=D(35), stop_loss_pct=10,
-                  take_profit_pct=10, day_pnl=D(0), capital=D(50), equity=D(50), is_dn=True, ts_us=T0)
+                  take_profit_pct=10, day_pnl=D(0), capital=D(50), equity=D(50), ts_us=T0)
     assert any(d.trigger == "session_tp" for d in ds)
     ds = r.on_pnl(venue=Venue.ARCUS, session_id="s", session_pnl=D(0), session_margin=D(35), stop_loss_pct=10,
-                  take_profit_pct=None, day_pnl=D(0), capital=D(50), equity=D("45.9"), is_dn=True, ts_us=T0)
-    assert any(d.action is RiskAction.STOP_ALL for d in ds)  # 8% DN limit
+                  take_profit_pct=None, day_pnl=D(0), capital=D(50), equity=D("45.9"), ts_us=T0, kill_usd=D(4))
+    assert any(d.action is RiskAction.STOP_ALL for d in ds)  # $4.10 below the peak > the $4 kill
 
 
 def test_kill_safety_pause_and_resume() -> None:
@@ -180,7 +181,7 @@ def test_kill_spread_and_depth_pause() -> None:
     assert r2.safety_pause(v2, T0) is None
 
 
-def test_kill_event_window_band_oi_liq_hedge_reject_safe_mode() -> None:
+def test_kill_event_window_band_oi_liq_reject_safe_mode() -> None:
     cal = TradingCalendar.load(Path(__file__).parents[2] / "config" / "calendars")
     r = RiskEngine(calendar=cal)
     fomc = next(e for e in cal.events if e.kind == "fomc")
@@ -194,27 +195,24 @@ def test_kill_event_window_band_oi_liq_hedge_reject_safe_mode() -> None:
     assert not r.quoting_allowed(Venue.ARCUS, "SPY", T0)[0]
     v.upper_in_zone = False
     assert r.band_or_oi(v, MK[Venue.ARCUS]["SPY"]) is None
-    n_sig, d = r.liquidation_distance(Venue.LIGHTER_RH, "SPY", collateral=D(25), notional=D(75), mmf=D("0.012"),
+    n_sig, d = r.liquidation_distance(Venue.ARCUS, "SPY", collateral=D(25), notional=D(75), mmf=D("0.012"),
                                       sigma_1h=0.1)
     assert d is not None and d.action is RiskAction.REDUCE_HALF and n_sig < 4
-    _, d2 = r.liquidation_distance(Venue.LIGHTER_RH, "SPY", collateral=D(25), notional=D(75), mmf=D("0.012"),
+    _, d2 = r.liquidation_distance(Venue.ARCUS, "SPY", collateral=D(25), notional=D(75), mmf=D("0.012"),
                                    sigma_1h=0.003)
-    assert d2 is None and (Venue.LIGHTER_RH, "SPY") not in r.reduce_active  # back above 6 sigma
-    d = r.hedge_missing(Venue.LIGHTER_RH, "BTC", D(25), 6.0, D(10))
-    assert d is not None and d.action is RiskAction.HEDGE_FLATTEN
-    assert r.hedge_missing(Venue.LIGHTER_RH, "BTC", D(15), 6.0, D(10)) is None  # residual within 2x minimum
+    assert d2 is None and (Venue.ARCUS, "SPY") not in r.reduce_active  # back above 6 sigma
     d = r.on_reject(Venue.ARCUS, "SELF_TRADE")
     assert d is not None and d.action is RiskAction.STOP_VENUE_CRIT
     assert r.on_reject(Venue.ARCUS, "POST_ONLY_WOULD_CROSS") is None
-    r.enter_safe_mode(Venue.LIGHTER_RH, "dms failed twice")
-    assert not r.quoting_allowed(Venue.LIGHTER_RH, "BTC", T0)[0]
-    r.resume(Venue.LIGHTER_RH)
-    assert r.quoting_allowed(Venue.LIGHTER_RH, "BTC", T0)[0]
+    r.enter_safe_mode(Venue.ARCUS, "dms failed twice")
+    assert not r.quoting_allowed(Venue.ARCUS, "BTC", T0)[0]
+    r.resume(Venue.ARCUS)
+    assert r.quoting_allowed(Venue.ARCUS, "BTC", T0)[0]
 
 
 def test_liquidation_distance_worked_example() -> None:
     """A6.7: C = $25, N = $75, MMF 1.2% -> ~32% adverse move."""
-    from bot.research.sim.margin import distance_to_liquidation
+    from tests.sim.margin import distance_to_liquidation
 
     assert abs(distance_to_liquidation(D(25), D(75), D("0.012")) - D("0.3213333333")) < D("1e-9")
 
@@ -236,16 +234,6 @@ def test_arcus_governor_ratio() -> None:
     g.record_actions(100, now=0.0)
     g.record_fill(10.0, now=0.0)  # 100 actions / $10 = 10 > 8
     assert g.actions_per_filled_usd(now=1.0) == 10.0 and g.mode(now=1.0) is BudgetMode.WIDE
-
-
-def test_lighter_governor() -> None:
-    g = LighterGovernor()
-    g.record_tx(50, now=0.0)
-    assert g.remaining(now=1.0) == 10 and g.mode(now=1.0) is BudgetMode.WIDE
-    assert not g.can_act("place", pending_in_market=10, now=1.0)
-    g.on_rate_limited(now=2.0)
-    assert g.mode(now=3.0) is BudgetMode.CANCELS_ONLY and g.can_act("cancel", now=3.0)
-    assert g.mode(now=70.0) is not BudgetMode.CANCELS_ONLY
 
 
 # ------------------------------------------------------------------------------------------------ DMS / guardian
@@ -312,6 +300,22 @@ async def test_guardian_heartbeat_and_drawdown(tmp_path: Path) -> None:
     assert "drawdown_flatten" in acts
     assert ad.placed and all(o.reduce_only for o in ad.placed)
     assert {o.tif for o in ad.placed} == {TIF.POST_ONLY, TIF.IOC}
+
+
+async def test_guardian_stands_down_when_the_bot_stops_on_purpose(tmp_path: Path) -> None:
+    """2026-09-25: a live run stopped from Telegram left its guardian running, which a minute later raised a false
+    CRITICAL "heartbeat silent" and sent a cancel-all. A clean stop now leaves a last heartbeat saying so."""
+    hb = tmp_path / "hb"
+    write_heartbeat(hb, mode="live", stopped="old run")          # a stop from before this guardian started
+    ad = _FakeAdapter("100", [])
+    g = Guardian(hb, [GuardedVenue(Venue.ARCUS, ad, {"BTC": BTC}, capital_usd=D(100))], Alerter())
+    g.started_us = int(json.loads(hb.read_text())["ts_us"]) + 1   # started after that stop
+    assert await g.check_once() == [] and not g.stood_down and ad.cancel_all_calls == 0   # waits for its bot
+    write_heartbeat(hb, mode="live")                              # its bot runs ...
+    assert await g.check_once() == []
+    write_heartbeat(hb, mode="live", stopped="quotes cancelled, bot stopped")   # ... and is stopped from Telegram
+    assert await g.check_once() == ["stood_down"] and g.stood_down and ad.cancel_all_calls == 0
+    await asyncio.wait_for(g.run(), 1)                            # its loop ends instead of alarming
 
 
 def test_flatten_orders_only_reduce() -> None:

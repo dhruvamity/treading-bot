@@ -2,7 +2,7 @@
 
 - exponential backoff with jitter on disconnect; subscriptions are replayed on every (re)connect;
 - proactive rotation before a venue's connection lifetime (Arcus closes after 24 h);
-- application-level keepalive when the venue wants one (Lighter: a frame at least every 2 min);
+- application-level keepalive when a venue wants one;
 - per-key "last message" timestamps for staleness checks and recorder health;
 - close code 1001 (Arcus restart drain) is treated as a normal reconnect;
 - an exception in the message handler is logged and that message skipped: it never drops the connection (a frame

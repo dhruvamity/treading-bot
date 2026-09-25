@@ -14,5 +14,5 @@ chmod 700 state config
 [ -f config/secrets.enc ] && chmod 600 config/secrets.enc
 sudo ufw default deny incoming && sudo ufw default allow outgoing && sudo ufw allow OpenSSH && sudo ufw --force enable
 echo "Next: python deploy/scripts/region_check.py ; copy config/secrets.enc ; create /etc/bot.env (see .env.example) ;"
-echo "      sudo cp deploy/systemd/*.service deploy/systemd/*.timer /etc/systemd/system/ && sudo systemctl daemon-reload"
-echo "      sudo systemctl enable --now bot-recorder bot-maintenance.timer"
+echo "      sudo cp deploy/systemd/*.service /etc/systemd/system/ && sudo systemctl daemon-reload"
+echo "      sudo systemctl enable --now bot-scout"

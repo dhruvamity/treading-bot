@@ -56,7 +56,7 @@ from bot.telegram.views import (
 from bot.telegram.watcher import Prefs, Watcher
 
 log = Log("telegram_bot")
-VENUES = ("arcus", "lighter_rh")
+VENUES = ("arcus",)
 # The commands' earlier names still work (not listed in Telegram's menu), so old habits and old buttons keep working.
 ALIASES = {"scout": "top3", "pilot": "openpositions", "report": "yesterdayreport", "pause": "pauseneworders",
            "resume": "resumeaftersl", "flatten": "closeall"}

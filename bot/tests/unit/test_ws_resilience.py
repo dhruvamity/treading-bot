@@ -8,7 +8,7 @@ import asyncio
 import types
 from typing import Any
 
-from bot.core.book import ArcusBookSync, LighterBookSync, SyncResult
+from bot.core.book import ArcusBookSync, SyncResult
 from bot.venues.arcus import ws as arcus_ws
 from bot.venues.arcus.adapter import ArcusAdapter
 from bot.venues.arcus.ws import ArcusWS
@@ -25,8 +25,6 @@ def test_an_empty_snapshot_leaves_the_book_empty_and_not_ready() -> None:
     assert s.book.best_bid() is None and s.book.best_ask() is None
     assert s.on_delta({"lastSequenceId": 8, "bids": [["99", "1"]]}) is SyncResult.NOT_READY
     assert s.on_snapshot(SNAP) is SyncResult.APPLIED               # trading again
-    lt = LighterBookSync()
-    assert lt.on_snapshot({}) is SyncResult.NOT_READY and lt.on_delta({"nonce": 5}) is SyncResult.NOT_READY
 
 
 async def test_arcus_ws_survives_the_frames_an_offline_market_sends() -> None:

@@ -25,7 +25,6 @@ import orjson
 
 US_DAY = 86_400_000_000
 BBO_FIELDS = ("ts", "bid", "ask", "bid_sz", "ask_sz")
-TRADE_FIELDS = ("ts", "px", "sz", "buy", "seq", "tid")
 DEPTH_N = 10
 MIN_REAL_US = 1_750_000_000_000_000  # Arcus REST returns placeholder rows dated 2026-01-01 and earlier
 

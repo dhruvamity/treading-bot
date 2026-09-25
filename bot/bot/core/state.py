@@ -36,7 +36,6 @@ CREATE TABLE IF NOT EXISTS funding (venue TEXT, base TEXT, ts_us INTEGER, rate_h
     PRIMARY KEY (venue, base, ts_us));
 CREATE TABLE IF NOT EXISTS positions (venue TEXT, base TEXT, size TEXT, entry TEXT, mark TEXT, ts_us INTEGER,
     PRIMARY KEY (venue, base));
-CREATE TABLE IF NOT EXISTS points (venue TEXT, week TEXT, points REAL, ts_us INTEGER, PRIMARY KEY (venue, week));
 CREATE TABLE IF NOT EXISTS kv (k TEXT PRIMARY KEY, v TEXT);
 CREATE INDEX IF NOT EXISTS ev_ts ON events(ts_us);
 CREATE INDEX IF NOT EXISTS fills_ts ON fills(ts_us);
@@ -114,9 +113,12 @@ class StateStore:
     def _load(self) -> None:
         from bot.venues.base import TIF
 
+        known = {v.value for v in Venue}   # rows of a retired venue (Lighter, until 2026-09-25) stay in the file
         for row in self._db.execute("SELECT * FROM orders WHERE status NOT IN ('FILLED','CANCELED','REJECTED','EXPIRED')"):
             (cid, venue, base, side, price, size, tif, ro, tag, status, void, filled, avg, rej, reason, sess,
              created, updated) = row
+            if venue not in known:
+                continue
             req = OrderRequest(Venue(venue), base, Side(side), Decimal(price), Decimal(size), TIF(tif), bool(ro), cid,
                                tag, reason or "")
             o = LocalOrder(req, OrderStatus(status), void, Decimal(filled), Decimal(avg) if avg else None, rej, sess,
@@ -125,6 +127,8 @@ class StateStore:
             if void:
                 self.by_venue_id[(req.venue, void)] = cid
         for venue, base, size, entry, *_ in self._db.execute("SELECT * FROM positions"):
+            if venue not in known:
+                continue
             self.positions[(Venue(venue), base)] = Decimal(size)
             self.entry[(Venue(venue), base)] = Decimal(entry)
         for venue, tid in self._db.execute("SELECT venue, trade_id FROM fills"):
@@ -231,13 +235,7 @@ class StateStore:
                                    (venue.value, base, ts_us, str(rate_h), str(position), str(payment)))
             return cur.rowcount > 0
 
-    # ---------------------------------------------------------------- points (S4 study)
-    def add_points(self, venue: str, week: str, points: float) -> None:
-        self._exec("INSERT OR REPLACE INTO points VALUES (?,?,?,?)", (venue, week, points, now_us()))
-
-    def points(self) -> list[tuple[str, str, float]]:
-        return [(v, w, float(p)) for v, w, p, _ in self._db.execute("SELECT * FROM points ORDER BY week")]
-
+    # ---------------------------------------------------------------- kv
     def kv_set(self, k: str, v: str) -> None:
         self._exec("INSERT OR REPLACE INTO kv VALUES (?,?)", (k, v))
 

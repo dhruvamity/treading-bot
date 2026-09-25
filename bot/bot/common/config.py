@@ -2,7 +2,7 @@
 
 Static venue facts live in config/venues/*.yaml; [LIVE] values (fees, ticks, margins, minimums, OI caps,
 session hours) are fetched at start-up and hourly by `core.liveparams.LiveParams` and are never typed here.
-Session files follow prompt pack Appendix E4; `auto` hands the field to the Autopilot.
+Session files are written by the pilot (bot/scout/pilot.py) or by hand (config/sessions/).
 """
 
 from __future__ import annotations
@@ -34,7 +34,7 @@ def load_yaml(path: Path | str) -> dict[str, Any]:
 
 
 # ------------------------------------------------------------------------------------------------------
-# Venue static configs (E5, corrected against the live docs; see docs/notes/venue_corrections.md)
+# Venue static config (corrected against the live docs; see docs/notes/venue_corrections.md)
 # ------------------------------------------------------------------------------------------------------
 class EnvUrls(_Model):
     mainnet: str
@@ -64,6 +64,9 @@ class ArcusVenueConfig(_Model):
     ws_limits: dict[str, int]
     taker_speed_bump_ms: int = 50
     dms: ArcusDms = ArcusDms()
+    # Requote with modifyOrder (by Arcus order id) instead of cancel + place. Off until `bot selftest --allow-funded`
+    # shows a modify moving a resting order (docs/incidents/2026-09-25-live-requotes-refused.md).
+    use_modify: bool = False
     live_fields: list[str] = []
 
     def rest_url(self) -> str:
@@ -76,76 +79,12 @@ class ArcusVenueConfig(_Model):
         return self.chain_id[self.env]
 
 
-class LighterLimits(_Model):
-    rest_req_per_min: int = 60
-    sendtx_per_min: int = 60
-    pending_per_market: int = 16
-    pending_per_account: int = 500
-    active_per_market: int = 1000
-    active_per_account: int = 1500
-    ws_msgs_per_min: int = 200
-    ws_batch_max: int = 15
-    rest_batch_max: int = 50
-    ws_ping_s: int = 60
-    # Design caps, tighter than the venue's, from the spec (grid <= 5/side, <= 10 actions in flight per market)
-    design_active_per_market: int = 30
-    design_pending_per_market: int = 10
-
-
-class LighterVenueConfig(_Model):
-    venue: Literal["lighter_rh"] = "lighter_rh"
-    env: Literal["testnet", "mainnet"] = "mainnet"
-    rest: EnvUrls
-    ws: EnvUrls
-    signing_chain_id: dict[str, int]
-    api_key_index_default: int = 4
-    reserved_api_key_indices: list[int] = [0, 1, 2, 3, 157]
-    tx_types: dict[str, int]
-    order_type: dict[str, int]
-    tif: dict[str, int]
-    cancel_all_tif: dict[str, int]
-    tx_lifetime_ms: int = 599_000
-    order_expiry_days: int = 28
-    auth_token: dict[str, float]
-    limits_standard: LighterLimits = LighterLimits()
-    latency_ms: dict[str, Any]
-    min_quote_usd: float = 10
-    usdg_asset_index: int = 3
-    deposit_contract: str = ""
-    live_fields: list[str] = []
-
-    def rest_url(self) -> str:
-        return self.rest.mainnet if self.env == "mainnet" else self.rest.testnet
-
-    def ws_url(self) -> str:
-        return self.ws.mainnet if self.env == "mainnet" else self.ws.testnet
-
-    def chain(self) -> int:
-        return self.signing_chain_id[self.env]
-
-
 def load_arcus_config(path: Path | str = "config/venues/arcus.yaml") -> ArcusVenueConfig:
     return ArcusVenueConfig.model_validate(load_yaml(path))
 
 
-def load_lighter_config(path: Path | str = "config/venues/lighter_rh.yaml") -> LighterVenueConfig:
-    return LighterVenueConfig.model_validate(load_yaml(path))
-
-
-class UniverseConfig(_Model):
-    record: list[str]
-    phase1_trade: list[str] = []
-    both_venues: list[str] = []
-    excluded_pairs: dict[str, str] = {}
-    book_levels: int = 100
-
-
-def load_universe(path: Path | str = "config/universe.yaml") -> UniverseConfig:
-    return UniverseConfig.model_validate(load_yaml(path))
-
-
 # ------------------------------------------------------------------------------------------------------
-# Session configs (Appendix E4)
+# Session configs
 # ------------------------------------------------------------------------------------------------------
 class RequoteCfg(_Model):
     min_ticks: int = 2
@@ -194,20 +133,6 @@ class OffHoursCfg(_Model):
     allow_mid: bool = False
 
 
-class BlendCfg(_Model):
-    reference: list[str] = ["lighter_rh:BTC", "pyth"]
-    weights: list[float] = [0.6, 0.4]
-    stale_ms: int = 2000
-    dev_bps: float = 25.0
-    basis_ewma_halflife_s: float = 600.0
-
-    @model_validator(mode="after")
-    def _w(self) -> BlendCfg:
-        if len(self.weights) != len(self.reference):
-            raise ValueError("blend.weights must match blend.reference")
-        return self
-
-
 class SignalCfg(_Model):
     rsi_len: int = 14
     rsi_low: float = 25
@@ -219,22 +144,13 @@ class SignalCfg(_Model):
     trend_z: float = 1.0
 
 
-class AutopilotCfg(_Model):
-    confirm_evals: int = 5
-    min_dwell_min: float = 30
-    er_trend: float = 0.5
-    er_range: float = 0.3
-    trend_z: float = 2.0
-    oer_min: float = 1.5
-    markout_stop_bps: float = -2.0
+class AutoSpacingCfg(_Model):
+    """Grid / RGrid with `spacing_bps: auto`: delta = clamp(k x sigma_1h / sqrt(fills per hour), min, max)."""
+
     target_fills_per_hour: float = 20
     k_delta: float = 1.0
     delta_min_bps: float = 5
     delta_max_bps: float = 100
-    vol_max_1h: float = 0.03
-    tight_spread_bps: float = 3.0
-    thin_depth_usd: float = 2_000
-    deep_depth_usd: float = 20_000
 
 
 class SizingCfg(_Model):
@@ -265,10 +181,10 @@ class SizingCfg(_Model):
 
 class MMSession(_Model):
     session_id: str
-    venue: Literal["arcus", "lighter_rh"]
+    venue: Literal["arcus"] = "arcus"
     account_index: int = 1
     market: str
-    mode: Literal["auto", "mid", "grid", "rgrid", "dgrid", "blend", "signal"] = "auto"
+    mode: Literal["mid", "grid", "rgrid", "signal"] = "mid"
     live_enabled: bool = False
     capital_usd: float = 35
     leverage_max: float = 5
@@ -286,10 +202,9 @@ class MMSession(_Model):
     passive_k_sigma: float = 1.0
     reset_threshold_pct: float = 0.25
     recentre_after_s: float = 120
-    recentre_inventory: Literal["skew_exit", "maker_unwind", "hedge_other_venue"] = "skew_exit"
+    recentre_inventory: Literal["skew_exit", "maker_unwind"] = "skew_exit"
     rgrid_ema_s: float = 300
     rgrid_cut_after_s: float = 20
-    rgrid_trend_tilt_beta: float = 0.0
     stop_loss_pct: float = 10
     take_profit_pct: float | None = None
     participation_cap_pct: float = 25
@@ -297,9 +212,8 @@ class MMSession(_Model):
     safety_pause: SafetyPauseCfg = SafetyPauseCfg()
     session: SessionWindowCfg = SessionWindowCfg()
     off_hours: OffHoursCfg = OffHoursCfg()
-    blend: BlendCfg = BlendCfg()
     signal: SignalCfg = SignalCfg()
-    autopilot: AutopilotCfg = AutopilotCfg()
+    auto_spacing: AutoSpacingCfg = AutoSpacingCfg()
     exit_taker_after_s: float = 60
     # Dollar stops for a small account. The scout's backtests apply exactly these rules (bot/scout/sim.py).
     # None falls back to the app-wide % limits (risk.daily_loss_pct, risk.drawdown_pct of capital_usd).
@@ -315,61 +229,13 @@ class MMSession(_Model):
             raise ValueError("account_index must be 0-9 (Arcus subaccount)")
         if not 0 <= self.skew_kappa <= 2:
             raise ValueError("skew_kappa must be in [0, 2]")
-        if self.venue == "lighter_rh" and self.mode == "mid":
-            raise ValueError("Mid is blocked on Lighter standard (stale-quote risk from 200-300 ms cancels)")
         return self
 
 
-class DnLeg(_Model):
-    account_index: int | None = None
-    role: Literal["maker", "hedge"]
-
-
-class DNSession(_Model):
-    session_id: str
-    strategy: Literal["dn_carry", "dn_hedged_mm", "points_overlay"]
-    market: str
-    live_enabled: bool = False
-    legs: dict[Literal["arcus", "lighter_rh"], DnLeg]
-    collateral_per_leg_usd: float = 25
-    leverage_per_leg: float = 3
-    entry_ev_bps: float = 5
-    exit_ev_bps: float = 0
-    horizons_h: list[int] = [4, 8, 12, 24, 48, 72]
-    max_hold_h: float = 168
-    spread_forecast: Literal["persistence", "ar1", "gbm"] = "persistence"
-    risk_lambda: float = 0.5
-    hedge_slippage_cap_bps: float = 10
-    min_hedge_usd: float = 10
-    arcus_reprice_max: int = 5
-    arcus_inside_spread_ticks: int = 1
-    margin_warn_x_mm: float = 3.0
-    margin_crit_x_mm: float = 1.8
-    avoid: list[str] = ["earnings", "ex_dividend"]
-    # hedged-MM variant
-    half_spread_bps: float = 8
-    fair_weight_lighter: float = 0.7
-    hedge_timeout_s: float = 3
-    lighter_down_kill_s: float = 10
-    hedge_missing_kill_s: float = 5
-    # points overlay
-    target_hold_h: float = 12
-    churn_penalty: float = 1.0
-    session: SessionWindowCfg = SessionWindowCfg(duration="168h", repeat=20)
-
-    @model_validator(mode="after")
-    def _legs(self) -> DNSession:
-        if set(self.legs) != {"arcus", "lighter_rh"}:
-            raise ValueError("DN sessions need exactly one arcus leg and one lighter_rh leg")
-        if self.leverage_per_leg > 3:
-            raise ValueError("phase 1 caps DN legs at 3x (spec: risk management)")
-        return self
-
-
-def load_session(path: Path | str) -> MMSession | DNSession:
+def load_session(path: Path | str) -> MMSession:
     data = load_yaml(path)
-    if "strategy" in data:
-        return DNSession.model_validate(data)
+    if "strategy" in data:   # dn_carry / dn_hedged_mm / points_overlay, retired with Lighter on 2026-09-25
+        raise ConfigError(f"{path}: two-venue (Arcus + Lighter) sessions are no longer supported")
     return MMSession.model_validate(data)
 
 
@@ -392,18 +258,10 @@ class AlertsCfg(_Model):
 class RiskLimitsCfg(_Model):
     daily_loss_pct: float = 3.0
     drawdown_pct: float = 10.0
-    drawdown_pct_dn: float = 8.0
     liq_distance_sigma: float = 4.0
     liq_resume_sigma: float = 6.0
-    hedge_missing_s: float = 5.0
     heartbeat_timeout_s: float = 60.0
-    arcus_pool_freeze_frac: float = 0.05
-    arcus_pool_widen_frac: float = 0.20
     max_leverage_mm: float = 5.0
-    max_leverage_dn: float = 3.0
-    max_actions_per_filled_usd: float = 8.0
-    feed_stale_s: float = 2.0
-    max_error_rate: float = 0.05
 
 
 class SizingDefaults(_Model):

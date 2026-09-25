@@ -12,7 +12,7 @@ from decimal import Decimal
 from bot.common.config import MMSession
 from bot.core.order_manager import DesiredOrder
 from bot.strategies import quoting as qt
-from bot.strategies.base import SessionEvent, StrategyContext, StrategyOutput
+from bot.strategies.base import StrategyContext, StrategyOutput
 from bot.venues.base import Fill, Side
 
 
@@ -22,17 +22,10 @@ class MMBase:
     def __init__(self, params: MMSession) -> None:
         self.p = params
         self.fills = 0
-        self.last_reason = ""
 
     # ---------------------------------------------------------------- hooks
-    def on_start(self, ctx: StrategyContext) -> None:
-        return None
-
     def on_fill(self, ctx: StrategyContext, fill: Fill) -> None:
         self.fills += 1
-
-    def on_session_event(self, ctx: StrategyContext, ev: SessionEvent) -> None:
-        return None
 
     def on_stop(self, ctx: StrategyContext) -> StrategyOutput:
         return self.exit_book(ctx, "session end: unwind inventory with a reduce-only maker order")
@@ -49,6 +42,18 @@ class MMBase:
 
     def tick_frac(self, ctx: StrategyContext, mid: float) -> float:
         return float(ctx.market.tick_size) / mid if mid > 0 else 0.0
+
+    def grid_spacing(self, ctx: StrategyContext, mid: float) -> float:
+        """Grid / RGrid step as a fraction of price: spacing_bps, or `auto` from the 1 h volatility (auto_spacing),
+        widened by off_hours.spacing_mult outside an Arcus RWA session."""
+        if isinstance(self.p.spacing_bps, int | float):
+            d = float(self.p.spacing_bps) * qt.BP
+        else:
+            a = self.p.auto_spacing
+            d = qt.vol_spacing(ctx.view.sigma_1h(), a.target_fills_per_hour, k_delta=a.k_delta,
+                               delta_min=a.delta_min_bps * qt.BP, delta_max=a.delta_max_bps * qt.BP,
+                               maker_fee=float(ctx.market.maker_fee), tick_frac=self.tick_frac(ctx, mid))
+        return d * (self.p.off_hours.spacing_mult if ctx.off_hours else 1.0)
 
     def venue_min_usd(self, ctx: StrategyContext, mid: float) -> float:
         return float(max(ctx.market.min_notional, ctx.market.min_size * Decimal(str(mid))))

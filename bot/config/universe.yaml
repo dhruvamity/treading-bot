@@ -1,7 +1,0 @@
-# Canonical base symbols. Venue market ids are mapped at start-up by venues/symbols.py, never hard-coded.
-record: [BTC, ETH, SOL, HYPE, SPY, QQQ, NVDA, TSLA]
-phase1_trade: [BTC, ETH, SPY]
-both_venues: [BTC, ETH, SOL, HYPE, ZEC, LIT, XRP, NEAR, CASHCAT, AMD, INTC, GOOGL, META, MU, BABA, CRCL, NVDA, TSLA,
-              AAPL, AMZN, MSFT, SNDK, PLTR, CRWV, ORCL, SPCX, BE, USAR, COIN, SKHY, SLV, USO, SPY, QQQ]
-excluded_pairs: {GLD: "Arcus GLD vs Lighter XAU needs a ratio hedge (phase 2)"}
-book_levels: 100

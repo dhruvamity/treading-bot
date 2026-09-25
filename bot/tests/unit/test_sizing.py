@@ -17,7 +17,6 @@ from bot.common import sizing
 from bot.common.config import AppConfig, SizingDefaults, load_session
 from bot.common.sizing import Pct, bucket, min_capital, sizes, target_capital
 from bot.core.livelock import RunMode
-from bot.research.sim.engine import Simulator
 from bot.scout.capital import choose
 from bot.scout.pilot import Pilot, session_for
 from bot.scout.scan import BY_NAME, MENU, MarketInfo, Scanner, _score, liquidity, risk_key, taker_orders
@@ -25,6 +24,7 @@ from bot.scout.sim import Risk
 from bot.telegram.control import Control
 from bot.venues.base import Venue
 from tests.helpers import fixture_markets
+from tests.sim.engine import Simulator
 from tests.unit.test_go_live import ADDR, K0, Env, FakeArcus, doctor, levels
 
 MK = fixture_markets()

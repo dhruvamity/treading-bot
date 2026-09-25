@@ -2,8 +2,8 @@
 
 Pre-trade (reject BEFORE sending): tick/band alignment and step alignment, venue minimums, max size, post-only
 won't cross, free collateral after the order (Arcus off-hours IMF when isOutsideRth), Arcus OI-cap headroom,
-oracle-deviation band, per-market position/inventory caps, leverage caps (MM: the session's leverage_max within
-risk.max_leverage_mm; DN <= 3x per leg).
+oracle-deviation band, per-market position/inventory caps, leverage caps (the session's leverage_max within
+risk.max_leverage_mm).
 
 Kill switches: each trigger produces a RiskDecision with an action and a resume rule. Decisions are pure outputs;
 the bot runner executes them (cancel quotes, flatten, stop) and logs them. State that must survive a restart
@@ -46,7 +46,6 @@ class RiskAction(StrEnum):
     FLATTEN_SESSION = "flatten_session"  # session SL/TP
     STOP_VENUE_DAY = "stop_venue_day"  # daily loss
     STOP_ALL = "stop_all"  # drawdown: flatten everything, manual resume
-    HEDGE_FLATTEN = "hedge_flatten"  # hedge leg missing
     FREEZE_REQUOTES = "freeze_requotes"  # budget
     SAFE_MODE = "safe_mode"  # unexpected error / DMS failures: cancel quotes, keep positions, manual resume
     STOP_VENUE_CRIT = "stop_venue_crit"  # SELF_TRADE / GEO_RESTRICTED
@@ -195,7 +194,7 @@ class RiskEngine:
     # ================================================================ kill switches
     def on_pnl(self, *, venue: Venue, session_id: str, session_pnl: Decimal, session_margin: Decimal,
                stop_loss_pct: float, take_profit_pct: float | None, day_pnl: Decimal, capital: Decimal,
-               equity: Decimal, is_dn: bool, ts_us: int, daily_stop_usd: Decimal | None = None,
+               equity: Decimal, ts_us: int, daily_stop_usd: Decimal | None = None,
                kill_usd: Decimal | None = None) -> list[RiskDecision]:
         out: list[RiskDecision] = []
         if session_margin > 0 and session_pnl <= -session_margin * Decimal(stop_loss_pct) / 100:
@@ -216,8 +215,7 @@ class RiskEngine:
         key = venue.value
         peak = max(self.equity_peak.get(key, equity), equity)
         self.equity_peak[key] = peak
-        dd_pct = self.limits.drawdown_pct_dn if is_dn else self.limits.drawdown_pct
-        dd_lim = kill_usd if kill_usd is not None else capital * Decimal(dd_pct) / 100
+        dd_lim = kill_usd if kill_usd is not None else capital * Decimal(self.limits.drawdown_pct) / 100
         if dd_lim > 0 and (peak - equity) > dd_lim and not self.all_stopped:
             self.all_stopped = f"drawdown ${peak - equity:.2f} > ${dd_lim:.2f} from the peak"
             out.append(self._log(RiskDecision("drawdown", RiskAction.STOP_ALL, None, None, self.all_stopped,
@@ -305,14 +303,6 @@ class RiskEngine:
         if n_sigma >= self.limits.liq_resume_sigma:
             self.reduce_active.discard(key)
         return n_sigma, None
-
-    def hedge_missing(self, venue: Venue, base: str, residual_usd: Decimal, missing_for_s: float,
-                      min_notional: Decimal) -> RiskDecision | None:
-        if residual_usd > 2 * min_notional and missing_for_s > self.limits.hedge_missing_s:
-            return self._log(RiskDecision("hedge_missing", RiskAction.HEDGE_FLATTEN, venue, base,
-                                          f"unhedged ${residual_usd:.2f} for {missing_for_s:.1f}s",
-                                          "both venues healthy for 5 min"))
-        return None
 
     def on_reject(self, venue: Venue, reason: str, base: str | None = None,
                   now_us: int | None = None) -> RiskDecision | None:

@@ -5,11 +5,7 @@ Arcus
     ARCUS_API_PRIVATE_KEY    one API key; add more (one per extra subaccount) as ARCUS_API_PRIVATE_KEY_<anything>
   Each key is bound to exactly ONE subaccount by the venue. Which one, its status and its expiry come from
   GET /v1/apiKeys, so nothing about them is configured by hand (and nothing can be configured wrong).
-Lighter RH
-    LIGHTER_ADDRESS          the wallet that owns the Lighter account
-    LIGHTER_API_PRIVATE_KEY  the API key registered in slot LIGHTER_API_KEY_INDEX (default 4)
-  LIGHTER_ACCOUNT_INDEX is optional: by default the wallet's master account from accountsByL1Address.
-Testnet runs read the same names with ARCUS_TESTNET_ / LIGHTER_TESTNET_ prefixes.
+Testnet runs read the same names with the ARCUS_TESTNET_ prefix.
 """
 
 from __future__ import annotations
@@ -25,18 +21,12 @@ from cryptography.hazmat.primitives.asymmetric import ed25519
 from bot.common.errors import SecretsError
 from bot.common.secrets import SecretStore
 
-LIGHTER_DEFAULT_KEY_INDEX = 4
-LIGHTER_RESERVED_KEY_INDICES = (0, 1, 2, 3, 157)
 _HEX64 = re.compile(r"[0-9a-f]{64}")
 _ADDR = re.compile(r"0x[0-9a-fA-F]{40}")
 
 
 def arcus_prefix(testnet: bool) -> str:
     return "ARCUS_TESTNET_" if testnet else "ARCUS_"
-
-
-def lighter_prefix(testnet: bool) -> str:
-    return "LIGHTER_TESTNET_" if testnet else "LIGHTER_"
 
 
 def normalize_address(value: str | None, var: str) -> str:
@@ -131,39 +121,5 @@ def key_for_account(keys: list[ArcusKey], account_index: int) -> ArcusKey:
     raise SecretsError(f"no active Arcus API key for subaccount {account_index} (keys: {have}); {hint}")
 
 
-# ------------------------------------------------------------------------------------------------ Lighter
-@dataclass(frozen=True, slots=True, repr=False)
-class LighterCreds:
-    address: str
-    private_key: str
-    api_key_index: int
-    account_index: int
-
-    def __repr__(self) -> str:
-        return (f"LighterCreds(address={self.address[:6]}…, api_key_index={self.api_key_index}, "
-                f"account_index={self.account_index})")
-
-
-async def resolve_lighter(rest: Any, secrets: SecretStore, testnet: bool = False) -> LighterCreds:
-    pre = lighter_prefix(testnet)
-    address = normalize_address(secrets.get(f"{pre}ADDRESS"), f"{pre}ADDRESS")
-    priv = (secrets.get(f"{pre}API_PRIVATE_KEY") or "").strip()
-    if not priv:
-        raise SecretsError(f"{pre}API_PRIVATE_KEY is not set: register a Lighter API key (scripts/lighter_register_key.py)")
-    kidx = int(secrets.get(f"{pre}API_KEY_INDEX") or LIGHTER_DEFAULT_KEY_INDEX)
-    if kidx in LIGHTER_RESERVED_KEY_INDICES:
-        raise SecretsError(f"{pre}API_KEY_INDEX={kidx} is reserved by Lighter's own apps; use 4-254 (not 157)")
-    acct_raw = secrets.get(f"{pre}ACCOUNT_INDEX")
-    if acct_raw:
-        acct = int(acct_raw)
-    else:
-        subs = (await rest.accounts_by_l1(address)).get("sub_accounts") or []
-        if not subs:
-            raise SecretsError(f"no Lighter account found for {pre}ADDRESS (deposit first, or set {pre}ACCOUNT_INDEX)")
-        acct = int(subs[0]["index"])
-    return LighterCreds(address, priv, kidx, acct)
-
-
-__all__ = ["ArcusKey", "LighterCreds", "arcus_address", "arcus_prefix", "arcus_private_keys", "discover_arcus_keys",
-           "ed25519_public_hex", "key_for_account", "lighter_prefix", "normalize_address", "normalize_ed25519_key",
-           "resolve_lighter"]
+__all__ = ["ArcusKey", "arcus_address", "arcus_prefix", "arcus_private_keys", "discover_arcus_keys",
+           "ed25519_public_hex", "key_for_account", "normalize_address", "normalize_ed25519_key"]

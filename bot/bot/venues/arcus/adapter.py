@@ -60,19 +60,18 @@ class ArcusAdapter:
         self._by_id = {m.venue_market_id: m.base for m in markets.values()}
         self.good_til_days = good_til_days
         self.modify_echo_client_id = modify_echo_client_id
-        # Requotes go out as cancel + place, not modifyOrder. The first live run with modifies (2026-09-25, QQQ) had
-        # every one rejected (10,604 x CannotModifyImmutableFieldTif, ~110 x ORDER_NOT_FOUND_FOR_MODIFY) though it
-        # echoed the resting order's ALO time-in-force as the docs ask; the docs also disagree on the modify identity
-        # (modify page: exactly one of orderId/clientId; authentication page: id always plus c echoed). Cancel and
-        # place both work live, and Arcus runs every price-changing modify as cancel + replace anyway, so no queue
-        # priority is lost. Turn this on only after `bot selftest --testnet --allow-funded` shows modifies land.
+        # Requotes go out as cancel + place unless config/venues/arcus.yaml sets use_modify. The first live run with
+        # modifies (2026-09-25, QQQ) never learned the venue order ids, so every modify went by clientId alone and was
+        # refused (10,604 x CannotModifyImmutableFieldTif, ~110 x ORDER_NOT_FOUND_FOR_MODIFY); the SPY run, which had
+        # learned them, sent 14 modifies by orderId with no error. So a modify is only ever sent by orderId (the modify
+        # page allows exactly one of id/c). Arcus runs a price-changing modify as cancel + replace anyway, so cancel +
+        # place loses no queue priority. Turn it on after `bot selftest --allow-funded` shows a resting order move.
         self.use_modify = use_modify
         self._live: dict[str, _Live] = {}
         self._orders_q: asyncio.Queue[OrderState] = asyncio.Queue()
         self._fills_q: asyncio.Queue[Fill] = asyncio.Queue()
         self._funding_q: asyncio.Queue[FundingPayment] = asyncio.Queue()
         self._pool: dict[str, dict[str, Any]] = {}
-        self._last_pool_poll = 0.0
         self.errors = 0
         self.actions = 0
         self.resync_requested = False   # an account stream degraded: the runner reconciles at once
@@ -101,10 +100,6 @@ class ArcusAdapter:
 
     async def markets(self) -> Sequence[Market]:
         return list(self._markets.values())
-
-    def update_markets(self, markets: dict[str, Market]) -> None:
-        self._markets = markets
-        self._by_id = {m.venue_market_id: m.base for m in markets.values()}
 
     # ---------------------------------------------------------------- helpers
     def _fields(self, r: OrderRequest, m: Market, good_til_us: int) -> sg.OrderFields:
@@ -175,12 +170,13 @@ class ArcusAdapter:
 
     async def modify(self, client_id: str, price: Decimal, size: Decimal) -> OrderState:
         live = self._live[client_id]
+        if not live.order_id:   # the order manager requotes such orders with cancel + place
+            raise VenueError("arcus", f"modify {client_id}: Arcus order id not known yet")
         r = live.req
         new_req = OrderRequest(r.venue, r.base, r.side, price, size, r.tif, r.reduce_only, r.client_id, r.tag, r.reason)
         f = self._fields(new_req, live.market, live.good_til_us)
         self.actions += 1
-        resp = await self.rest.modify_order(self.account_index, f, order_id=live.order_id,
-                                            client_id=None if live.order_id else client_id,
+        resp = await self.rest.modify_order(self.account_index, f, order_id=live.order_id, client_id=None,
                                             echo_client_id=self.modify_echo_client_id)
         live.req = new_req
         live.order_id = resp.get("orderId") or live.order_id
@@ -240,7 +236,7 @@ class ArcusAdapter:
             log.warning("rate_limit_poll_failed", reason=type(e).__name__)
             return self._pool
         self._pool = {"order": body.get("order") or {}, "cancel": body.get("cancel") or {}}
-        self._last_pool_poll = time.monotonic()
+        self.rest.pool_remaining.clear()   # the poll is newer than the last write's echo, until the next write
         return self._pool
 
     # ---------------------------------------------------------------- streams

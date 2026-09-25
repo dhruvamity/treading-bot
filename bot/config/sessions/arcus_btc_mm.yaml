@@ -2,7 +2,7 @@ session_id: arcus_btc_mm
 venue: arcus
 account_index: 0            # Arcus subaccount 0-9 (own rate pools). Keys are bound to ONE subaccount (403 otherwise); `bot keys` shows yours
 market: BTC                 # canonical base; mapped to BTC-USD at start-up
-mode: auto                  # auto | mid | grid | rgrid | dgrid | blend | signal
+mode: mid                   # mid | grid | rgrid | signal (the pilot writes its own session: pilot.yaml)
 live_enabled: false         # triple lock part 2
 capital_usd: 35
 leverage_max: 5
@@ -10,14 +10,14 @@ bias: neutral               # neutral | long_skew | short_skew
 bias_size_usd: 0
 execution_style: normal     # aggressive | normal | passive
 offset_bps: 0               # Tread-style: Mid-1 = -1, Grid +2 = 2
-spacing_bps: auto           # grid delta; auto = DGrid formula
+spacing_bps: auto           # Mid: auto = 1-min volatility; Grid/RGrid: auto = auto_spacing below
 levels_per_side: auto
 order_size_usd: auto        # >= 1.2 x venue minimum (BTC: 0.0001 BTC min size ~ $8.6 -> ~$10.3)
 inventory_cap_usd: 30
 skew_kappa: 1.0
 reset_threshold_pct: 0.25
 recentre_after_s: 120
-recentre_inventory: skew_exit   # skew_exit | maker_unwind | hedge_other_venue
+recentre_inventory: skew_exit   # skew_exit | maker_unwind
 stop_loss_pct: 10
 take_profit_pct: null
 participation_cap_pct: 25
@@ -29,16 +29,8 @@ session:
   windows_ist: []
   skip_events: [cpi, fomc, nfp, earnings]
 off_hours: {spacing_mult: 2, size_mult: 0.25, allow_mid: false}
-blend: {reference: ["lighter_rh:BTC", "pyth"], weights: [0.6, 0.4], stale_ms: 2000, dev_bps: 25}
 signal: {rsi_len: 14, rsi_low: 25, rsi_high: 75, tp_bps: 15, sl_bps: 25, cooldown_s: 300, max_hold_min: 120}
-autopilot:
-  confirm_evals: 5
-  min_dwell_min: 30
-  er_trend: 0.5
-  er_range: 0.3
-  trend_z: 2.0
-  oer_min: 1.5
-  markout_stop_bps: -2
+auto_spacing:               # Grid/RGrid spacing when spacing_bps is auto
   target_fills_per_hour: 20
   k_delta: 1.0
   delta_min_bps: 5

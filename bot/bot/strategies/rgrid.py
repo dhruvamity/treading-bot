@@ -3,7 +3,7 @@
 When mid moves more than R from the centre, the centre jumps to mid and the inventory left on the wrong side of the
 move is CUT: a reduce-only maker order at the touch, then an IOC after T_cut (emitted as an intent the runner sends).
 This caps a trend's loss at about one level plus R instead of the quadratic grid loss, at the cost of some taker
-fills (2.25 bps on Arcus, 0 on Lighter). Optional trend tilt: I* = beta x sign(trend_z) x I_cap. Lighter: N <= 2.
+fills (2.25 bps on Arcus).
 """
 
 from __future__ import annotations
@@ -15,7 +15,7 @@ from bot.common.config import MMSession
 from bot.strategies import quoting as qt
 from bot.strategies.base import StrategyContext, StrategyOutput
 from bot.strategies.mm_base import MMBase
-from bot.venues.base import TIF, OrderRequest, Side, Venue
+from bot.venues.base import TIF, OrderRequest, Side
 
 
 class RGridStrategy(MMBase):
@@ -34,21 +34,8 @@ class RGridStrategy(MMBase):
 
     def spacing(self, ctx: StrategyContext, mid: float) -> float:
         if self.delta_override is not None:
-            d = self.delta_override
-        elif isinstance(self.p.spacing_bps, int | float):
-            d = float(self.p.spacing_bps) * qt.BP
-        else:
-            a = self.p.autopilot
-            d = qt.dgrid_delta(ctx.view.sigma_1h(), a.target_fills_per_hour, k_delta=a.k_delta,
-                               delta_min=a.delta_min_bps * qt.BP, delta_max=a.delta_max_bps * qt.BP,
-                               maker_fee=float(ctx.market.maker_fee), tick_frac=self.tick_frac(ctx, mid),
-                               venue=ctx.venue, sigma_1s=ctx.view.vol_1s.sigma())
-        return d * (self.p.off_hours.spacing_mult if ctx.off_hours else 1.0)
-
-    def trend_sign(self, ctx: StrategyContext) -> float:
-        f = ctx.features
-        z = getattr(f, "trend_z", 0.0) if f is not None else 0.0
-        return 0.0 if abs(z) < 1.0 else math.copysign(1.0, z)
+            return self.delta_override * (self.p.off_hours.spacing_mult if ctx.off_hours else 1.0)
+        return self.grid_spacing(ctx, mid)
 
     def on_tick(self, ctx: StrategyContext) -> StrategyOutput:
         why = self.blocked(ctx)
@@ -83,11 +70,9 @@ class RGridStrategy(MMBase):
             self.cut_since_us = ctx.now_us
             note += " + cut wrong-side inventory"
         delta = self.spacing(ctx, mid)
-        cap = 2 if ctx.venue is Venue.LIGHTER_RH else 3
         n = self.levels_override or (1 if self.p.levels_per_side == "auto" else int(self.p.levels_per_side))
-        n = max(1, min(cap, n))
-        tilt_base = self.p.rgrid_trend_tilt_beta * self.trend_sign(ctx) * self.p.inventory_cap_usd / mid
-        u = self.u(ctx, mid, extra_target_base=tilt_base)
+        n = max(1, min(3, n))
+        u = self.u(ctx, mid)
         bb, ba = bbo
         tick = float(ctx.market.tick_size)
         levels = []
@@ -110,7 +95,7 @@ class RGridStrategy(MMBase):
                 orders += ex.desired.get((ctx.venue, ctx.market.base), [])
                 assert self.cut_since_us is not None
                 if (ctx.now_us - self.cut_since_us) / 1e6 >= self.p.rgrid_cut_after_s:
-                    out.hedge_intents.append(self.cut_ioc(ctx, mid))
+                    out.ioc_intents.append(self.cut_ioc(ctx, mid))
                     out.reason += " | cut escalated to IOC"
                     self.cut_since_us = ctx.now_us  # re-arm: one IOC per T_cut
         out.set(ctx.venue, ctx.market.base, orders)

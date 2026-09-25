@@ -29,21 +29,15 @@ DEFAULT_PATH = Path("config/secrets.enc")
 _SCRYPT_N = 2**15
 
 # Names the code reads. Kept here so `secrets status` can report what is missing without printing values.
-# Everything else (which subaccount a key trades, when it expires, the Lighter account index) is looked up from
+# Everything else (which subaccount a key trades, when it expires) is looked up from
 # the venues at start-up, so the owner only supplies what cannot be discovered.
 KNOWN_SECRETS: dict[str, str] = {
     "ARCUS_ADDRESS": "Arcus wallet address (0x...) that owns the API key",
     "ARCUS_API_PRIVATE_KEY": "Arcus API private key (64 hex); its subaccount and expiry are read from the venue",
-    "LIGHTER_ADDRESS": "Lighter RH wallet address (0x...)",
-    "LIGHTER_API_PRIVATE_KEY": "Lighter RH API private key (hex)",
-    "LIGHTER_API_KEY_INDEX": "Lighter RH API key slot (optional, default 4; 0-3 and 157 are reserved)",
-    "LIGHTER_ACCOUNT_INDEX": "Lighter RH account index (optional, found from LIGHTER_ADDRESS)",
     "TELEGRAM_BOT_TOKEN": "Telegram bot token for alerts (optional)",
     "TELEGRAM_CHAT_ID": "Telegram chat id for alerts (optional)",
     "ARCUS_TESTNET_ADDRESS": "Arcus testnet wallet address (testnet runs only)",
     "ARCUS_TESTNET_API_PRIVATE_KEY": "Arcus testnet API private key (testnet runs only)",
-    "LIGHTER_TESTNET_ADDRESS": "Lighter RH testnet wallet address (testnet runs only)",
-    "LIGHTER_TESTNET_API_PRIVATE_KEY": "Lighter RH testnet API private key (testnet runs only)",
 }
 
 
@@ -109,11 +103,6 @@ class SecretStore:
         register_secret(value)
         self._save(data)
 
-    def delete(self, name: str) -> None:
-        data = dict(self._load())
-        data.pop(name, None)
-        self._save(data)
-
     def get(self, name: str, default: str | None = None) -> str | None:
         v = self._load().get(name)
         if v is None:
@@ -123,12 +112,6 @@ class SecretStore:
         if not v and name in ALIASES:
             return self.get(ALIASES[name], default)
         return v if v is not None else default
-
-    def require(self, name: str) -> str:
-        v = self.get(name)
-        if not v:
-            raise SecretsError(f"missing secret {name}: {KNOWN_SECRETS.get(name, '')}".rstrip(": "))
-        return v
 
     def source(self, name: str) -> str:
         if name in self._load():

@@ -1,8 +1,8 @@
 """Venue REST / WebSocket clients and adapters against an in-process fake server (no network).
 
 Checks: Arcus auth headers + Ed25519 signature verifies server-side, IP-weight accounting, 429 reason parsing, typed
-rejections; Lighter form-encoded sendTx, rate-limit handling; WS subscription replay, dispatch of the LIVE captured
-frames, gap-driven resubscribe; adapters' place / modify / cancel / DMS paths and stream parsing.
+rejections; WS subscription replay, dispatch of the LIVE captured frames, gap-driven resubscribe; the adapter's
+place / modify / cancel / DMS paths and stream parsing.
 """
 
 from __future__ import annotations
@@ -17,15 +17,13 @@ import pytest
 from aiohttp import web
 from cryptography.hazmat.primitives.asymmetric import ed25519
 
-from bot.common.errors import AuthError, GeoRestricted, LiveLockError, OrderRejected, RateLimited
-from bot.common.ratelimit import AdaptiveThrottle, RollingWindow, TokenBucket
+from bot.common.errors import AuthError, GeoRestricted, LiveLockError, OrderRejected, RateLimited, VenueError
+from bot.common.ratelimit import RollingWindow, TokenBucket
 from bot.venues.arcus import signing as sg
 from bot.venues.arcus.adapter import ArcusAdapter
 from bot.venues.arcus.rest import ArcusRest
 from bot.venues.arcus.ws import ArcusWS
 from bot.venues.base import TIF, OrderRequest, OrderStatus, Side, Venue
-from bot.venues.lighter_rh.rest import LighterRest
-from bot.venues.lighter_rh.ws import LighterWS
 from bot.venues.ws_base import ReconnectingWS
 from tests.helpers import fixture_markets
 
@@ -109,12 +107,6 @@ async def test_token_bucket_and_windows() -> None:
     assert w.try_take(3) and not w.try_take(1) and w.remaining() == 0
     t["now"] = 62.0
     assert w.remaining() == 3
-    th = AdaptiveThrottle(interval_s=5.0, speedup_after=2)
-    th.on_ok()
-    th.on_ok()
-    assert th.interval_s < 5.0
-    th.on_limited(429)
-    assert th.interval_s > 5.0 and th.limit_events
 
 
 # ------------------------------------------------------------------------------------------------ Arcus REST
@@ -205,46 +197,6 @@ async def test_arcus_rest_errors_and_weights(server: FakeServer) -> None:
     await ro.close()
 
 
-# ------------------------------------------------------------------------------------------------ Lighter REST
-async def test_lighter_rest_form_and_limits(server: FakeServer) -> None:
-    server.responses["/api/v1/sendTx"] = (200, {"code": 200, "tx_hash": "0xabc", "volume_quota_remaining": 7})
-    lr = LighterRest(server.url, writes_allowed=True)
-    r = await lr.send_tx(14, '{"a":1}')
-    assert r["tx_hash"] == "0xabc" and lr.last_volume_quota == 7
-    assert server.requests[-1]["form"] == {"tx_type": "14", "tx_info": '{"a":1}', "price_protection": "true"}
-    server.responses["/api/v1/sendTxBatch"] = (200, {"code": 200, "tx_hash": ["a", "b"]})
-    await lr.send_tx_batch([14, 15], ["{}", "{}"])
-    assert json.loads(server.requests[-1]["form"]["tx_types"]) == [14, 15]
-    with pytest.raises(ValueError):
-        await lr.send_tx_batch([14], [])
-    server.responses["/api/v1/orderBooks"] = (200, {"code": 200, "order_books": [{"market_id": 1}]})
-    assert await lr.order_books() == [{"market_id": 1}]
-    server.responses["/api/v1/fundings"] = (200, {"code": 200, "fundings": [{"timestamp": 1}]})
-    assert await lr.fundings(1, start_s=0, end_s=10)
-    server.responses["/api/v1/account"] = (200, {"code": 200, "accounts": [{"index": 5}]})
-    assert (await lr.account(5))["index"] == 5
-    server.responses["/api/v1/accountActiveOrders"] = (200, {"code": 200, "orders": [{"order_index": 1}]})
-    assert await lr.active_orders(5, "tok")
-    assert server.requests[-1]["headers"]["Authorization"] == "tok"
-    server.responses["/api/v1/nextNonce"] = (200, {"code": 200, "nonce": 42})
-    assert await lr.next_nonce(5, 4) == 42
-    server.responses["/api/v1/candles"] = (429, {"code": 23000, "message": "Too Many Requests!"})
-    with pytest.raises(RateLimited):
-        await lr.candles(1, "1h", start_s=0, end_s=1)
-    assert lr.limit_events == 1 and lr.budget_remaining() == 0  # windows frozen for the firewall cooldown
-    server.responses["/api/v1/apikeys"] = (400, {"code": 21120, "message": "invalid signature"})
-    lr2 = LighterRest(server.url)
-    with pytest.raises(AuthError):
-        await lr2.api_keys(5)
-    server.responses["/api/v1/systemConfig"] = (400, {"code": 21701, "message": "invalid base amount"})
-    with pytest.raises(OrderRejected):
-        await lr2.system_config()
-    with pytest.raises(LiveLockError):
-        await lr2.send_tx(14, "{}")
-    await lr.close()
-    await lr2.close()
-
-
 # ------------------------------------------------------------------------------------------------ WebSockets
 async def test_reconnecting_ws_replays_subscriptions(server: FakeServer) -> None:
     got: list[dict[str, Any]] = []
@@ -289,20 +241,6 @@ async def test_arcus_ws_dispatches_live_frames() -> None:
     await aw._on_message({"method": "placeOrder", "id": 7, "status": 202, "result": {"orderId": "x"}}, 0)
     assert fut.result()["result"]["orderId"] == "x"
     await aw._on_message({"type": "error", "message": "bad"}, 0)
-
-
-async def test_lighter_ws_dispatches_live_frames() -> None:
-    frames = json.loads((FIX / "lighter_ws_frames.json").read_text())
-    lw = LighterWS("wss://unused")
-    lw.base_by_id.update({1: "BTC", 26: "SPY"})
-    seen: dict[str, int] = {}
-    for ev in ("book", "ticker", "trades", "market_stats"):
-        lw.on(ev, lambda *a, ev=ev: seen.__setitem__(ev, seen.get(ev, 0) + 1))
-    for fr in frames:
-        await lw._on_message(fr["raw"], fr["recv_ts_us"])
-    assert seen["book"] > 100 and seen["ticker"] > 10 and seen["trades"] >= 1 and seen["market_stats"] >= 1
-    assert lw.books[1].book.best_ask() is not None and lw.books[1].gaps == 0
-    await lw.refresh_auth(5, "newtok")
 
 
 # ------------------------------------------------------------------------------------------------ adapters
@@ -376,7 +314,12 @@ async def test_arcus_adapter_paths() -> None:
     st = await ad.place(reqs[1:])
     assert rest.calls[-1] == ("batch", 2) and len(st) == 2
     await ad.modify("c0", D("85990.0"), D("0.00012"))
-    assert rest.calls[-1][1]["order_id"] == "o-c0"
+    assert rest.calls[-1][1]["order_id"] == "o-c0" and rest.calls[-1][1]["client_id"] is None   # by orderId only
+    ad._live["c1"].order_id = None
+    n = len(rest.calls)
+    with pytest.raises(VenueError, match="order id not known"):
+        await ad.modify("c1", D("85990.0"), D("0.00012"))       # never by clientId alone (refused live 2026-09-25)
+    assert len(rest.calls) == n
     await ad.cancel(["c1"])
     await ad.cancel(["c0", "c2"])
     assert rest.calls[-1] == ("batch_cancel", 2)
@@ -404,92 +347,3 @@ async def test_arcus_adapter_paths() -> None:
         await ad.place([OrderRequest(Venue.ARCUS, "BTC", Side.BUY, D("1"), D("1"), TIF.POST_ONLY)])
     await ad.close()
 
-
-class FakeLighterRest:
-    def __init__(self) -> None:
-        self.sent: list[tuple[str, Any]] = []
-        from bot.venues.http import HttpClient
-
-        self.http = HttpClient("lighter_rh", "http://x")
-        self.limit_events = 0
-
-    async def send_tx(self, t: int, info: str) -> dict[str, Any]:
-        self.sent.append(("tx", t))
-        return {"tx_hash": "h"}
-
-    async def send_tx_batch(self, types: list[int], infos: list[str]) -> dict[str, Any]:
-        self.sent.append(("batch", list(types)))
-        return {"tx_hash": ["h"] * len(types)}
-
-    async def account(self, i: int) -> dict[str, Any]:
-        return {"positions": [{"market_id": 1, "position": "0.0003", "sign": -1, "avg_entry_price": "86000",
-                               "position_value": "25.8", "unrealized_pnl": "0", "margin_mode": 0}],
-                "total_asset_value": "40", "available_balance": "30", "collateral": "40"}
-
-    async def active_orders(self, i: int, tok: str) -> list[dict[str, Any]]:
-        return [{"order_index": 9, "client_order_index": 77, "market_index": 1, "status": "open", "is_ask": True,
-                 "price": "90000", "initial_base_amount": "0.0002", "filled_base_amount": "0",
-                 "time_in_force": "post-only"}]
-
-    def sendtx_remaining(self) -> int:
-        return 50
-
-    async def close(self) -> None:
-        return None
-
-
-async def test_lighter_adapter_signs_and_batches(tmp_path: Path) -> None:
-    pytest.importorskip("lighter")
-    from bot.venues.lighter_rh import signer as ls
-    from bot.venues.lighter_rh.adapter import LighterAdapter
-    from bot.venues.lighter_rh.auth import AuthTokenManager
-    from bot.venues.lighter_rh.nonce import NonceManager
-
-    priv, _ = ls.generate_api_key()
-    signer = ls.LighterSigner(url="https://api.rh-testnet.lighter.xyz", chain_id=300, account_index=5,
-                              api_key_index=4, private_key_hex=priv)
-    rest = FakeLighterRest()
-    auth = AuthTokenManager(signer, lifetime_s=3600)
-    tok = auth.token(now_s=1_790_000_000)
-    assert tok.count(":") == 3 and auth.token(now_s=1_790_000_100) == tok and not auth.readonly
-    assert auth.token(now_s=1_790_003_500) != tok  # refreshed 10 min before expiry
-    ro = AuthTokenManager(readonly_token="ro:5:all:1:abc")
-    assert ro.readonly and ro.token() == "ro:5:all:1:abc"
-    ad = LighterAdapter(rest, None, signer=signer, nonces=NonceManager(tmp_path / "n"), auth=auth, account_index=5,  # type: ignore[arg-type]
-                        markets=MK[Venue.LIGHTER_RH])
-    await ad.connect()
-    reqs = [OrderRequest(Venue.LIGHTER_RH, "BTC", Side.SELL, D("90000.0"), D("0.00020"), TIF.POST_ONLY, client_id=str(100 + i))
-            for i in range(2)]
-    await ad.place(reqs[:1])
-    assert rest.sent[-1] == ("tx", 14)
-    await ad.place([*reqs[1:], OrderRequest(Venue.LIGHTER_RH, "BTC", Side.BUY, D("86100.0"), D("0.00020"), TIF.IOC,
-                                            client_id="300")])
-    assert rest.sent[-1] == ("batch", [14, 14])
-    await ad.modify("100", D("90010.0"), D("0.00020"))
-    assert rest.sent[-1] == ("tx", 17)
-    await ad.cancel(["100", "101", "999"])
-    assert rest.sent[-1] == ("batch", [15, 15])
-    await ad.cancel_all("BTC")
-    await ad.arm_dead_mans_switch(1_790_000_060_000_000)
-    await ad.arm_dead_mans_switch(None)
-    await ad.set_leverage("BTC", 3)
-    assert [t for k, t in rest.sent[-4:]] == [16, 16, 16, 20]
-    with pytest.raises(ValueError):
-        await ad.place([OrderRequest(Venue.LIGHTER_RH, "BTC", Side.BUY, D("1"), D("1"), TIF.POST_ONLY, client_id="x1")])
-    pos = await ad.positions()
-    assert pos[0].size == D("-0.0003")
-    oo = await ad.open_orders()
-    assert oo[0].client_id == "77" and oo[0].side is Side.SELL
-    assert (await ad.balances())["equity"] == D("40")
-    await ad._on_orders({"orders": {"1": [{"client_order_index": 100, "order_index": 1, "market_index": 1,
-                                           "status": "canceled", "is_ask": True, "initial_base_amount": "0.0002",
-                                           "filled_base_amount": "0"}]}}, 1)
-    assert (await ad._orders_q.get()).status is OrderStatus.CANCELED
-    trade = {"trade_id": 5, "market_id": 1, "size": "0.0002", "price": "90000", "usd_amount": "18", "ask_account_id": 5,
-             "bid_account_id": 9, "is_maker_ask": True, "ask_client_id": 101, "ask_id": 11, "maker_fee": 0,
-             "transaction_time": 1}
-    await ad._on_trades({"type": "update/account_all_trades", "trades": {"1": [trade, trade]}}, 1)
-    f = await ad._fills_q.get()
-    assert f.side is Side.SELL and f.is_maker and f.client_id == "101" and ad._fills_q.empty()
-    assert ad.budget().tx_per_min_remaining == 50 and "limit_events" in ad.health()
-    await ad.close()

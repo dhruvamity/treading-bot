@@ -9,15 +9,13 @@ from __future__ import annotations
 
 import csv
 from dataclasses import dataclass, field
-from datetime import date, datetime, time, timedelta
+from datetime import date, datetime, time
 from pathlib import Path
 
 from bot.common.time import KOLKATA, NEW_YORK, US_PER_S, dt_to_us, us_to_dt
 
 MACRO_WINDOW_S = 30 * 60
 SINGLE_STOCK_WINDOW_S = 24 * 3600
-EQUITY_CATEGORIES = {"EQUITIES", "INDICES", "COMMODITIES", "FOREX"}
-ARCUS_BOUNDARIES_ET = (time(4, 0), time(9, 30), time(16, 0), time(20, 0))
 
 
 @dataclass(frozen=True, slots=True)
@@ -112,25 +110,6 @@ class TradingCalendar:
         if et.weekday() == 4 and t >= time(20, 0):
             return "weekend"
         return "overnight"
-
-    def arcus_boundary_near(self, ts_us: int, within_s: int = 300) -> bool:
-        et = us_to_dt(ts_us).astimezone(NEW_YORK)
-        for b in ARCUS_BOUNDARIES_ET:
-            bd = et.replace(hour=b.hour, minute=b.minute, second=0, microsecond=0)
-            if abs((et - bd).total_seconds()) <= within_s:
-                return True
-        return False
-
-    def next_arcus_boundary_us(self, ts_us: int) -> int:
-        et = us_to_dt(ts_us).astimezone(NEW_YORK)
-        for add in range(0, 8):
-            d = (et + timedelta(days=add)).date()
-            for b in ARCUS_BOUNDARIES_ET:
-                cand = datetime.combine(d, b, tzinfo=NEW_YORK)
-                if cand > et:
-                    return dt_to_us(cand)
-        raise RuntimeError("no boundary within a week")
-
 
 def in_ist_windows(ts_us: int, windows: list[str]) -> bool:
     """True when `windows` is empty (no restriction) or ts falls in any 'HH:MM-HH:MM' IST window (wraps midnight)."""

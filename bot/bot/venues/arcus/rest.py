@@ -152,12 +152,6 @@ class ArcusRest:
         body = await self._get("/v1/trades", {"market": market, "from": from_us, "to": to_us, "limit": limit})
         return list(body.get("trades") or [])
 
-    async def candles(self, market: str, timeframe: str, *, to_us: int, from_us: int | None = None,
-                      countback: int | None = None) -> list[dict[str, Any]]:
-        body = await self._get("/v1/candles", {"market": market, "timeframe": timeframe, "to": to_us,
-                                              "from": from_us, "countback": countback})
-        return list(body.get("candles") or [])
-
     # ---------------------------------------------------------------- account reads (public by address)
     async def account(self, address: str, account_index: int) -> dict[str, Any]:
         return dict(await self._get("/v1/account", {"address": address, "accountIndex": account_index}))
@@ -176,12 +170,6 @@ class ArcusRest:
         body = await self._get("/v1/fills", {"address": address, "accountIndex": account_index, "from": from_us,
                                              "limit": limit, "market": market})
         return list(body.get("fills") or [])
-
-    async def funding_payments(self, address: str, account_index: int, *, from_us: int | None = None,
-                               limit: int = 1000) -> list[dict[str, Any]]:
-        body = await self._get("/v1/funding", {"address": address, "accountIndex": account_index,
-                                               "from": from_us, "limit": limit})
-        return list(body.get("fundingPayments") or [])
 
     async def rate_limit(self, address: str, account_index: int) -> dict[str, Any]:
         body = dict(await self._get("/v1/rateLimit", {"address": address, "accountIndex": account_index}))

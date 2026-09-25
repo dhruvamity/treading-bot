@@ -12,7 +12,7 @@ from decimal import Decimal
 from typing import Any
 
 from bot.common import sizing
-from bot.common.config import AppConfig, DNSession, MMSession
+from bot.common.config import AppConfig, MMSession
 from bot.common.errors import BotError, ConfigError
 from bot.common.secrets import SecretStore
 from bot.core.calendar import TradingCalendar
@@ -23,7 +23,6 @@ from bot.core.creds import (
     discover_arcus_keys,
     ed25519_public_hex,
     key_for_account,
-    resolve_lighter,
 )
 from bot.core.heartbeat import heartbeat_process_alive, read_heartbeat_age_s
 from bot.core.livelock import RunMode
@@ -68,10 +67,6 @@ class Report:
         return "\n".join(lines)
 
 
-def _venues_of(s: MMSession | DNSession) -> list[Venue]:
-    return [Venue.ARCUS, Venue.LIGHTER_RH] if isinstance(s, DNSession) else [Venue(s.venue)]
-
-
 def _mid(bbo: dict[str, Any]) -> Decimal | None:
     b, a = bbo.get("bestBid") or {}, bbo.get("bestAsk") or {}
     if b.get("price") and a.get("price"):
@@ -98,7 +93,7 @@ def sizing_lines(s: MMSession, m: Market, mid: Decimal) -> tuple[str, str, str]:
 NEW_LISTING_DAYS = 21        # Arcus addedTimestamp this recent: a new listing (thin history, small OI cap)
 
 
-def _new_market_checks(r: Report, s: MMSession | DNSession, m: Market, calendar: TradingCalendar, now_us: int,
+def _new_market_checks(r: Report, s: MMSession, m: Market, calendar: TradingCalendar, now_us: int,
                        live: bool) -> None:
     """What a recently listed market, or any single stock, needs before it is traded."""
     added = m.extra.get("addedTimestamp") if m.extra else None
@@ -119,8 +114,8 @@ def _new_market_checks(r: Report, s: MMSession | DNSession, m: Market, calendar:
                   f"add the next {s.market} report date (symbol,date,session: bmo or amc)")
 
 
-async def run_doctor(sessions: list[MMSession | DNSession], *, mode: RunMode, app: AppConfig, secrets: SecretStore,
-                     calendar: TradingCalendar, arcus_rest: Any, lighter_rest: Any | None, markets: dict[Venue, dict[str, Market]],
+async def run_doctor(sessions: list[MMSession], *, mode: RunMode, app: AppConfig, secrets: SecretStore,
+                     calendar: TradingCalendar, arcus_rest: Any, markets: dict[Venue, dict[str, Market]],
                      adopt_positions: bool = False, now_us: int | None = None,
                      account_index: int | None = None) -> Report:
     r = Report()
@@ -132,17 +127,16 @@ async def run_doctor(sessions: list[MMSession | DNSession], *, mode: RunMode, ap
 
     # ---- sessions and plan
     for s in sessions:
-        kind = f"DN {s.strategy}" if isinstance(s, DNSession) else f"{s.mode} on {s.venue}"
-        r.add("PASS", "session", f"{s.session_id}: {kind}, {s.market}")
-        for v in _venues_of(s):
-            m = markets.get(v, {}).get(s.market.upper())
-            if m is None:
-                r.add("FAIL", "market", f"{s.market} is not listed on {v.value}", "fix the market in the session file")
-            elif str(m.status).upper() not in ("ONLINE", "ACTIVE", "TRADING", "OPEN", "1"):
-                r.add("FAIL" if live else "WARN", "market", f"{v.value} {s.market} status is {m.status}: orders "
-                      "would be rejected", "wait until it is trading (new listings start OFFLINE)")
-            else:
-                _new_market_checks(r, s, m, calendar, now, live)
+        r.add("PASS", "session", f"{s.session_id}: {s.mode} on {s.venue}, {s.market}")
+        v = Venue(s.venue)
+        m = markets.get(v, {}).get(s.market.upper())
+        if m is None:
+            r.add("FAIL", "market", f"{s.market} is not listed on {v.value}", "fix the market in the session file")
+        elif str(m.status).upper() not in ("ONLINE", "ACTIVE", "TRADING", "OPEN", "1"):
+            r.add("FAIL" if live else "WARN", "market", f"{v.value} {s.market} status is {m.status}: orders "
+                  "would be rejected", "wait until it is trading (new listings start OFFLINE)")
+        else:
+            _new_market_checks(r, s, m, calendar, now, live)
     try:
         idx = account_index if account_index is not None else arcus_account_index(sessions) if sessions else -1
     except ConfigError as e:
@@ -192,23 +186,12 @@ async def run_doctor(sessions: list[MMSession | DNSession], *, mode: RunMode, ap
         r.add("PASS", "alerts", "Telegram configured")
 
     # ---- Arcus account (with no sessions named: the credentials and the key's own subaccount)
-    if not sessions or any(Venue.ARCUS in _venues_of(s) for s in sessions):
-        await _arcus_checks(r, sessions, idx, secrets=secrets, rest=arcus_rest, markets=markets, testnet=testnet,
-                            miss=miss, live=live, adopt=adopt_positions, now_ms=now // 1000)
-    # ---- Lighter account
-    if any(Venue.LIGHTER_RH in _venues_of(s) for s in sessions) or (not sessions and secrets.get("LIGHTER_ADDRESS")):
-        if lighter_rest is None:
-            r.add("WARN", "lighter", "Lighter checks skipped (no client)")
-        else:
-            try:
-                lc = await resolve_lighter(lighter_rest, secrets, testnet)
-                r.add("PASS", "lighter key", f"account {lc.account_index}, API key slot {lc.api_key_index}")
-            except BotError as e:
-                r.add(miss, "lighter key", str(e), "add LIGHTER_ADDRESS and LIGHTER_API_PRIVATE_KEY to .env")
+    await _arcus_checks(r, sessions, idx, secrets=secrets, rest=arcus_rest, markets=markets, testnet=testnet,
+                        miss=miss, live=live, adopt=adopt_positions, now_ms=now // 1000)
     return r
 
 
-async def _arcus_checks(r: Report, sessions: list[MMSession | DNSession], idx: int, *, secrets: SecretStore, rest: Any,
+async def _arcus_checks(r: Report, sessions: list[MMSession], idx: int, *, secrets: SecretStore, rest: Any,
                         markets: dict[Venue, dict[str, Market]], testnet: bool, miss: str, live: bool, adopt: bool,
                         now_ms: int) -> None:
     try:
@@ -260,19 +243,16 @@ async def _arcus_checks(r: Report, sessions: list[MMSession | DNSession], idx: i
             r.add("WARN", "arcus funds", f"could not read the account: {e}")
         await _arcus_sizing(r, sessions, rest, markets)
         return
-    follow = {id(s) for s in sessions if isinstance(s, MMSession) and s.venue == "arcus" and s.sizing is not None
-              and s.sizing.follow_equity}
-    need = sum(float(s.capital_usd) for s in sessions if isinstance(s, MMSession) and s.venue == "arcus"
-               and id(s) not in follow)
-    need += sum(float(s.collateral_per_leg_usd) for s in sessions if isinstance(s, DNSession))
+    follow = {id(s) for s in sessions if s.sizing is not None and s.sizing.follow_equity}
+    need = sum(float(s.capital_usd) for s in sessions if id(s) not in follow)
     lvl = "FAIL" if live and equity <= 0 else "WARN" if float(equity) < need else "PASS"
     r.add(lvl, "arcus funds", f"equity ${equity:.2f}, free collateral ${free:.2f}"
           + (f"; fixed-size sessions plan ${need:.2f}" if need else ""),
           "deposit more, or lower capital_usd in the session file to what is really there")
-    sized: list[MMSession | DNSession] = []
+    sized: list[MMSession] = []
     for s in sessions:
         if id(s) in follow:
-            assert isinstance(s, MMSession) and s.sizing is not None
+            assert s.sizing is not None
             z = s.sizing
             cap = sizing.target_capital(float(equity), frac=z.capital_frac, max_capital=z.max_capital_usd,
                                         covered=z.backtest_capital_usd)
@@ -347,22 +327,21 @@ async def _arcus_checks(r: Report, sessions: list[MMSession | DNSession], idx: i
     await _arcus_sizing(r, sessions, rest, markets)
 
 
-async def _arcus_sizing(r: Report, sessions: list[MMSession | DNSession], rest: Any,
+async def _arcus_sizing(r: Report, sessions: list[MMSession], rest: Any,
                         markets: dict[Venue, dict[str, Market]]) -> None:
     for s in sessions:
-        if isinstance(s, MMSession) and s.venue == "arcus":
-            m = markets[Venue.ARCUS].get(s.market.upper())
-            if m is None:
-                continue
-            try:
-                mid = _mid(await rest.bbo(m.venue_symbol))
-            except BotError:
-                mid = None
-            if mid is None:
-                r.add("WARN", "sizing", f"{s.market}: no top of book to size against")
-                continue
-            lvl, msg, fix = sizing_lines(s, m, mid)
-            r.add(lvl, "sizing", msg, fix)
+        m = markets[Venue.ARCUS].get(s.market.upper())
+        if m is None:
+            continue
+        try:
+            mid = _mid(await rest.bbo(m.venue_symbol))
+        except BotError:
+            mid = None
+        if mid is None:
+            r.add("WARN", "sizing", f"{s.market}: no top of book to size against")
+            continue
+        lvl, msg, fix = sizing_lines(s, m, mid)
+        r.add(lvl, "sizing", msg, fix)
 
 
 __all__ = ["Check", "Report", "run_doctor", "sizing_lines"]

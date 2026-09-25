@@ -2,7 +2,6 @@
 # folder this file is in.
 #
 #   docker compose up -d --build                     the scout: record every Arcus perp, backtest every 30 min
-#   docker compose --profile research up -d --build  also the full-book research recorder (optional)
 #   SCOUT_CAPITAL=500 docker compose up -d --build   rank for a $500 account (default auto: no keys here, so $100)
 #   docker compose ps                                running and healthy?
 #   docker compose logs -f scout                     what it is doing
@@ -11,7 +10,7 @@
 #   docker compose down                              stop (a scan in progress stops at once, buffers are written out)
 #
 # Needs no keys and places no orders. Disk: about 0.2-0.5 GB/day for the scout with depth recording (the default
-# here; drop "--depth" for about 0.1 GB/day), plus about 1.5-2.5 GB/day for the research recorder if enabled.
+# here; drop "--depth" for about 0.1 GB/day).
 # Recording pauses by itself under 5 GB free.
 services:
   scout:
@@ -29,23 +28,3 @@ services:
       driver: json-file
       options: {max-size: "20m", max-file: "5"}
 
-  # Optional: every order-book change (plus 60 s top-100 snapshots), trades, mark/oracle/index prices and funding
-  # for the markets in config/universe.yaml, on Arcus and Lighter, as Parquet under data/. Not needed by the scout;
-  # useful for exact queue-position replays and funding research. Shrink closed days with:
-  #   docker compose run --rm recorder compact
-  recorder:
-    build: .                       # same image as the scout (the second build is all cache); stops compose trying
-    image: arcus-scout             # to pull "arcus-scout" from Docker Hub, where it does not exist
-    container_name: arcus-recorder
-    profiles: ["research"]
-    restart: unless-stopped
-    command: ["record"]
-    volumes:
-      - ./data:/app/data
-      - ./logs:/app/logs
-    stop_grace_period: 1m
-    healthcheck:
-      disable: true                # the image's check watches the scout's recorder, not this one
-    logging:
-      driver: json-file
-      options: {max-size: "20m", max-file: "5"}

@@ -9,7 +9,7 @@ import time
 from pathlib import Path
 from typing import Any
 
-from bot.common.config import AppConfig, load_app, load_arcus_config, load_lighter_config, load_session
+from bot.common.config import AppConfig, load_app, load_arcus_config, load_session
 from bot.common.secrets import SecretStore
 from bot.core.calendar import TradingCalendar
 from bot.core.heartbeat import write_heartbeat
@@ -28,13 +28,12 @@ STRANGER = 999
 
 # ------------------------------------------------------------------------------------------------ runner side
 async def _runner(tmp_path: Path, srv: FakeVenues) -> tuple[BotRunner, AppConfig]:
-    acfg, lcfg = load_arcus_config(ROOT / "config/venues/arcus.yaml"), load_lighter_config(ROOT / "config/venues/lighter_rh.yaml")
+    acfg = load_arcus_config(ROOT / "config/venues/arcus.yaml")
     acfg.rest.mainnet, acfg.ws.mainnet = f"http://{srv.url}", f"ws://{srv.url}/arcus-ws"
-    lcfg.rest.mainnet, lcfg.ws.mainnet = f"http://{srv.url}", f"ws://{srv.url}/lighter-ws"
     app = load_app(ROOT / "config/app.yaml")
     app.data_dir, app.reports_dir, app.state_dir = str(tmp_path / "data"), str(tmp_path / "reports"), str(tmp_path / "state")
     runner = BotRunner([load_session(ROOT / "config/sessions/arcus_btc_mm.yaml")], mode=RunMode.PAPER, cli_live=False,
-                       app=app, arcus_cfg=acfg, lighter_cfg=lcfg, secrets=SecretStore(tmp_path / "none.enc", password=""),
+                       app=app, arcus_cfg=acfg, secrets=SecretStore(tmp_path / "none.enc", password=""),
                        calendar=TradingCalendar.load(ROOT / "config/calendars"), state_db=str(tmp_path / "s.sqlite"))
     return runner, app
 

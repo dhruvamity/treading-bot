@@ -237,21 +237,16 @@ class Control:
 
     # ------------------------------------------------------------------ sessions and runs
     def sessions(self) -> list[dict[str, Any]]:
-        out = []
+        out: list[dict[str, Any]] = []
         for p in sorted((self.root / "config" / "sessions").glob("*.yaml")):
             try:
                 s = load_session(p)
             except Exception as e:  # show broken files instead of hiding them
                 out.append({"name": p.stem, "error": str(e)[:120]})
                 continue
-            d: dict[str, Any] = {"name": p.stem, "market": s.market, "live_enabled": s.live_enabled}
-            if hasattr(s, "mode"):
-                d.update(kind="mm", mode=s.mode, venue=getattr(s, "venue", ""),
-                         account=getattr(s, "account_index", None), order_usd=getattr(s, "order_size_usd", None),
-                         cap_usd=getattr(s, "inventory_cap_usd", None), capital=getattr(s, "capital_usd", None))
-            else:
-                d.update(kind="dn", mode=getattr(s, "strategy", ""))
-            out.append(d)
+            out.append({"name": p.stem, "market": s.market, "live_enabled": s.live_enabled, "kind": "mm",
+                        "mode": s.mode, "venue": s.venue, "account": s.account_index, "order_usd": s.order_size_usd,
+                        "cap_usd": s.inventory_cap_usd, "capital": s.capital_usd})
         return out
 
     def _runs(self) -> list[dict[str, Any]]:

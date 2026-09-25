@@ -13,15 +13,15 @@ import pytest
 
 from bot.core.book import L2Book
 from bot.core.marketdata import MarketView
-from bot.research.sim.engine import SimConfig, Simulator
-from bot.research.sim.events import merge
-from bot.research.sim.synthetic import book_events, trend_path
 from bot.scout.sim import BUY, SELL, Book, Config, MarketInfo, MidPolicy, Risk, Sim, Window
 from bot.scout.tape import US_DAY, DayTape, TapeStore, day_start_us
 from bot.strategies import make_strategy
 from bot.strategies.base import StrategyContext
 from bot.venues.base import Side, Venue
 from tests.helpers import fixture_markets, mm_session
+from tests.sim.engine import SimConfig, Simulator
+from tests.sim.events import merge
+from tests.sim.synthetic import book_events, trend_path
 
 S = 1_000_000
 T0 = day_start_us("2026-09-20")

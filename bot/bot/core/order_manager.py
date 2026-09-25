@@ -1,9 +1,10 @@
 """Order manager (P2 task 3): desired book -> the fewest venue actions the budget allows.
 
-`plan()` is PURE (inputs -> actions) so the same code runs in sim, paper and live, and is property-tested:
+`plan()` is PURE (inputs -> actions) so the same code runs in paper and live, and is property-tested:
 - match live orders to desired ones by (side, tag); keep a live order if its price is within the requote
   tolerance (max(min_ticks, frac x half-spread) x governor multiplier) and size within 20%;
-- otherwise modify (Arcus/Lighter both support it) or cancel + place;
+- otherwise cancel + place, or modify where the venue allows it (ArcusAdapter.use_modify) and the order's venue id
+  is known: Arcus refused every modify sent by clientId alone (2026-09-25);
 - unmatched live orders are cancelled; in-flight (unacked) orders are never touched twice. An order counts as in
   flight from just before its request is sent until the venue's first update for it, or IN_FLIGHT_MAX_S at most: on a
   fast venue the update can arrive before the request returns, and an order must never stay frozen because of that.
@@ -12,7 +13,7 @@
 - a modify or cancel the venue refuses is not retried on the next tick: the order is left alone for IN_FLIGHT_MAX_S
   and the adapter is asked to reconcile (the order may be gone, or its id unknown);
 - a post-only order that would cross the CURRENT BBO is re-priced one tick behind the touch, never sent crossing;
-- venue minimums (Arcus $5 opening, Lighter $10 + min base), max size and per-market open-order caps are enforced;
+- venue minimums (Arcus $5 opening and min size), max size and per-market open-order caps are enforced;
 - actions are ordered cancels -> modifies -> places.
 """
 
@@ -52,6 +53,7 @@ class LiveOrderView:
     tag: str
     reduce_only: bool = False
     in_flight: bool = False
+    has_venue_id: bool = True   # modify goes by the venue's order id; without it, requote with cancel + place
 
 
 class ActionKind(StrEnum):
@@ -140,7 +142,7 @@ def plan(desired: Sequence[DesiredOrder], live: Sequence[LiveOrderView], m: Mark
         ds = abs(lo.size_quantums - d.size_quantums) / max(1, d.size_quantums)
         if dp <= p.tol_ticks and ds <= p.size_frac and lo.reduce_only == d.reduce_only:
             continue  # within hysteresis: keep queue position and budget
-        if p.allow_modify and p.allow_modifies and lo.reduce_only == d.reduce_only:
+        if p.allow_modify and p.allow_modifies and lo.has_venue_id and lo.reduce_only == d.reduce_only:
             modifies.append(Action(ActionKind.MODIFY, f"requote {d.tag}: dp={dp} ticks ds={ds:.0%}", desired=d,
                                    client_id=lo.client_id))
         elif p.allow_places:
@@ -240,8 +242,7 @@ class OrderManager:
         log.warning("resync_requested", venue=venue.value, reason=why)
 
     def new_client_id(self, venue: Venue) -> str:
-        f = self.ids[venue]
-        return f.arcus() if venue is Venue.ARCUS else str(f.lighter())
+        return self.ids[venue].arcus()
 
     def live_view(self, venue: Venue, m: Market) -> list[LiveOrderView]:
         out = []
@@ -255,7 +256,7 @@ class OrderManager:
                 busy = True
                 self.resync(venue, f"no venue ack for {r.client_id}")
             out.append(LiveOrderView(r.client_id, r.side, int(r.price / m.tick_size), int(rem / m.step_size), r.tag,
-                                     r.reduce_only, busy))
+                                     r.reduce_only, busy, o.venue_order_id is not None))
         return out
 
     def to_request(self, venue: Venue, m: Market, d: DesiredOrder, reason: str, client_id: str | None = None) -> OrderRequest:
@@ -341,26 +342,20 @@ class OrderManager:
         return res
 
     def _record_budget(self, venue: Venue, n_place: int, n_modify: int, n_cancel: int) -> None:
-        g = self.governor
-        if venue is Venue.ARCUS:
-            ag = g.for_arcus(self.account_index.get(venue, 0))  # type: ignore[attr-defined]
-            if n_place + n_modify:
-                ag.record_actions(n_place + n_modify, "place")
-            if n_cancel:
-                ag.record_actions(n_cancel, "cancel")
-        else:
-            n_tx = (1 if n_place else 0) + (1 if n_cancel else 0) + n_modify  # batches count as one request
-            if n_tx:
-                g.lighter.record_tx(n_tx)  # type: ignore[attr-defined]
+        ag = self.governor.for_arcus(self.account_index.get(venue, 0))  # type: ignore[attr-defined]
+        if n_place + n_modify:
+            ag.record_actions(n_place + n_modify, "place")
+        if n_cancel:
+            ag.record_actions(n_cancel, "cancel")
 
     def on_order_update(self, client_id: str, terminal_or_acked: bool) -> None:
         if terminal_or_acked:
             self.in_flight.pop(client_id, None)
 
-    async def hedge(self, req: OrderRequest, m: Market) -> None:
-        """IOC hedge (DN): passes risk checks, never post-only, logged with its reason."""
+    async def ioc(self, req: OrderRequest, m: Market) -> None:
+        """An IOC exit, cut or flatten: passes risk checks, never post-only, logged with its reason."""
         self.risk.check(req, m)  # type: ignore[attr-defined]
         self.state.on_intent(req, self.session)  # type: ignore[attr-defined]
-        self._dec("hedge", req.reason, venue=req.venue.value, market=m.base, session=self.session,
+        self._dec("ioc", req.reason, venue=req.venue.value, market=m.base, session=self.session,
                               client_id=req.client_id, side=req.side.value, price=str(req.price), size=str(req.size))
         await self.adapters[req.venue].place([req])  # type: ignore[attr-defined]

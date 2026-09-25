@@ -18,7 +18,6 @@ from bot.common.errors import (
 from bot.common.logging import Log
 from bot.venues.base import (
     TIF,
-    AccountState,
     Fill,
     FundingPayment,
     Market,
@@ -59,7 +58,6 @@ def parse_market(m: dict[str, Any], *, maker_fee: Decimal, taker_fee: Decimal) -
         imf=imf,
         mmf=D(m["maintenanceMarginFraction"]),
         offhours_imf=_opt(m.get("offHoursInitialMarginFraction")),
-        close_out_mf=None,
         rth=(int(rth["startSecondsOfDay"]), int(rth["endSecondsOfDay"]), rth.get("timezone") or "America/New_York")
         if rth else None,
         maker_fee=maker_fee,
@@ -209,26 +207,17 @@ def parse_position(p: dict[str, Any], base_by_id: dict[int, str]) -> Position:
     )
 
 
-def parse_account(a: dict[str, Any], ts_us: int) -> AccountState:
-    equity = D(a.get("equity") or 0)
-    free = D(a.get("freeCollateral") or 0)
-    positions = a.get("positions") or {}
-    mm = sum((D(p.get("marginUsed") or 0) for p in positions.values()), Decimal(0))
-    return AccountState(venue=V, equity=equity, free_collateral=free, maintenance_margin=Decimal(0),
-                        initial_margin=max(Decimal(0), equity - free) if equity else mm, ts_us=ts_us)
-
-
 def parse_funding_payment(f: dict[str, Any], base_by_id: dict[int, str]) -> FundingPayment:
     return FundingPayment(venue=V, base=base_by_id.get(int(f["marketId"]), f.get("marketDisplayName", "")),
                           ts_us=int(f["time"]), rate_h=D(f["fundingRate"]), position_size=D(f["size"]),
                           payment=D(f["payment"]))
 
 
-def parse_public_trade(t: dict[str, Any]) -> PublicTrade:
+def parse_public_trade(t: dict[str, Any], base: str | None = None) -> PublicTrade:
     # Trade `side` is the TAKER side on the public stream (maker/taker addresses are both present).
     return PublicTrade(
         venue=V,
-        base=canonical_base(V, t["marketDisplayName"]),
+        base=base or canonical_base(V, t["marketDisplayName"]),
         ts_us=int(t["timestamp"]),
         price=D(t["price"]),
         size=D(t["size"]),

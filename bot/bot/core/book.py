@@ -1,11 +1,9 @@
-"""L2 order book shared by live feeds, the recorder and the simulator (same code everywhere, P3A task 2).
+"""L2 order book shared by the live feed and the paper venue.
 
 Sync rules (verified on live frames 2026-09-23, tests/fixtures/live):
 - Arcus `l2OrderbookUpdates`: seed from the `subscribed` snapshot's `lastSequenceId`; apply deltas whose
   `lastSequenceId` exceeds it; the FIRST delta may skip ahead (boundary gap, expected); after that sequences
   are contiguous, and a mid-stream gap means resubscribe. Duplicate prices in one frame: last write wins.
-- Lighter `order_book/{id}`: the subscribe frame is a full snapshot; each update's `begin_nonce` must equal the
-  previous frame's `nonce` (offsets are NOT contiguous and change on reconnect). Size 0 removes a level.
 """
 
 from __future__ import annotations
@@ -155,21 +153,6 @@ class L2Book:
                 return p
         return None
 
-    def impact_price(self, is_bid: bool, notional: Decimal) -> Decimal | None:
-        """Size-weighted average price for `notional` walked from one side."""
-        rem = notional
-        cost = ZERO
-        qty = ZERO
-        for p, s in self.levels(is_bid, 10_000):
-            take = min(rem, p * s)
-            q = take / p
-            cost += q * p
-            qty += q
-            rem -= take
-            if rem <= 0:
-                return cost / qty
-        return None
-
     def queue_ahead(self, is_bid: bool, price: Decimal) -> Decimal:
         """Displayed size at our price (queue ahead of a fresh order at that price)."""
         return self.size_at(is_bid, price)
@@ -233,39 +216,5 @@ class ArcusBookSync:
         self.book.apply(_pairs(contents.get("bids") or []), _pairs(contents.get("asks") or []))  # type: ignore[arg-type]
         self.last_seq = seq
         self.book.seq = seq
-        self.book.ts_us = ts_us
-        return SyncResult.APPLIED
-
-
-@dataclass
-class LighterBookSync:
-    book: L2Book = field(default_factory=L2Book)
-    last_nonce: int | None = None
-    gaps: int = 0
-
-    def on_snapshot(self, ob: dict[str, object], ts_us: int = 0) -> SyncResult:
-        """An empty or nonce-less snapshot empties the book and leaves it NOT_READY (see ArcusBookSync)."""
-        if not ob or ob.get("nonce") is None:
-            self.book.load([], [], None, ts_us)
-            self.last_nonce = None
-            return SyncResult.NOT_READY
-        self.book.load(_pairs(ob.get("bids") or []), _pairs(ob.get("asks") or []), int(ob["nonce"]),  # type: ignore[arg-type, call-overload]
-                       ts_us)
-        self.last_nonce = int(ob["nonce"])  # type: ignore[call-overload]
-        return SyncResult.APPLIED
-
-    def on_delta(self, ob: dict[str, object], ts_us: int = 0) -> SyncResult:
-        if self.last_nonce is None:
-            return SyncResult.NOT_READY
-        begin = int(ob.get("begin_nonce") or 0)  # type: ignore[call-overload]
-        nonce = int(ob["nonce"])  # type: ignore[call-overload]
-        if nonce <= self.last_nonce:
-            return SyncResult.STALE
-        if begin != self.last_nonce:
-            self.gaps += 1
-            return SyncResult.GAP
-        self.book.apply(_pairs(ob.get("bids") or []), _pairs(ob.get("asks") or []))  # type: ignore[arg-type]
-        self.last_nonce = nonce
-        self.book.seq = nonce
         self.book.ts_us = ts_us
         return SyncResult.APPLIED

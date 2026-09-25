@@ -18,3 +18,4 @@ ws_limits: {connections: 50, subs_per_conn: 100, subs_per_ip: 1000, inflight_pos
 taker_speed_bump_ms: 50
 dms: {refresh_s: 20, deadline_s: 60, min_lead_s: 5, max_lead_s: 300, max_fires_per_day: 10}
 live_fields: [markets, feetiers, fundingRates, rateLimit, compliance]
+use_modify: false               # requote by modifyOrder (order id) instead of cancel + place; see bot/common/config.py

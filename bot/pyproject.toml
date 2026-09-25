@@ -1,7 +1,7 @@
 [project]
 name = "bot"
 version = "0.1.0"
-description = "Self-hosted maker / delta-neutral farming bot for Arcus and Lighter on Robinhood Chain"
+description = "Self-hosted Arcus perps market-making bot: scout, pilot, live engine and Telegram control"
 readme = "README.md"
 requires-python = ">=3.12,<3.13"
 dependencies = [
@@ -13,13 +13,8 @@ dependencies = [
     "cryptography>=42; sys_platform != 'darwin' or platform_machine != 'x86_64'",
     "cryptography>=42,<49; sys_platform == 'darwin' and platform_machine == 'x86_64'",
     "eth-account>=0.13.4",
-    "pyarrow>=16",
-    "polars>=1.0",
-    "duckdb>=1.0",
     "numpy>=1.26",
-    "ntplib>=0.4",
     "tzdata>=2024.1",
-    "lighter-sdk==1.1.4",
     "uvloop>=0.19; sys_platform != 'win32'",
 ]
 
@@ -47,7 +42,6 @@ packages = ["bot"]
 [tool.ruff]
 line-length = 110
 target-version = "py312"
-extend-exclude = ["docs/reference"]
 
 [tool.ruff.lint]
 select = ["E", "F", "W", "I", "B", "UP", "SIM", "RUF", "ASYNC"]
@@ -64,7 +58,7 @@ ignore_missing_imports = true
 files = ["bot"]
 
 [[tool.mypy.overrides]]
-module = ["bot.core.*", "bot.venues.*", "bot.strategies.*", "bot.autopilot.*", "bot.common.*"]
+module = ["bot.core.*", "bot.venues.*", "bot.strategies.*", "bot.common.*"]
 strict = true
 warn_return_any = false
 
@@ -79,4 +73,4 @@ filterwarnings = ["ignore::DeprecationWarning"]
 
 [tool.coverage.run]
 source = ["bot"]
-omit = ["bot/cli.py", "bot/research/recorder/*"]
+omit = ["bot/cli.py"]

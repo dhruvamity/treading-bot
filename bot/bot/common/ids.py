@@ -2,9 +2,6 @@
 
 Arcus clientId: charset [A-Za-z0-9_-], 1-36 chars, unique among live orders (docs: place-order).
 Format (B3.4): `al{strategyCode}{sessionId base36}{seq base36}`.
-
-Lighter client_order_index: uint48, unique across all markets for the account. We derive it from the same
-(session, seq) pair so one logical order has one identity on both representations.
 """
 
 from __future__ import annotations
@@ -14,18 +11,12 @@ import threading
 
 _B36 = "0123456789abcdefghijklmnopqrstuvwxyz"
 ARCUS_CLIENT_ID_RE = re.compile(r"^[A-Za-z0-9_-]{1,36}$")
-LIGHTER_COI_MAX = 2**48 - 1
 
 STRATEGY_CODES = {
     "mid": "m",
     "grid": "g",
     "rgrid": "r",
-    "dgrid": "d",
-    "blend": "b",
     "signal": "s",
-    "dn_hedged_mm": "h",
-    "dn_carry": "c",
-    "points_overlay": "p",
     "manual": "x",
     "probe": "q",
     "guardian": "z",
@@ -66,15 +57,6 @@ class ClientIdFactory:
         if not ARCUS_CLIENT_ID_RE.match(cid):
             raise ValueError(f"invalid Arcus clientId {cid!r}")
         return cid
-
-    def lighter(self, seq: int | None = None) -> int:
-        """uint48: 24 bits of session, 24 bits of sequence (wraps sequence at 16.7M per session)."""
-        s = self.next_seq() if seq is None else seq
-        coi = ((self.session_id & 0xFFFFFF) << 24) | (s & 0xFFFFFF)
-        if coi == 0:
-            coi = 1  # 0 means "no client id" on Lighter
-        assert 0 < coi <= LIGHTER_COI_MAX
-        return coi
 
 
 def validate_arcus_client_id(cid: str) -> str:

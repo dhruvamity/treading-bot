@@ -19,13 +19,7 @@ from decimal import Decimal
 from pathlib import Path
 from typing import Any
 
-from bot.common.config import (
-    AppConfig,
-    ArcusVenueConfig,
-    DNSession,
-    LighterVenueConfig,
-    MMSession,
-)
+from bot.common.config import AppConfig, ArcusVenueConfig, MMSession
 from bot.common.decimal import D
 from bot.common.errors import ConfigError, LiveLockError
 from bot.common.logging import DecisionLog, Log
@@ -42,7 +36,6 @@ from bot.core.creds import (
     arcus_private_keys,
     discover_arcus_keys,
     key_for_account,
-    resolve_lighter,
 )
 from bot.core.dms import DeadMansSwitch
 from bot.core.engine import SessionEngine
@@ -56,70 +49,56 @@ from bot.core.risk import RiskEngine
 from bot.core.state import StateStore
 from bot.strategies import make_strategy
 from bot.venues.arcus.adapter import ArcusAdapter
+from bot.venues.arcus.models import parse_public_trade
 from bot.venues.arcus.rest import ArcusRest
 from bot.venues.arcus.signing import ArcusSigner
 from bot.venues.arcus.ws import ArcusWS
-from bot.venues.base import OrderState, OrderStatus, PublicTrade, Side, Venue
-from bot.venues.lighter_rh.models import parse_public_trade
-from bot.venues.lighter_rh.rest import LighterRest
-from bot.venues.lighter_rh.ws import LighterWS
+from bot.venues.base import OrderState, OrderStatus, PublicTrade, Venue
 from bot.venues.paper.adapter import PaperVenue
 from bot.venues.symbols import canonical_base
 
 log = Log("runner")
 
 
-def arcus_account_index(sessions: list[MMSession | DNSession]) -> int:
-    """One Arcus subaccount per run (one adapter per venue). Mixed subaccounts are a config error, not a guess."""
-    idxs = {s.account_index for s in sessions if isinstance(s, MMSession) and s.venue == "arcus"}
-    idxs |= {s.legs["arcus"].account_index or 0 for s in sessions if isinstance(s, DNSession)}
+def arcus_account_index(sessions: list[MMSession]) -> int:
+    """One Arcus subaccount per run (one adapter). Mixed subaccounts are a config error, not a guess."""
+    idxs = {s.account_index for s in sessions}
     if len(idxs) > 1:
         raise ConfigError(f"sessions in one run must use the same Arcus subaccount (got {sorted(idxs)}); "
                           "start them as separate runs")
     return idxs.pop() if idxs else 0
 
 
-def leverage_plan(sessions: list[MMSession | DNSession], markets: dict[Venue, dict[str, Any]]) -> list[tuple[Venue, str, int]]:
-    """(venue, base, leverage) per traded market: MM leverage_max or DN leverage_per_leg, capped at the market max,
-    at least 1. Two sessions on the same market must agree."""
+def leverage_plan(sessions: list[MMSession], markets: dict[Venue, dict[str, Any]]) -> list[tuple[Venue, str, int]]:
+    """(venue, base, leverage) per traded market: the session's leverage_max, capped at the market max, at least 1.
+    Two sessions on the same market must agree."""
     want: dict[tuple[Venue, str], int] = {}
     for s in sessions:
-        pairs = ([(Venue(s.venue), float(s.leverage_max))] if isinstance(s, MMSession) else
-                 [(Venue.ARCUS, float(s.leverage_per_leg)), (Venue.LIGHTER_RH, float(s.leverage_per_leg))])
-        for v, lev in pairs:
-            b = s.market.upper()
-            m = markets.get(v, {}).get(b)
-            cap = float(m.max_leverage) if m is not None and m.max_leverage else lev
-            val = max(1, int(min(lev, cap)))
-            if want.get((v, b), val) != val:
-                raise ConfigError(f"sessions disagree on {v.value} {b} leverage ({want[(v, b)]} vs {val})")
-            want[(v, b)] = val
+        v, lev, b = Venue(s.venue), float(s.leverage_max), s.market.upper()
+        m = markets.get(v, {}).get(b)
+        cap = float(m.max_leverage) if m is not None and m.max_leverage else lev
+        val = max(1, int(min(lev, cap)))
+        if want.get((v, b), val) != val:
+            raise ConfigError(f"sessions disagree on {v.value} {b} leverage ({want[(v, b)]} vs {val})")
+        want[(v, b)] = val
     return [(v, b, lev) for (v, b), lev in sorted(want.items())]
 
 
 class BotRunner:
-    def __init__(self, sessions: list[MMSession | DNSession], *, mode: RunMode, cli_live: bool, app: AppConfig,
-                 arcus_cfg: ArcusVenueConfig, lighter_cfg: LighterVenueConfig, secrets: SecretStore,
+    def __init__(self, sessions: list[MMSession], *, mode: RunMode, cli_live: bool, app: AppConfig,
+                 arcus_cfg: ArcusVenueConfig, secrets: SecretStore,
                  calendar: TradingCalendar, state_db: str | None = None, typed_confirmation: bool = False) -> None:
         self.sessions = sessions
         self.app = app
         self.arcus_cfg = arcus_cfg
-        self.lighter_cfg = lighter_cfg
         self.secrets = secrets
         self.calendar = calendar
         lock = lock_state(cli_live=cli_live, session_live_enabled=all(s.live_enabled for s in sessions),
                           typed_confirmation=typed_confirmation)
         self.mode = resolve_mode(mode, lock)
         self.writes_mainnet = mainnet_writes_allowed(self.mode, lock)
-        if self.mode is RunMode.TESTNET:
-            arcus_cfg.env = "testnet"
-            lighter_cfg.env = "testnet"
-        elif self.mode is RunMode.LIVE:
-            arcus_cfg.env = "mainnet"
-            lighter_cfg.env = "mainnet"
-        else:  # paper: public mainnet data, simulated orders
-            arcus_cfg.env = "mainnet"
-            lighter_cfg.env = "mainnet"
+        # paper: public mainnet data, simulated orders
+        arcus_cfg.env = "testnet" if self.mode is RunMode.TESTNET else "mainnet"
         self.hub = MarketDataHub()
         self.state = StateStore(state_db or app.state_db_for(self.mode.value))
         self.heartbeat_file = app.heartbeat_for(self.mode.value)
@@ -137,7 +116,6 @@ class BotRunner:
         self.tasks: list[asyncio.Task[Any]] = []
         self._stop = asyncio.Event()
         self.arcus_ws: ArcusWS | None = None
-        self.lighter_ws: LighterWS | None = None
         self.params: LiveParams | None = None
         self.started_us = now_us()
         self._paused_raw: str | None = None
@@ -148,31 +126,25 @@ class BotRunner:
     # ================================================================ build
     async def build(self) -> None:
         a_rest = ArcusRest(self.arcus_cfg.rest_url(), ip_bucket=TokenBucket(1200, 20))
-        l_rest = LighterRest(self.lighter_cfg.rest_url(), rest_per_min=40)
-        self.params = LiveParams(arcus=a_rest, lighter=l_rest, out_dir=Path(self.app.data_dir) / "param_changes_jsonl")
+        self.params = LiveParams(arcus=a_rest, out_dir=Path(self.app.data_dir) / "param_changes_jsonl")
         await self.params.refresh()
         markets = self.params.markets
         for b in self.bases:
             for s in self.sessions:
-                if s.market.upper() == b and isinstance(s, MMSession) and b not in markets.get(Venue(s.venue), {}):
+                if s.market.upper() == b and b not in markets.get(Venue(s.venue), {}):
                     raise ConfigError(f"{b} not listed on {s.venue}")
         # ---- market data
         self.arcus_ws = ArcusWS(self.arcus_cfg.ws_url(), n_levels=100)
-        self.lighter_ws = LighterWS(self.lighter_cfg.ws_url(), readonly=self.mode is not RunMode.LIVE)
         sm = self.params.symbol_map
         for b in self.bases:
             if sm.has(b, Venue.ARCUS):
                 disp = sm.get(b, Venue.ARCUS).venue_symbol
                 await self.arcus_ws.subscribe_market(disp)
                 self.hub.view(Venue.ARCUS, b).book = self.arcus_ws.books[disp].book
-            if sm.has(b, Venue.LIGHTER_RH):
-                mid = sm.get(b, Venue.LIGHTER_RH).venue_market_id
-                await self.lighter_ws.subscribe_market(mid, b)
-                self.hub.view(Venue.LIGHTER_RH, b).book = self.lighter_ws.books[mid].book
         await self.arcus_ws.subscribe_global(markets=True, oracle=True, attrs=True)
         self._wire_feeds()
         # ---- adapters
-        await self._build_adapters(a_rest, l_rest)
+        await self._build_adapters(a_rest)
         # ---- engines
         for i, s in enumerate(self.sessions):
             eng = SessionEngine(session=s, strategy=make_strategy(s), hub=self.hub, adapters=self.adapters,
@@ -186,14 +158,9 @@ class BotRunner:
         log.info("runner_built", data={"mode": self.mode.value, "mainnet_writes": self.writes_mainnet,
                                         "sessions": [s.session_id for s in self.sessions], "bases": self.bases})
 
-    async def _build_adapters(self, a_rest_public: ArcusRest, l_rest_public: LighterRest) -> None:
+    async def _build_adapters(self, a_rest_public: ArcusRest) -> None:
         markets = self.params.markets if self.params else {}
-        venues_needed: set[Venue] = set()
-        for s in self.sessions:
-            if isinstance(s, DNSession):
-                venues_needed |= {Venue.ARCUS, Venue.LIGHTER_RH}
-            else:
-                venues_needed.add(Venue(s.venue))
+        venues_needed = {Venue(s.venue) for s in self.sessions}
         if self.mode is RunMode.PAPER:
             for v in venues_needed:
                 mk = {b: m for b, m in markets[v].items() if b in self.bases}
@@ -214,37 +181,16 @@ class BotRunner:
                              writes_allowed=writes, is_mainnet=self.mode is RunMode.LIVE)
             ws = ArcusWS(self.arcus_cfg.ws_url(), n_levels=5)
             ad = ArcusAdapter(rest, ws, address=address, account_index=idx, markets=markets[Venue.ARCUS],
-                              good_til_days=self.arcus_cfg.good_til_days)
+                              good_til_days=self.arcus_cfg.good_til_days, use_modify=self.arcus_cfg.use_modify)
             await ad.connect()
             self.adapters[Venue.ARCUS] = ad
             self.dms.append(DeadMansSwitch(f"arcus:{idx}", ad.arm_dead_mans_switch, refresh_s=self.arcus_cfg.dms.refresh_s,
                                            deadline_s=self.arcus_cfg.dms.deadline_s,
                                            on_failure=lambda why: self._safe_mode(Venue.ARCUS, why)))
-        if Venue.LIGHTER_RH in venues_needed:
-            from bot.venues.lighter_rh.adapter import LighterAdapter
-            from bot.venues.lighter_rh.auth import AuthTokenManager
-            from bot.venues.lighter_rh.nonce import NonceManager
-            from bot.venues.lighter_rh.signer import LighterSigner
-
-            lc = await resolve_lighter(l_rest_public, self.secrets, self.mode is RunMode.TESTNET)
-            signer = LighterSigner(url=self.lighter_cfg.rest_url(), chain_id=self.lighter_cfg.chain(),
-                                   account_index=lc.account_index, api_key_index=lc.api_key_index,
-                                   private_key_hex=lc.private_key,
-                                   reserved_indices=tuple(self.lighter_cfg.reserved_api_key_indices))
-            l_writes = self.writes_mainnet if self.mode is RunMode.LIVE else self.mode is RunMode.TESTNET
-            l_rest = LighterRest(self.lighter_cfg.rest_url(), writes_allowed=l_writes)
-            l_ws = LighterWS(self.lighter_cfg.ws_url(), readonly=False)
-            nonce_file = Path(self.app.state_dir) / f"lighter_nonce_{self.mode.value}_{lc.account_index}_{lc.api_key_index}"
-            ad2 = LighterAdapter(l_rest, l_ws, signer=signer, nonces=NonceManager(nonce_file), auth=AuthTokenManager(signer),
-                                 account_index=lc.account_index, markets=markets[Venue.LIGHTER_RH])
-            await ad2.connect()
-            self.adapters[Venue.LIGHTER_RH] = ad2
-            self.dms.append(DeadMansSwitch(f"lighter:{lc.account_index}", ad2.arm_dead_mans_switch, refresh_s=30,
-                                           deadline_s=90, on_failure=lambda why: self._safe_mode(Venue.LIGHTER_RH, why)))
         await self._apply_leverage()
 
     async def _apply_leverage(self) -> None:
-        """Arcus (and Lighter) default an account+market to the market's MAXIMUM leverage when none was set. Set
+        """Arcus defaults an account+market to the market's MAXIMUM leverage when none was set. Set
         each traded market to the session's leverage explicitly before the first order, cross margin."""
         markets = self.params.markets if self.params else {}
         for venue, base, lev in leverage_plan(self.sessions, markets):
@@ -263,11 +209,9 @@ class BotRunner:
         so equity-following sizes start where the backtest did."""
         total = 0.0
         for s in self.sessions:
-            if isinstance(s, DNSession):
-                total += s.collateral_per_leg_usd
-            elif Venue(s.venue) is v:
+            if Venue(s.venue) is v:
                 total += s.sizing.backtest_capital_usd if s.sizing else s.capital_usd
-        return total or self.app.capital_usd_total / 2
+        return total or self.app.capital_usd_total
 
     def _mark_fn(self, v: Venue) -> Any:
         def f(b: str) -> Decimal | None:
@@ -278,8 +222,8 @@ class BotRunner:
 
     # ================================================================ feeds -> hub
     def _wire_feeds(self) -> None:
-        assert self.arcus_ws is not None and self.lighter_ws is not None
-        aw, lw = self.arcus_ws, self.lighter_ws
+        assert self.arcus_ws is not None
+        aw = self.arcus_ws
 
         def a_book(base: str, sync: Any, res: Any, recv: int, snapshot: bool, c: Any) -> None:
             v = self.hub.view(Venue.ARCUS, base)
@@ -288,9 +232,7 @@ class BotRunner:
         def a_trades(base: str, rows: list[dict[str, Any]], recv: int) -> None:
             v = self.hub.view(Venue.ARCUS, base)
             for t in rows:
-                pt = PublicTrade(Venue.ARCUS, base, int(t["timestamp"]), D(t["price"]), D(t["size"]),
-                                 Side.BUY if t["side"] == "BUY" else Side.SELL, str(t["tradeId"]),
-                                 t.get("makerAddress"), t.get("takerAddress"), t.get("makerOrderId"))
+                pt = parse_public_trade(t, base)
                 v.on_trade(pt)
                 self._paper_trade(Venue.ARCUS, pt)
 
@@ -358,38 +300,12 @@ class BotRunner:
                     if base in self.bases:
                         a_session(base, m)
 
-        def l_book(base: str, sync: Any, res: Any, recv: int, snapshot: bool, m: Any) -> None:
-            self.hub.view(Venue.LIGHTER_RH, base).book_ts_us = recv
-
-        def l_trades(base: str, trades: list[dict[str, Any]], liq: list[dict[str, Any]], recv: int) -> None:
-            v = self.hub.view(Venue.LIGHTER_RH, base)
-            for t in trades + liq:
-                pt = parse_public_trade(t, base)
-                v.on_trade(pt)
-                self._paper_trade(Venue.LIGHTER_RH, pt)
-
-        def l_stats(base: str, s: dict[str, Any], recv: int) -> None:
-            if base not in self.bases:
-                return
-            v = self.hub.view(Venue.LIGHTER_RH, base)
-            v.mark = D(s["mark_price"]) if s.get("mark_price") else v.mark
-            v.index = D(s["index_price"]) if s.get("index_price") else v.index
-            v.price_ts_us = recv
-            if s.get("current_funding_rate") not in (None, ""):
-                v.predicted_funding_h = float(s["current_funding_rate"]) / 100
-            if s.get("premium") not in (None, ""):
-                v.premium = float(s["premium"]) / 100
-            v.oi = D(s["open_interest"]) / (v.mark or D(1)) if s.get("open_interest") else v.oi
-
         aw.on("book", a_book)
         aw.on("trades", a_trades)
         aw.on("oracle", a_oracle)
         aw.on("predicted_funding", a_pf)
         aw.on("markets", a_markets)
         aw.on("market_attrs", a_attrs)
-        lw.on("book", l_book)
-        lw.on("trades", l_trades)
-        lw.on("market_stats", l_stats)
 
     def _paper_trade(self, venue: Venue, t: PublicTrade) -> None:
         ad = self.adapters.get(venue)
@@ -431,8 +347,7 @@ class BotRunner:
             for e in self.engines:
                 why = want.get(e.base) or want.get("*")
                 if why:
-                    for v in ([e.venue, e.other_venue] if e.is_dn and e.other_venue else [e.venue]):
-                        new[(v, e.base)] = f"paused by operator: {why}"
+                    new[(e.venue, e.base)] = f"paused by operator: {why}"
             if new != self.risk.operator_paused or not first:
                 self.risk.operator_paused = new
                 what = ", ".join(sorted({b for _, b in new})) or "nothing (all markets quoting)"
@@ -490,8 +405,7 @@ class BotRunner:
         day = utc_date_str(now)
         sessions = []
         for e in self.engines:
-            venues = [e.venue] + ([e.other_venue] if e.is_dn and e.other_venue else [])
-            pnl = sum((self.ledger.breakdown(v, e.base, marks.get((v, e.base))).net for v in venues), Decimal(0))
+            pnl = self.ledger.breakdown(e.venue, e.base, marks.get((e.venue, e.base))).net
             start = e.day_start_equity.get(day)
             sessions.append({"session": e.sid, "market": e.base, "venue": e.venue.value, "mode": e.last_mode,
                              "pnl": str(pnl), "day_pnl": str(e.capital + pnl - start) if start is not None else None,
@@ -538,6 +452,14 @@ class BotRunner:
                                                  net_deposits=float(bal["net_deposits"])
                                                  if bal.get("net_deposits") is not None else None,
                                                  min_interval_s=300)
+                        if hasattr(ad, "poll_rate_limit"):
+                            # the subaccount's order/cancel pools (docs: rate-limits, "poll GET /v1/rateLimit if you
+                            # run an aggressive order/cancel loop"): the governor widens requotes under 20% left and
+                            # sends cancels only under 5%. Weight 2 every 15 s.
+                            await ad.poll_rate_limit()
+                            rb = ad.budget()
+                            self.governor.for_arcus(arcus_account_index(self.sessions)).update_pool(
+                                rb.order_remaining, rb.order_cap, rb.cancel_remaining, rb.cancel_cap)
                 for e in self.engines:
                     await e.tick(now)
             except LiveLockError:
@@ -657,11 +579,9 @@ class BotRunner:
     # ================================================================ run
     async def run(self, duration_s: float | None = None) -> None:
         await self.build()
-        assert self.arcus_ws is not None and self.lighter_ws is not None
+        assert self.arcus_ws is not None
         self.arcus_ws.start()
-        self.lighter_ws.start()
         await self.arcus_ws.ws.wait_connected()
-        await self.lighter_ws.ws.wait_connected()
         await asyncio.sleep(3)  # let the books snapshot
         await self.reconcile_once()
         for d in self.dms:
@@ -691,10 +611,12 @@ class BotRunner:
         self._stop.set()
         for t in self.tasks:
             t.cancel()
+        pulled = True
         for v, ad in self.adapters.items():
             try:
                 await ad.cancel_all(None)  # pull quotes; positions are kept (flatten is explicit)
             except Exception as e:
+                pulled = False
                 log.error("shutdown_cancel_all_failed", venue=v.value, reason=type(e).__name__, data={"err": str(e)[:200]})
                 continue
             # The venue confirmed cancel-all; its per-order CANCELED events may arrive after the consumers stop, so
@@ -702,21 +624,22 @@ class BotRunner:
             for o in self.state.open_orders(v):
                 self.state.on_update(OrderState(o.req.client_id or "", o.venue_order_id, OrderStatus.CANCELED,
                                                 o.filled, None, "shutdown cancel-all", now_us(), v, o.req.base))
+        if pulled:
+            # A stop on purpose with every quote pulled: the guardian stands down instead of raising a false
+            # "heartbeat silent" alarm and a cancel-all a minute later (2026-09-25, SPY live run stopped from Telegram).
+            write_heartbeat(self.heartbeat_file, mode=self.mode.value, stopped="quotes cancelled, bot stopped")
         for d in self.dms:
             with contextlib.suppress(Exception):
                 await d.stop(disarm=True)
-        for ws in (self.arcus_ws, self.lighter_ws):
-            if ws is not None:
-                with contextlib.suppress(Exception):
-                    await ws.stop()
+        if self.arcus_ws is not None:
+            with contextlib.suppress(Exception):
+                await self.arcus_ws.stop()
         for ad in self.adapters.values():
             with contextlib.suppress(Exception):
                 await ad.close()
-        if self.params is not None:
-            for c in (self.params.arcus, self.params.lighter):
-                if c is not None:
-                    with contextlib.suppress(Exception):
-                        await c.close()
+        if self.params is not None and self.params.arcus is not None:
+            with contextlib.suppress(Exception):
+                await self.params.arcus.close()
         await self.alerter.close()
         log.info("runner_stopped", data={"ledger": {f"{v.value}:{b}": str(self.ledger.breakdown(v, b).net)
                                                     for (v, b) in list(self.ledger.books)}})

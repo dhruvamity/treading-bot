@@ -82,7 +82,6 @@ async def test_off_hours_state_comes_from_market_attributes_and_is_not_wiped(tmp
     import dataclasses
 
     from bot.venues.arcus.ws import ArcusWS
-    from bot.venues.lighter_rh.ws import LighterWS
     from tests.helpers import fixture_markets
     from tests.unit.test_telegram import _runner
 
@@ -91,7 +90,6 @@ async def test_off_hours_state_comes_from_market_attributes_and_is_not_wiped(tmp
     runner.params = SimpleNamespace(markets={Venue.ARCUS: {"BTC": mk}})  # type: ignore[assignment]
     runner.bases = {"BTC"}
     runner.arcus_ws = ArcusWS("ws://127.0.0.1:9")
-    runner.lighter_ws = LighterWS("ws://127.0.0.1:9")
     runner._wire_feeds()
     attrs = {"isSnapshot": False, "entries": [{"marketId": 1, "marketDisplayName": "BTC-USD",
                                                "offHoursInitialMarginFraction": "0.2", "isOutsideRth": True,
@@ -107,3 +105,27 @@ async def test_off_hours_state_comes_from_market_attributes_and_is_not_wiped(tmp
     await runner.arcus_ws._emit("markets", snap, 0)
     assert v.is_outside_rth and v.upper_bound == D("90000")          # not wiped by a snapshot without them
     assert v.oi_cap == D("2000000") and v.status == "ONLINE"
+
+
+async def test_the_governor_learns_the_order_pool_from_arcus(tmp_path: Path) -> None:
+    """The governor's pool brakes (widen under 20% left, cancels only under 5%) never engaged: nothing fed it the
+    subaccount's pools, so the 2026-09-25 run drained about a quarter of the cap unnoticed. The runner now polls
+    GET /v1/rateLimit (docs: rate-limits) with its account read and hands the numbers over."""
+    from bot.core.budget import BudgetMode
+
+    class _RL(_Rest):
+        async def rate_limit(self, address: str, account_index: int) -> dict[str, Any]:
+            return {"order": {"used": 19_500, "cap": 20_000, "nextAvailableMs": 0},
+                    "cancel": {"used": 0, "cap": 40_000, "nextAvailableMs": 0}}
+
+    rest = _RL([])
+    rest.pool_remaining = {"order": 20_000}                      # a stale echo from an earlier write
+    ad = _adapter(rest)
+    await ad.poll_rate_limit()
+    rb = ad.budget()
+    assert (rb.order_remaining, rb.order_cap, rb.cancel_remaining) == (500, 20_000, 40_000)
+    from bot.core.budget import ArcusGovernor
+
+    g = ArcusGovernor()
+    g.update_pool(rb.order_remaining, rb.order_cap, rb.cancel_remaining, rb.cancel_cap)
+    assert g.mode() is BudgetMode.CANCELS_ONLY                    # 2.5% left: requotes freeze, cancels still go

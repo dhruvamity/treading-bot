@@ -78,8 +78,8 @@ flowchart LR
 - **The backtest and the live bot share their rules.** Capital, order sizes, leverage, the stops, the safety pause
   and the order-budget governor are the same numbers in both, computed by the same code (`bot/common/sizing.py`).
 - **Paper mode** uses live market data with simulated orders and fills, through the same code as live.
-- **Arcus only.** Everything the scout tests trades Arcus perps alone: no hedging on another venue, no spot. (The code
-  also contains two-venue strategies for Lighter; see [7.10](#710-two-venue-strategies-not-used-by-the-scout).)
+- **Arcus only.** The bot trades Arcus perps alone: no hedging on another venue, no spot. (The two-venue Lighter
+  code, the Autopilot and the old research recorder were removed on 2026-09-25; they are in the git history.)
 
 ---
 
@@ -88,18 +88,17 @@ flowchart LR
 ```
 treading-bot/
   README.md                   this guide
-  lighter-rh-docs/            a copy of the Lighter (Robinhood Chain) API docs used while building
   bot/                        the bot (Python 3.12 package `bot`, command `bot`)
     bot/scout/                tape (data store), record (recorder), sim (backtest), scan (menu + ranking), pilot, service
     bot/core/                 runner, engine (the stops), risk engine, order manager, state, ledger, guardian, doctor
-    bot/strategies/           mid, grid, rgrid, dgrid, signal, blend, auto, dn_carry, dn_hedged_mm, points_overlay
+    bot/strategies/           mid, grid, rgrid, signal (the scout's menu)
     bot/telegram/             the Telegram control bot
-    bot/venues/               Arcus (REST + WebSocket + signing), Lighter, and the paper venue
+    bot/venues/               Arcus (REST + WebSocket + signing) and the paper venue (queue-aware fill model)
     config/                   app.yaml (risk limits), venues/, sessions/, calendars/ (CPI, FOMC, NFP, earnings)
     deploy/                   systemd units and a VPS bootstrap script
-    docs/RUNBOOK.md           operations handbook
-    docs/SPEC.md, PROMPT_PACK.md   the original design and build spec (the project's old name is kept there)
-    tests/                    offline tests (no network, no keys)
+    docs/RUNBOOK.md           operations handbook; docs/incidents/ what went wrong live and why
+    tests/                    offline tests (no network, no keys); tests/sim/ replays synthetic markets through the
+                              live engine
     Dockerfile, docker-compose.yml   the scout for a server
     .env.example              the credentials template (copy to .env)
 ```
@@ -160,7 +159,6 @@ Fill in only what you use:
 | `TELEGRAM_BOT_TOKEN`, `TELEGRAM_CHAT_ID` | The Telegram bot and your chat ([section 9](#9-the-telegram-bot)) | Telegram |
 | `TELEGRAM_ALLOWED_USER_IDS` | Only these Telegram users may send commands | recommended |
 | `BOT_PILOT_LIVE` | `1` allows LIVE deployments from the pilot; empty = paper only | live via the pilot |
-| `LIGHTER_*` | Lighter (Robinhood Chain) keys | only the two-venue strategies |
 
 The bot asks Arcus for everything else (which subaccount a key trades, when it expires). Check with:
 
@@ -606,7 +604,6 @@ Quotes 1–3 levels per side around the reservation price r. The **execution sty
   widens by 50% (the pilot sets 100%, i.e. off).
 - **Off-hours** (RWA outside its session): mid is disabled unless `off_hours.allow_mid: true` (the pilot allows it);
   spacing and size are multiplied by `off_hours.spacing_mult` / `size_mult`.
-- Mid is refused on Lighter (its 200–300 ms cancels make tight quotes easy to pick off).
 
 ### 7.4 Grid (`mode: grid`)
 
@@ -617,9 +614,10 @@ A static geometric grid around a centre C: point j sits at C × (1 + δ)^j for j
   Each round trip earns δ.
 - No new buys once inventory reaches the cap (and the mirror for sells).
 - **Re-centre:** when the mid stays more than `reset_threshold_pct` from C for `recentre_after_s`, the grid moves to
-  the current mid. Inventory carried over is handled by `recentre_inventory`: `skew_exit` (skew sizes against it),
-  `maker_unwind` (a reduce-only maker order at the touch), or `hedge_other_venue`.
-- δ = `spacing_bps`, or with `auto` the DGrid formula δ = clamp(k × σ₁ₕ / √(target fills per hour), δ_min, δ_max).
+  the current mid. Inventory carried over is handled by `recentre_inventory`: `skew_exit` (skew sizes against it) or
+  `maker_unwind` (a reduce-only maker order at the touch).
+- δ = `spacing_bps`, or with `auto` δ = clamp(k × σ₁ₕ / √(target fills per hour), δ_min, δ_max) from the session's
+  `auto_spacing` block.
 - Good in ranges; in a trend it accumulates a growing losing position until it re-centres.
 
 ### 7.5 RGrid, trailing grid (`mode: rgrid`)
@@ -631,15 +629,8 @@ A static geometric grid around a centre C: point j sits at C × (1 + δ)^j for j
   average entry, the excess is cut: a reduce-only maker order at the touch, then an IOC taker order every
   `rgrid_cut_after_s` (default 20 s) until it is gone.
 - This caps a trend's loss near one level plus the reset distance, at the cost of some taker fees.
-- Optional trend tilt: `rgrid_trend_tilt_beta` leans the target inventory with the trend.
 
-### 7.6 DGrid (`mode: dgrid`)
-
-Chooses between Grid (ranging market) and RGrid (trending market) from the regime (efficiency ratio and trend
-z-score), and sets the spacing from volatility. Switching cancels the old mode's quotes. The scout does not test it
-separately: with no regime features it always runs Grid.
-
-### 7.7 Signal (`mode: signal`)
+### 7.6 Signal (`mode: signal`)
 
 RSI mean reversion, one position at a time:
 
@@ -648,39 +639,6 @@ RSI mean reversion, one position at a time:
 - **Exits:** a maker take-profit at +`tp_bps` (15), a taker stop at −`sl_bps` (25), or a maker exit after
   `max_hold_min` (120).
 - A cooldown (`cooldown_s`, 300 s) after each trade. Few orders, so it is light on the order budget.
-
-### 7.8 Blend (`mode: blend`)
-
-Quotes around an **external reference price** instead of the local mid: a weighted mix of sources (`lighter_rh:BTC`
-is Lighter's mid, `pyth` the Arcus oracle, `local` the local mid). A slow average of (reference − local) is removed so
-a permanent gap does not skew the quotes. A stale or far-off reference doubles the spread; both at once pause
-quoting. The scout does not test it, because its main use needs another venue's price.
-
-### 7.9 Auto (`mode: auto`)
-
-The autopilot re-evaluates every 60 s and runs one of the modes above:
-
-- **Pause** on hard stops (event window, safety pause, poor recent markouts, Arcus band zone, very wide spread).
-- **Blend** when the local book is thin and the other venue is deep.
-- **RGrid** in trends (or pause if volatility is too high).
-- **Mid** when ranging and the book is tight and calm (Grid instead on Lighter or off-hours), else **Grid**.
-- Otherwise **Signal** or a passive Grid.
-
-A new mode must win 5 evaluations in a row and the old one must have run 30 minutes (unless a hard stop fires).
-Explicit (non-`auto`) values in the session file override the autopilot's parameters. The scout replaces this
-choice for the Arcus-only setup: it tests the modes directly and you approve one.
-
-### 7.10 Two-venue strategies (not used by the scout)
-
-These need both Arcus and Lighter (Robinhood Chain) accounts, so they break the Arcus-only rule and are off by default:
-
-- **`dn_carry`**: long one venue, short the other, to earn the funding-rate difference and basis convergence. Enters
-  only when the expected value over 4–72 h clears `entry_ev_bps`; Arcus entries are maker orders, each Arcus fill is
-  hedged on Lighter with an IOC.
-- **`dn_hedged_mm`**: quotes on Arcus around a fair price weighted towards Lighter's mid and hedges every Arcus fill
-  on Lighter. If Lighter is unreachable for too long, it pulls the quotes and flattens Arcus.
-- **`points_overlay`**: `dn_carry` that holds the hedged pair for a minimum time (for venues that reward open
-  interest and hold time).
 
 ---
 
@@ -693,7 +651,7 @@ A session is one YAML file in `bot/config/sessions/`. The pilot writes `pilot.ya
 |---|---|
 | `session_id`, `venue`, `market` | Name, `arcus`, and the base asset (e.g. `QQQ` for QQQ-USD) |
 | `account_index` | Arcus subaccount 0–9 (must match the one your key is bound to; `bot keys`) |
-| `mode` | `mid`, `grid`, `rgrid`, `dgrid`, `signal`, `blend` or `auto` |
+| `mode` | `mid`, `grid`, `rgrid` or `signal` |
 | `live_enabled` | Part of the live lock: required for unattended live starts |
 | `capital_usd`, `leverage_max` | Capital, and the leverage the runner sets on Arcus before quoting |
 | `order_size_usd`, `inventory_cap_usd` | Order size per level per side, and the inventory cap (`auto` = derived) |
@@ -708,7 +666,7 @@ A session is one YAML file in `bot/config/sessions/`. The pilot writes `pilot.ya
 | `session` | `duration`, `repeat`, `windows_ist` (trading windows) and `skip_events` (`cpi`, `fomc`, `nfp`, `earnings`) |
 | `off_hours` | `spacing_mult`, `size_mult`, `allow_mid` for RWA perps outside their session |
 | `reset_threshold_pct`, `recentre_after_s`, `recentre_inventory`, `rgrid_*` | Grid and RGrid ([7.4](#74-grid-mode-grid), [7.5](#75-rgrid-trailing-grid-mode-rgrid)) |
-| `signal`, `blend`, `autopilot` | Settings for those modes |
+| `signal`, `auto_spacing` | Signal's settings; the Grid/RGrid spacing when `spacing_bps: auto` |
 
 To change the account-wide numbers the scout uses (capital, stops), edit `Risk` in `bot/scout/sim.py`; to change the
 leverage caps or ladder, edit `LEV_CAPS` / `LADDER` in `bot/scout/scan.py`. App-wide limits are in
@@ -757,8 +715,8 @@ Send `/menu` for buttons. Telegram's `/` list shows the everyday commands; the r
 | `/pauseneworders [MARKET]`, `/unpause [MARKET]` | Stop / restart placing new orders; orders that close a position keep working |
 | `/stop` | Shut the bot down: quotes cancelled, positions kept (Confirm button) |
 | `/resumeaftersl` | Trade again after a safety stop (safe mode, the kill or the daily stop), once you know why (Confirm button) |
-| `/cancelall [arcus\|lighter_rh]` | Cancel every open order on the account (Confirm button) |
-| `/closeall [arcus\|lighter_rh] [taker]` | Close every position, maker or with IOC (typed code) |
+| `/cancelall` | Cancel every open order on the account (Confirm button) |
+| `/closeall [taker]` | Close every position, maker or with IOC (typed code) |
 
 **Settings** (no file editing, no restart)
 
@@ -836,7 +794,7 @@ within 2 minutes. If a bot is already running it first closes its position and s
 | `bot doctor [SESSION] [--paper]` | Everything a run needs: credentials, subaccount, funds, sizing, clock, region, calendar. Places no orders |
 | `bot run SESSION [--live] [--yes] [--seconds N]` | Run a session (paper by default) |
 | `bot status [--mode live\|paper\|testnet]` | Heartbeat, open orders, positions |
-| `bot report [--date D] [--mode M]` | Daily report: Net = spread capture + inventory PnL + funding − fees − hedge cost − liquidation loss |
+| `bot report [--date D] [--mode M]` | Daily report: Net = spread capture + inventory PnL + funding − fees − liquidation loss |
 | `bot resume [--venue V] [--all]` | Clear safe mode / stops |
 | `bot cancel-all --venue arcus [--market M] [--yes]` | Cancel all open orders (asks to confirm) |
 | `bot flatten --venue arcus [--taker]` | Close all positions, reduce-only (asks to confirm) |
@@ -849,11 +807,8 @@ within 2 minutes. If a bot is already running it first closes its position and s
 | `bot keys` | Your API keys as Arcus sees them |
 | `bot selftest [--allow-funded]` | Prove every signed request works, without trading |
 | `bot probe` | Live market parameters, compliance and rate budgets |
-| `bot region-check` | This machine's IP, country and venue access |
+| `bot region-check` | May this machine's IP trade Arcus perps? |
 | `bot secrets …` | Encrypted secrets store (alternative to `.env`) |
-
-**Research** (the original research pipeline, recorded with `bot record`): `record`, `load-history`, `dq-report`,
-`compact`, `backtest`, `carry-study`, `diagnostics`, `gonogo`, `points`. Each has `--help`.
 
 ---
 
@@ -912,26 +867,7 @@ results. So a 30-minute scan is under a minute of one core, plus the once-a-day 
 background), and use **one** worker while a trading bot runs on the same machine (else all cores but one), so the
 bot never waits for the CPU. The recorder itself uses about 4% of one core.
 
-### 11.3 Optional: the full-book research recorder
-
-```bash
-docker compose --profile research up -d --build
-```
-
-This adds a second container running `bot record`, the original research recorder. For the markets in
-`config/universe.yaml` (BTC, ETH, SOL, HYPE, SPY, QQQ, NVDA, TSLA) on **both Arcus and Lighter** it writes Parquet
-tables under `data/`:
-- every order-book change, plus a top-100 snapshot every 60 s;
-- best bid/offer and trades;
-- mark, oracle and index prices;
-- predicted and paid funding;
-- market attributes, parameter changes, clock offset and recorder health.
-
-It costs about 1.5–2.5 GB/day before compaction. The scout does not need it. Turn it on if you want exact
-queue-position replays or funding research later. Shrink closed days now and then with
-`docker compose run --rm recorder compact`.
-
-### 11.4 What the server does not do
+### 11.3 What the server does not do
 
 - **No trading and no keys.** The containers never sign a request and need no `.env`.
   - **To trade live on this same machine,** stop the containers (`docker compose down`).
@@ -942,10 +878,10 @@ queue-position replays or funding research later. Shrink closed days now and the
 - **No Telegram.** Alerts and control come from the machine that runs the trading bot.
 - **No live decisions.** Deploying stays on the machine with the keys, after you approve ([section 5](#5-the-pilot-approve-run-re-check)).
 
-### 11.5 Set it up
+### 11.4 Set it up
 
 Hardware: 4 or more CPU cores, 4–8 GB of RAM, and disk for the length of the run. The scout with depth needs about
-**15 GB per month**; add about 60 GB per month for the research recorder.
+**15 GB per month**.
 
 1. **Install Docker.**
    - Linux: [Docker Engine](https://docs.docker.com/engine/install/) plus the compose plugin, then
@@ -966,7 +902,7 @@ Hardware: 4 or more CPU cores, 4–8 GB of RAM, and disk for the length of the r
 4. **Optional: seed it with the history you already have.** A fresh server has no full day yet, so the first scans
    rank nothing ("still recording") until it has recorded for a day. Skipping this costs nothing in the end: the scan
    reads the last 7 full days, which the server records itself within a week, and its data merges with the
-   laptop's when you bring it back ([11.7](#117-bring-the-results-back-after-a-week-or-more)). Copy the laptop's
+   laptop's when you bring it back ([11.6](#116-bring-the-results-back-after-a-week-or-more)). Copy the laptop's
    `bot/data/scout/tape/` (a few hundred MB) into `bot/data/scout/tape/` on the server and the next scan uses every
    recorded day. This works while the containers run: the two machines write differently named part files.
    With SSH between them, on the server:
@@ -989,15 +925,11 @@ Hardware: 4 or more CPU cores, 4–8 GB of RAM, and disk for the length of the r
    | `docker compose up -d --build` | The scout only (recommended) |
    | `SCOUT_WORKERS=2 docker compose up -d --build` | The scout limited to 2 scan workers (default: all cores but one) |
    | `SCOUT_CAPITAL=500 docker compose up -d --build` | The scout, ranking for a $500 account instead of $100 |
-   | `docker compose --profile research up -d --build` | The scout plus the research recorder ([11.3](#113-optional-the-full-book-research-recorder)) |
 
    `restart: unless-stopped` brings the containers back after a crash or a reboot (on macOS and Windows, once Docker
-   Desktop has started). To drop the research recorder later and keep the scout running:
-   ```bash
-   docker compose --profile research stop recorder
-   ```
+   Desktop has started).
 
-**If this machine also trades** (the live bot runs here too), skip Docker ([11.4](#114-what-the-server-does-not-do)):
+**If this machine also trades** (the live bot runs here too), skip Docker ([11.3](#113-what-the-server-does-not-do)):
 run `make install`, put `.env` in `treading-bot/bot`, then start everything with:
 ```bash
 .venv/bin/bot up
@@ -1005,7 +937,7 @@ run `make install`, put `.env` in `treading-bot/bot`, then start everything with
 It starts the scout, the Telegram bot and, while a live bot runs, the guardian, all in the background; `bot status`
 checks them and `bot down` stops them. They do not come back by themselves after a reboot: run `bot up` again.
 
-### 11.6 Check on it
+### 11.5 Check on it
 
 From `treading-bot/bot`:
 
@@ -1020,18 +952,18 @@ df -h .
 
 | Command | What healthy looks like |
 |---|---|
-| `docker compose ps` | `arcus-scout` is "Up … (healthy)": the recorder wrote within the last 15 minutes. `arcus-recorder` (research profile) shows "Up" with no health status. |
+| `docker compose ps` | `arcus-scout` is "Up … (healthy)": the recorder wrote within the last 15 minutes. |
 | `docker compose logs` | `ws_connected`, then a `scout_scan` line every 30 minutes. `"go": 0` with `"events": ["offer"]` is normal: nothing is deployed on the server, so it only records the top 3. |
 | `recorder.json` | `markets` ≈ 58, `rows_total` climbing, `last_msg_age_s` a few seconds, `paused_for_disk` false |
 | `report.txt` | The time of the last scan and the ranking. For the first day on a fresh server it only lists "still recording (under a full day of data)" (see step 4 of 11.5). |
 | `reports/` | One file per UTC day |
-| `df -h .` | Free disk. The scout pauses recording under 5 GB free; the research recorder stops its order-book table at 95% full. |
+| `df -h .` | Free disk. The scout pauses recording under 5 GB free. |
 
 If `last_msg_age_s` in `recorder.json` keeps growing, or the container shows `unhealthy`, restart it with
 `docker compose restart scout`. Short outages only leave a gap; the scan ignores days with less than 20 hours
 recorded.
 
-### 11.7 Bring the results back (after a week or more)
+### 11.6 Bring the results back (after a week or more)
 
 On your laptop, from `treading-bot/bot`:
 
@@ -1069,7 +1001,6 @@ units in `deploy/systemd/`:
 | `bot-guardian` | The guardian |
 | `bot-telegram` | The Telegram bot |
 | `bot-scout` | `bot scout run` (the same scout as the Docker container, without depth) |
-| `bot-recorder`, `bot-maintenance.timer` | The research recorder and its daily compaction |
 
 Details, daily checks and emergency procedures: [bot/docs/RUNBOOK.md](bot/docs/RUNBOOK.md).
 
