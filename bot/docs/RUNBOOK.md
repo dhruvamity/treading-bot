@@ -127,22 +127,23 @@ holds no trading state, so restarting it never touches the bot.
    the group chat can send commands). `BOT_PILOT_LIVE=1` to allow live deployments from the Run buttons.
 4. `$A telegram` (or `sudo systemctl enable --now bot-telegram`). It posts "control bot online" with the status.
 
-**Commands** (`/menu` shows buttons; commands act on the running bot, live first; add `paper`/`testnet`/`live`)
+**Commands** (`/menu` shows buttons; commands act on the running bot, live first; add `paper`/`testnet`/`live`; the earlier
+names `/scout`, `/pilot`, `/report`, `/pause`, `/resume`, `/flatten` still work)
 
 | Command | What happens |
 |---|---|
-| `/scout` | The 3 best setups right now (backtested), with Run buttons: Paper = confirm button, LIVE = `BOT_PILOT_LIVE=1`, doctor, typed code |
-| `/pilot` | What is deployed, today's PnL vs the backtest, the last check; Close & stop |
+| `/top3` | The 3 best setups right now (backtested), with Run buttons: Paper = confirm button, LIVE = `BOT_PILOT_LIVE=1`, doctor, typed code |
+| `/openpositions` | What is deployed, today's PnL vs the backtest, the last check; Close & stop |
 | `/status`, `/pnl`, `/positions`, `/orders` | What is running, today's PnL, fills and maker volume; PnL by market since start |
-| `/sessions`, `/logs [n]`, `/report [date]` | Session files; latest decisions; the daily report |
-| `/pause [MARKET]` | Quoting stops within a second; reduce-only exit orders keep working off any position. Persists across restarts. |
+| `/sessions`, `/logs [n]`, `/yesterdayreport [date]` | Session files; latest decisions; the daily report (yesterday by default) |
+| `/pauseneworders [MARKET]` | Quoting stops within a second; reduce-only exit orders keep working off any position. Persists across restarts. |
 | `/unpause [MARKET]` | Quoting again |
 | `/stop` | Confirm button, then a clean shutdown: quotes cancelled, positions kept. SIGINT fallback after 25 s. |
-| `/resume` | Confirm button: clears safe mode / drawdown stop (same as `bot resume`). Look at `/logs` first. |
+| `/resumeaftersl` | Confirm button: clears safe mode / drawdown stop (same as `bot resume`). Look at `/logs` first. |
 | `/run NAME` / `/run NAME live` | Paper: confirm button. Live: the session needs `live_enabled: true`, `doctor` must pass, then you type a one-time code. |
 | `/doctor NAME` | Live readiness check (reads only) |
 | `/cancelall [venue]` | Confirm button: cancels every open order on the account (live/testnet only) |
-| `/flatten [venue] [taker]` | One-time code: cancels everything, then closes every position reduce-only (maker, or IOC with `taker`) |
+| `/closeall [venue] [taker]` | One-time code: cancels everything, then closes every position reduce-only (maker, or IOC with `taker`) |
 | `/alerts`, `/mute [min]`, `/unmute` | Alert settings |
 
 **Alerts it sends by itself** (critical ones ignore `/mute`)

@@ -179,26 +179,26 @@ def fill_line(f: dict[str, Any]) -> str:
 HELP = """<b>Bot control</b>
 
 <b>Pick what to run</b>
-/scout — the 3 best setups right now (backtested), with Run buttons
-/pilot — what is deployed, how it is doing, close it
+/top3 — the 3 best setups right now (backtested), with Run buttons
+/openpositions — what is deployed, how it is doing, close it
 
 <b>See</b>
 /status — is it running, today's PnL, fills, volume
 /pnl — PnL breakdown by market
 /positions · /orders · /sessions
-/logs [n] — latest decisions · /report [YYYY-MM-DD]
+/logs [n] — latest decisions · /yesterdayreport [YYYY-MM-DD] — the daily report
 
 <b>Control</b>
-/pause [MARKET] — stop quoting (exits keep working)
-/unpause [MARKET] — quote again
+/pauseneworders [MARKET] — stop placing new orders (exits keep working)
+/unpause [MARKET] — place orders again
 /stop — shut the bot down (cancels quotes, keeps positions)
-/resume — clear a safety stop after you have looked at why
+/resumeaftersl — trade again after a safety stop (loss limit, safe mode), once you know why
 /run &lt;session&gt; [live] — start a bot (live needs doctor + a code)
 /doctor &lt;session&gt; — live readiness check
 
 <b>Emergency</b> (real accounts, asks to confirm)
 /cancelall [arcus|lighter_rh] — cancel every open order
-/flatten [arcus|lighter_rh] [taker] — close every position
+/closeall [arcus|lighter_rh] [taker] — close every position
 
 <b>Alerts</b>
 /alerts — settings · /mute [minutes] · /unmute
@@ -206,25 +206,26 @@ HELP = """<b>Bot control</b>
 Commands act on the running bot (live first). Add paper/testnet/live to pick one, e.g. <code>/status paper</code>."""
 
 COMMANDS: list[tuple[str, str]] = [
-    ("scout", "Best 3 setups right now, with Run buttons"), ("pilot", "What is deployed and how it is doing"),
+    ("top3", "Best 3 setups right now, with Run buttons"), ("openpositions", "What is deployed and how it is doing"),
     ("status", "Is it running, today's PnL, fills, volume"), ("pnl", "PnL by market"),
     ("positions", "Open positions"), ("orders", "Open orders"), ("sessions", "Configured sessions"),
-    ("pause", "Stop quoting (exits keep working)"), ("unpause", "Quote again"), ("stop", "Shut the bot down"),
-    ("resume", "Clear a safety stop"), ("run", "Start a session"), ("doctor", "Live readiness check"),
-    ("cancelall", "Cancel every open order (confirm)"), ("flatten", "Close every position (confirm)"),
-    ("logs", "Latest decisions"), ("report", "Daily report"), ("alerts", "Alert settings"),
+    ("pauseneworders", "Stop new orders (exits keep working)"), ("unpause", "Place orders again"),
+    ("stop", "Shut the bot down"), ("resumeaftersl", "Trade again after a safety stop"), ("run", "Start a session"),
+    ("doctor", "Live readiness check"), ("cancelall", "Cancel every open order (confirm)"),
+    ("closeall", "Close every position (confirm)"), ("logs", "Latest decisions"),
+    ("yesterdayreport", "Daily report (yesterday unless a date is given)"), ("alerts", "Alert settings"),
     ("mute", "Mute non-critical alerts"), ("unmute", "Unmute alerts"), ("menu", "Buttons"), ("help", "Help"),
 ]
 
 
 def menu_keyboard() -> Keyboard:
     return [
-        [("Top 3 now", "scout"), ("Deployed", "pilot")],
+        [("Top 3 now", "top3"), ("Deployed", "openpositions")],
         [("📊 Status", "status"), ("💰 PnL", "pnl")],
         [("📦 Positions", "positions"), ("📋 Orders", "orders")],
-        [("⏸ Pause all", "pause"), ("▶️ Unpause all", "unpause")],
+        [("⏸ Pause new orders", "pauseneworders"), ("▶️ Unpause all", "unpause")],
         [("🛑 Stop bot", "stop"), ("🗂 Sessions", "sessions")],
-        [("❌ Cancel all", "cancelall"), ("🧯 Flatten", "flatten")],
+        [("❌ Cancel all orders", "cancelall"), ("🧯 Close all positions", "closeall")],
         [("🔔 Alerts", "alerts"), ("📜 Logs", "logs")],
     ]
 
@@ -256,7 +257,7 @@ def candidate_lines(top: list[dict[str, Any]]) -> str:
 
 def pick_keyboard(top: list[dict[str, Any]]) -> Keyboard:
     row = [(f"Run #{i}", f"pick {i}") for i in range(1, len(top) + 1)]
-    return [row, [("Deployed", "pilot"), ("☰ Menu", "menu")]] if row else [[("☰ Menu", "menu")]]
+    return [row, [("Deployed", "openpositions"), ("☰ Menu", "menu")]] if row else [[("☰ Menu", "menu")]]
 
 
 def scout_text(scan: dict[str, Any] | None, now: float) -> str:
@@ -292,7 +293,7 @@ def pilot_text(pilot: Any) -> str:
     st = pilot.state()
     a = st.get("active")
     if not a:
-        return "<b>Deployed:</b> nothing. /scout to pick one."
+        return "<b>Deployed:</b> nothing. /top3 to pick one."
     running = pilot.control.is_running(a["mode"])
     rev = st.get("last_review") or {}
     state = ("paused by the scout: " + escape(st["paused_by_scout"])) if st.get("paused_by_scout") else \
@@ -310,4 +311,4 @@ def pilot_text(pilot: Any) -> str:
 
 
 def pilot_keyboard() -> Keyboard:
-    return [[("Top 3 now", "scout"), ("Close & stop", "pilotclose")], [("🔄 Refresh", "pilot"), ("☰ Menu", "menu")]]
+    return [[("Top 3 now", "top3"), ("Close & stop", "pilotclose")], [("🔄 Refresh", "openpositions"), ("☰ Menu", "menu")]]

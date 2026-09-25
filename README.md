@@ -223,8 +223,8 @@ tail -f logs/runs/pilot-paper-*.log
 `bot status` shows the heartbeat, open orders and positions for each mode; `bot report` shows today's PnL split and
 volume.
 
-Or from Telegram: `/scout` → **Run #1** → **Paper** → Confirm. Let paper run for a few days and compare its daily PnL
-and volume with the backtest (`/pilot` shows both).
+Or from Telegram: `/top3` → **Run #1** → **Paper** → Confirm. Let paper run for a few days and compare its daily PnL
+and volume with the backtest (`/openpositions` shows both).
 
 ### 3.7 Go live (real money)
 
@@ -252,12 +252,12 @@ Before the first order the runner sets the session's leverage on Arcus (cross ma
 
 | Want to | CLI | Telegram |
 |---|---|---|
-| Pause quoting (exits keep working) | — | `/pause [MARKET]`, `/unpause` |
-| Close the position and stop the pilot's bot | `bot pilot close` | `/pilot` → Close & stop |
+| Stop placing new orders (exits keep working) | — | `/pauseneworders [MARKET]`, `/unpause` |
+| Close the position and stop the pilot's bot | `bot pilot close` | `/openpositions` → Close & stop |
 | Stop the bot (cancels quotes, keeps positions) | Ctrl-C, or `systemctl stop bot` | `/stop` |
 | Cancel every open order on the account now | `bot cancel-all --venue arcus` | `/cancelall` |
-| Close every position now | `bot flatten --venue arcus [--taker]` | `/flatten [taker]` |
-| Clear a safe mode / kill stop after checking why | `bot resume --all` | `/resume` |
+| Close every position now | `bot flatten --venue arcus [--taker]` | `/closeall [taker]` |
+| Clear a safe mode / kill stop after checking why | `bot resume --all` | `/resumeaftersl` |
 
 ---
 
@@ -688,28 +688,29 @@ and holds no trading state of its own.
 
 | Command | What it does |
 |---|---|
-| `/scout` | The 3 best setups right now, with sizes and backtest numbers, **Run** buttons, the closest that failed, and each market at maximum leverage |
-| `/pilot` | What is deployed: state, today's PnL vs the backtest, the last check, **Close & stop** |
+| `/top3` | The 3 best setups right now, with sizes and backtest numbers, **Run** buttons, the closest that failed, and each market at maximum leverage |
+| `/openpositions` | What is deployed: state, today's PnL vs the backtest, the last check, **Close & stop** |
 | `/status` | Is it running, today's PnL, fills, volume |
 | `/pnl` | PnL by market |
 | `/positions`, `/orders`, `/sessions` | Open positions, open orders, configured sessions |
 | `/logs [n]` | The latest decisions (why it did what it did) |
-| `/report [YYYY-MM-DD]` | A daily report |
-| `/pause [MARKET]`, `/unpause [MARKET]` | Stop / restart quoting; exits keep working |
+| `/yesterdayreport [YYYY-MM-DD]` | The daily report: yesterday's, or the date given |
+| `/pauseneworders [MARKET]`, `/unpause [MARKET]` | Stop / restart placing new orders; exits keep working |
 | `/stop` | Shut the bot down: quotes cancelled, positions kept (Confirm button) |
-| `/resume` | Clear safe mode or a kill stop after you have looked at why (Confirm button) |
+| `/resumeaftersl` | Trade again after a safety stop (safe mode, the kill or the daily stop) once you know why (Confirm button) |
 | `/run <session> [live]` | Start a session. Paper: Confirm button. Live: `live_enabled: true`, a passing `doctor`, then a typed code |
 | `/doctor <session>` | Live readiness check (reads only) |
 | `/cancelall [arcus\|lighter_rh]` | Cancel every open order on the account (Confirm button) |
-| `/flatten [arcus\|lighter_rh] [taker]` | Close every position, maker or with IOC (typed code) |
+| `/closeall [arcus\|lighter_rh] [taker]` | Close every position, maker or with IOC (typed code) |
 | `/alerts`, `/mute [minutes]`, `/unmute` | Alert settings (fills: each, hourly summary, or off) |
 | `/menu`, `/help`, `/whoami` | Buttons, help, your ids |
 
 Commands act on the running bot (live first); add `paper`, `testnet` or `live` to pick one, e.g. `/status paper`.
+The earlier names (`/scout`, `/pilot`, `/report`, `/pause`, `/resume`, `/flatten`) still work.
 
 ### 9.3 Deploying from your phone
 
-`/scout` → **Run #N** → **Paper** → **Confirm**. For real money: **Run #N** → **LIVE** (shown only with
+`/top3` → **Run #N** → **Paper** → **Confirm**. For real money: **Run #N** → **LIVE** (shown only with
 `BOT_PILOT_LIVE=1`); the bot runs `doctor` on the generated session and then sends a 6-digit code that you type back
 within 2 minutes. If a bot is already running it first closes its position and stops.
 
@@ -972,7 +973,7 @@ Details, daily checks and emergency procedures: [bot/docs/RUNBOOK.md](bot/docs/R
 
 ## 13. Daily routine and troubleshooting
 
-**Every day (2 minutes):** `bot status`; `/pilot` or `bot pilot status`; `cat data/scout/report.txt`; `bot keys` (Arcus
+**Every day (2 minutes):** `bot status`; `/openpositions` or `bot pilot status`; `cat data/scout/report.txt`; `bot keys` (Arcus
 keys expire after at most 180 days; `doctor` refuses to start within 24 h of expiry).
 
 | Problem | What to check |
@@ -985,7 +986,7 @@ keys expire after at most 180 days; `doctor` refuses to start within 24 h of exp
 | Repeated `UNDERCOLLATERALIZED` | Not enough margin for the order size: the market is off-hours, equity fell, or leverage is too high. The bot pauses that market itself |
 | The pilot refuses to approve | The scan is over 90 minutes old or the top 3 changed: check `bot pilot status` and approve again |
 | Paper differs from the backtest | Expected to some degree: the backtest fill rule is conservative, and a few days are noisy. Compare over several days |
-| A deployment was paused | `/pilot` shows why; it resumes by itself after two GO scans in a row |
+| A deployment was paused | `/openpositions` shows why; it resumes by itself after two GO scans in a row |
 | `make install` fails building `cryptography` on an Intel Mac | `cryptography` 49+ ships no Intel-Mac wheels; `pyproject.toml` pins it below 49 on Intel Macs, so pull the latest code and run `make install` again |
 | The scout or bot log shows `ws_error KeyError` and reconnects every few seconds | An old copy of the code meeting a market that went OFFLINE (its book snapshot is empty). Update the code: it now leaves that book empty and keeps the connection |
 | `ws_degraded` in the log | Arcus marked a stream stale; the bot drops that book, re-subscribes for a fresh snapshot, and reconciles the account if it was an account stream. Occasional is normal; constant means Arcus trouble |

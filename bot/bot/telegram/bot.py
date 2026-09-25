@@ -47,6 +47,9 @@ from bot.telegram.watcher import Prefs, Watcher
 
 log = Log("telegram_bot")
 VENUES = ("arcus", "lighter_rh")
+# The commands' earlier names still work (not listed in Telegram's menu), so old habits and old buttons keep working.
+ALIASES = {"scout": "top3", "pilot": "openpositions", "report": "yesterdayreport", "pause": "pauseneworders",
+           "resume": "resumeaftersl", "flatten": "closeall"}
 CONFIRM_TTL_S = 120
 
 
@@ -215,16 +218,17 @@ class TelegramBot:
 
     # ------------------------------------------------------------------ commands
     async def dispatch(self, ctx: Ctx, cmd: str, args: list[str]) -> None:
+        cmd = ALIASES.get(cmd, cmd)
         read = {"start": self.c_menu, "menu": self.c_menu, "help": self.c_help, "status": self.c_status,
-                "scout": self.c_scout, "pilot": self.c_pilot,
+                "top3": self.c_scout, "openpositions": self.c_pilot,
                 "pnl": self.c_pnl, "positions": self.c_positions, "orders": self.c_orders,
-                "sessions": self.c_sessions, "logs": self.c_logs, "report": self.c_report, "ping": self.c_ping,
-                "alerts": self.c_alerts, "mute": self.c_mute, "unmute": self.c_unmute, "ok": self.c_ok,
-                "no": self.c_no}
-        write = {"pause": self.c_pause, "unpause": self.c_unpause, "stop": self.c_stop, "resume": self.c_resume,
-                 "run": self.c_run, "doctor": self.c_doctor, "cancelall": self.c_cancelall,
-                 "flatten": self.c_flatten, "pick": self.c_pick, "deploy": self.c_deploy,
-                 "pilotclose": self.c_pilotclose}
+                "sessions": self.c_sessions, "logs": self.c_logs, "yesterdayreport": self.c_report,
+                "ping": self.c_ping, "alerts": self.c_alerts, "mute": self.c_mute, "unmute": self.c_unmute,
+                "ok": self.c_ok, "no": self.c_no}
+        write = {"pauseneworders": self.c_pause, "unpause": self.c_unpause, "stop": self.c_stop,
+                 "resumeaftersl": self.c_resume, "run": self.c_run, "doctor": self.c_doctor,
+                 "cancelall": self.c_cancelall, "closeall": self.c_flatten, "pick": self.c_pick,
+                 "deploy": self.c_deploy, "pilotclose": self.c_pilotclose}
         if cmd in read:
             await read[cmd](ctx, args)
         elif cmd in write:
@@ -444,7 +448,7 @@ class TelegramBot:
             await self.reply(ctx, "No bot is running.")
             return
         await self._ask(ctx, "stop", {"mode": mode}, f"Stop the <b>{mode.upper()}</b> bot? It cancels its quotes and "
-                        "keeps positions (close them with /flatten if you want to be flat).")
+                        "keeps positions (close them with /closeall if you want to be flat).")
 
     async def c_resume(self, ctx: Ctx, args: list[str]) -> None:
         mode, rest = await self._need_mode(ctx, args)
@@ -511,16 +515,16 @@ class TelegramBot:
     async def c_cancelall(self, ctx: Ctx, args: list[str]) -> None:
         mode, venue, _ = self._venue_mode(args)
         if mode in (None, "paper"):
-            await self.reply(ctx, "Cancel-all acts on a real account (live or testnet). For paper use /pause or /stop.")
+            await self.reply(ctx, "Cancel-all acts on a real account (live or testnet). For paper use /pauseneworders or /stop.")
             return
         await self._ask(ctx, "cancelall", {"mode": mode, "venue": venue},
                         f"Cancel EVERY open order on {venue} ({'MAINNET' if mode == 'live' else 'testnet'})? "
-                        "A running bot will re-quote on its next tick unless you /pause it first.")
+                        "A running bot will re-quote on its next tick unless you /pauseneworders first.")
 
     async def c_flatten(self, ctx: Ctx, args: list[str]) -> None:
         mode, venue, rest = self._venue_mode(args)
         if mode in (None, "paper"):
-            await self.reply(ctx, "Flatten acts on a real account (live or testnet). On paper, /pause lets the exit "
+            await self.reply(ctx, "Close-all acts on a real account (live or testnet). On paper, /pauseneworders lets the exit "
                              "orders work the position off.")
             return
         taker = any(a.lower() == "taker" for a in rest)
@@ -570,7 +574,7 @@ class TelegramBot:
                 await self.reply(ctx, escape(str(e)))
                 return
             if f"{c['market']}|{c['config']}" != a["key"]:
-                await self.reply(ctx, "The top 3 changed since you picked. Open /scout again.")
+                await self.reply(ctx, "The top 3 changed since you picked. Open /top3 again.")
                 return
             await self.reply(ctx, f"🚀 Deploying {escape(c['market'])} ({'LIVE' if a['live'] else 'paper'})…")
 
