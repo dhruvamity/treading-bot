@@ -1,0 +1,194 @@
+[
+ {
+  "market": "BTC-USD",
+  "setting": "touch 0bp",
+  "leverage": 20.0,
+  "leverage_off": 20.0,
+  "capital": 100.0,
+  "order_usd": 800.0,
+  "cap_usd": 1600.0,
+  "stops_usd": [
+   1.0,
+   2.0,
+   10.0
+  ],
+  "home": "../research/runs/20260925-2147/paper-engine/BTC-USD__touch_0bp__20x",
+  "min_capital_usd": 1.26
+ },
+ {
+  "market": "ETH-USD",
+  "setting": "touch 0bp",
+  "leverage": 20.0,
+  "leverage_off": 20.0,
+  "capital": 100.0,
+  "order_usd": 800.0,
+  "cap_usd": 1600.0,
+  "stops_usd": [
+   1.0,
+   2.0,
+   10.0
+  ],
+  "home": "../research/runs/20260925-2147/paper-engine/ETH-USD__touch_0bp__20x",
+  "min_capital_usd": 0.75
+ },
+ {
+  "market": "ZEC-USD",
+  "setting": "touch 0bp",
+  "leverage": 10.0,
+  "leverage_off": 10.0,
+  "capital": 100.0,
+  "order_usd": 400.0,
+  "cap_usd": 800.0,
+  "stops_usd": [
+   1.0,
+   2.0,
+   10.0
+  ],
+  "home": "../research/runs/20260925-2147/paper-engine/ZEC-USD__touch_0bp__10x",
+  "min_capital_usd": 4.59
+ },
+ {
+  "market": "NEAR-USD",
+  "setting": "touch 0bp",
+  "leverage": 10.0,
+  "leverage_off": 10.0,
+  "capital": 100.0,
+  "order_usd": 400.0,
+  "cap_usd": 800.0,
+  "stops_usd": [
+   1.0,
+   2.0,
+   10.0
+  ],
+  "home": "../research/runs/20260925-2147/paper-engine/NEAR-USD__touch_0bp__10x",
+  "min_capital_usd": 1.5
+ },
+ {
+  "market": "QQQ-USD",
+  "setting": "touch 0bp",
+  "leverage": 25.0,
+  "leverage_off": 16.67,
+  "capital": 100.0,
+  "order_usd": 1000.0,
+  "cap_usd": 2000.0,
+  "stops_usd": [
+   1.0,
+   2.0,
+   10.0
+  ],
+  "home": "../research/runs/20260925-2147/paper-engine/QQQ-USD__touch_0bp__25x",
+  "min_capital_usd": 0.9
+ },
+ {
+  "market": "SPY-USD",
+  "setting": "touch 0bp",
+  "leverage": 50.0,
+  "leverage_off": 33.33,
+  "capital": 100.0,
+  "order_usd": 2000.0,
+  "cap_usd": 4000.0,
+  "stops_usd": [
+   1.0,
+   2.0,
+   10.0
+  ],
+  "home": "../research/runs/20260925-2147/paper-engine/SPY-USD__touch_0bp__50x",
+  "min_capital_usd": 0.45
+ },
+ {
+  "market": "NVDA-USD",
+  "setting": "touch 0bp",
+  "leverage": 20.0,
+  "leverage_off": 13.33,
+  "capital": 100.0,
+  "order_usd": 800.0,
+  "cap_usd": 1600.0,
+  "stops_usd": [
+   1.0,
+   2.0,
+   10.0
+  ],
+  "home": "../research/runs/20260925-2147/paper-engine/NVDA-USD__touch_0bp__20x",
+  "min_capital_usd": 1.13
+ },
+ {
+  "market": "TSLA-USD",
+  "setting": "touch 0bp",
+  "leverage": 10.0,
+  "leverage_off": 6.67,
+  "capital": 100.0,
+  "order_usd": 400.0,
+  "cap_usd": 800.0,
+  "stops_usd": [
+   1.0,
+   2.0,
+   10.0
+  ],
+  "home": "../research/runs/20260925-2147/paper-engine/TSLA-USD__touch_0bp__10x",
+  "min_capital_usd": 2.25
+ },
+ {
+  "market": "GLD-USD",
+  "setting": "touch 0bp",
+  "leverage": 25.0,
+  "leverage_off": 16.67,
+  "capital": 100.0,
+  "order_usd": 1000.0,
+  "cap_usd": 2000.0,
+  "stops_usd": [
+   1.0,
+   2.0,
+   10.0
+  ],
+  "home": "../research/runs/20260925-2147/paper-engine/GLD-USD__touch_0bp__25x",
+  "min_capital_usd": 0.9
+ },
+ {
+  "market": "SLV-USD",
+  "setting": "touch 0bp",
+  "leverage": 25.0,
+  "leverage_off": 16.67,
+  "capital": 100.0,
+  "order_usd": 1000.0,
+  "cap_usd": 2000.0,
+  "stops_usd": [
+   1.0,
+   2.0,
+   10.0
+  ],
+  "home": "../research/runs/20260925-2147/paper-engine/SLV-USD__touch_0bp__25x",
+  "min_capital_usd": 1.05
+ },
+ {
+  "market": "SOL-USD",
+  "setting": "touch 0bp",
+  "leverage": 20.0,
+  "leverage_off": 20.0,
+  "capital": 100.0,
+  "order_usd": 800.0,
+  "cap_usd": 1600.0,
+  "stops_usd": [
+   1.0,
+   2.0,
+   10.0
+  ],
+  "home": "../research/runs/20260925-2147/paper-engine/SOL-USD__touch_0bp__20x",
+  "min_capital_usd": 0.75
+ },
+ {
+  "market": "HYPE-USD",
+  "setting": "touch 0bp",
+  "leverage": 10.0,
+  "leverage_off": 10.0,
+  "capital": 100.0,
+  "order_usd": 400.0,
+  "cap_usd": 800.0,
+  "stops_usd": [
+   1.0,
+   2.0,
+   10.0
+  ],
+  "home": "../research/runs/20260925-2147/paper-engine/HYPE-USD__touch_0bp__10x",
+  "min_capital_usd": 2.75
+ }
+]

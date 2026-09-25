@@ -1,0 +1,46 @@
+session_id: xcheck
+venue: arcus
+account_index: 0
+market: SOL
+mode: mid
+live_enabled: false
+capital_usd: 100.0
+leverage_max: 20.0
+order_size_usd: 800.0
+inventory_cap_usd: 1600.0
+daily_stop_usd: 2.0
+pos_stop_usd: 1.0
+kill_usd: 10.0
+exit_taker_after_s: 20.0
+cooldown_s: 60.0
+stop_loss_pct: 10.0
+participation_cap_pct: 100
+spacing_bps: 0
+levels_per_side: 1
+session:
+  duration: 24h
+  repeat: 3650
+  windows_ist: []
+  skip_et: []
+off_hours:
+  spacing_mult: 1
+  size_mult: 1.0
+  allow_mid: true
+sizing:
+  follow_equity: true
+  backtest_capital_usd: 100.0
+  capital_frac: 1.0
+  max_capital_usd: null
+  leverage: 20.0
+  leverage_off: null
+  order_max_usd: null
+  position_stop_pct: 1.0
+  daily_stop_pct: 2.0
+  kill_pct: 10.0
+  min_capital_usd: 0.75
+execution_style: normal
+passive_k_sigma: 0.0
+skew_kappa: 0.0
+level_step_bps: 2.0
+safety_pause:
+  depth_frac_min: 0.0
