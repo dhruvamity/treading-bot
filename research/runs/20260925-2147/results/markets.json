@@ -1,0 +1,313 @@
+{
+ "window": [
+  "2026-09-25 22:17 UTC",
+  "2026-09-25 23:17 UTC"
+ ],
+ "activity_usd": {
+  "AAPL-USD": 14.275944161000002,
+  "AAVE-USD": 499.7062234520001,
+  "AMD-USD": 0.0,
+  "AMZN-USD": 14.311917803,
+  "BABA-USD": 0.0,
+  "BE-USD": 0.0,
+  "BNB-USD": 0.0,
+  "BOT-USD": 1043.1238196,
+  "BTC-USD": 1195034.284329642,
+  "CASHCAT-USD": 84.0183265,
+  "COIN-USD": 0.0,
+  "CPER-USD": 0.0,
+  "CRCL-USD": 0.0,
+  "CRWV-USD": 0.0,
+  "DOGE-USD": 20487.825224847,
+  "DRAM-USD": 866.5430908870001,
+  "DYDX-USD": 0.0,
+  "ENA-USD": 1185.28358621,
+  "ETH-USD": 315084.708606916,
+  "FARTCOIN-USD": 490.438511322,
+  "GLD-USD": 0.0,
+  "GME-USD": 0.0,
+  "GOOGL-USD": 6088.657108382,
+  "HOOD-USD": 14747.435888586999,
+  "HYPE-USD": 23693.880442283,
+  "INTC-USD": 400.200207022,
+  "LINK-USD": 0.0,
+  "LIT-USD": 11101.004376628,
+  "META-USD": 0.0,
+  "MRNA-USD": 0.0,
+  "MRVL-USD": 43.81446867300001,
+  "MSFT-USD": 14.298061749999999,
+  "MSTR-USD": 0.0,
+  "MU-USD": 15.720232579,
+  "NBIS-USD": 39281.0,
+  "NEAR-USD": 53989.898508984,
+  "NVDA-USD": 4044.6848076670003,
+  "ORCL-USD": 0.0,
+  "PENGU-USD": 0.0,
+  "PLTR-USD": 0.0,
+  "PUMP-USD": 12503.279745621,
+  "QNT-USD": 115.14933015,
+  "QQQ-USD": 14693.023695541,
+  "SKHY-USD": 0.0,
+  "SLV-USD": 1016.574582672,
+  "SNDK-USD": 39267.310059325995,
+  "SOL-USD": 65154.78896727099,
+  "SPCX-USD": 2045.4276236209998,
+  "SPY-USD": 21178.509986614,
+  "SUI-USD": 5952.206935511,
+  "TAO-USD": 33898.258215274,
+  "TSLA-USD": 0.0,
+  "UNI-USD": 300.124513179,
+  "USAR-USD": 0.0,
+  "USELESS-USD": 90.70190184,
+  "USO-USD": 1856.095719857,
+  "WLFI-USD": 0.0,
+  "XRP-USD": 5859.639375924,
+  "ZEC-USD": 18794.539927133
+ },
+ "analysed": [
+  "BTC-USD",
+  "DOGE-USD",
+  "ETH-USD",
+  "GOOGL-USD",
+  "HOOD-USD",
+  "HYPE-USD",
+  "LIT-USD",
+  "NBIS-USD",
+  "NEAR-USD",
+  "NVDA-USD",
+  "PUMP-USD",
+  "QQQ-USD",
+  "SLV-USD",
+  "SNDK-USD",
+  "SOL-USD",
+  "SPCX-USD",
+  "SPY-USD",
+  "SUI-USD",
+  "TAO-USD",
+  "USO-USD",
+  "XRP-USD",
+  "ZEC-USD"
+ ],
+ "notes": {
+  "BTC-USD": {
+   "liq": {
+    "p99": 25995.20782667151,
+    "takers": 713,
+    "volume": 1619503.569335471
+   },
+   "order_max": 25000.0,
+   "hours": 0.9997222222222222,
+   "note": null
+  },
+  "DOGE-USD": {
+   "liq": {
+    "p99": 10037.845107224599,
+    "takers": 5,
+    "volume": 26285.529522898
+   },
+   "order_max": 10000.0,
+   "hours": 0.9997222222222222,
+   "note": null
+  },
+  "ETH-USD": {
+   "liq": {
+    "p99": 22869.46754483156,
+    "takers": 234,
+    "volume": 442270.62641903997
+   },
+   "order_max": 22000.0,
+   "hours": 0.9997222222222222,
+   "note": null
+  },
+  "GOOGL-USD": {
+   "liq": {
+    "p99": 7333.39848452345,
+    "takers": 2,
+    "volume": 13434.628738119
+   },
+   "order_max": 7100.0,
+   "hours": 0.9997222222222222,
+   "note": null
+  },
+  "HOOD-USD": {
+   "liq": {
+    "p99": 1585.78243857214,
+    "takers": 103,
+    "volume": 31876.354112410998
+   },
+   "order_max": 1400.0,
+   "hours": 0.9997222222222222,
+   "note": null
+  },
+  "HYPE-USD": {
+   "liq": {
+    "p99": 2362.8015016411987,
+    "takers": 121,
+    "volume": 30909.530242825003
+   },
+   "order_max": 2200.0,
+   "hours": 0.9997222222222222,
+   "note": null
+  },
+  "LIT-USD": {
+   "liq": {
+    "p99": 1872.25342112596,
+    "takers": 19,
+    "volume": 11101.004376628001
+   },
+   "order_max": 1800.0,
+   "hours": 0.9997222222222222,
+   "note": null
+  },
+  "NBIS-USD": {
+   "liq": {
+    "p99": 23644.18,
+    "takers": 3,
+    "volume": 42194.565344554
+   },
+   "order_max": 22000.0,
+   "hours": 0.9997222222222222,
+   "note": null
+  },
+  "NEAR-USD": {
+   "liq": {
+    "p99": 2548.4279296102504,
+    "takers": 170,
+    "volume": 65928.15267237701
+   },
+   "order_max": 2500.0,
+   "hours": 0.9997222222222222,
+   "note": null
+  },
+  "NVDA-USD": {
+   "liq": {
+    "p99": 599.9091725573985,
+    "takers": 71,
+    "volume": 7658.605746448999
+   },
+   "order_max": 560.0,
+   "hours": 0.9997222222222222,
+   "note": null
+  },
+  "PUMP-USD": {
+   "liq": {
+    "p99": 4480.003944777661,
+    "takers": 10,
+    "volume": 12503.279745621
+   },
+   "order_max": 4000.0,
+   "hours": 0.9997222222222222,
+   "note": null
+  },
+  "QQQ-USD": {
+   "liq": {
+    "p99": 1895.1173931789958,
+    "takers": 88,
+    "volume": 18604.123980566
+   },
+   "order_max": 1800.0,
+   "hours": 0.9997222222222222,
+   "note": null
+  },
+  "SLV-USD": {
+   "liq": {
+    "p99": 1016.5745835669599,
+    "takers": 2,
+    "volume": 2033.1491662479998
+   },
+   "order_max": 1000.0,
+   "hours": 0.9997222222222222,
+   "note": null
+  },
+  "SNDK-USD": {
+   "liq": {
+    "p99": 15682.717050409927,
+    "takers": 48,
+    "volume": 57929.179141456996
+   },
+   "order_max": 14000.0,
+   "hours": 0.9997222222222222,
+   "note": null
+  },
+  "SOL-USD": {
+   "liq": {
+    "p99": 4002.5566177956994,
+    "takers": 207,
+    "volume": 80036.80816660999
+   },
+   "order_max": 4000.0,
+   "hours": 0.9997222222222222,
+   "note": null
+  },
+  "SPCX-USD": {
+   "liq": {
+    "p99": 1442.8169449067998,
+    "takers": 5,
+    "volume": 2045.4276236209998
+   },
+   "order_max": 1400.0,
+   "hours": 0.9997222222222222,
+   "note": null
+  },
+  "SPY-USD": {
+   "liq": {
+    "p99": 2789.423011384371,
+    "takers": 192,
+    "volume": 34748.731724423
+   },
+   "order_max": 2500.0,
+   "hours": 0.9997222222222222,
+   "note": null
+  },
+  "SUI-USD": {
+   "liq": {
+    "p99": 1450.4780691659998,
+    "takers": 11,
+    "volume": 8257.771930091
+   },
+   "order_max": 1400.0,
+   "hours": 0.9997222222222222,
+   "note": null
+  },
+  "TAO-USD": {
+   "liq": {
+    "p99": 29133.824747351846,
+    "takers": 10,
+    "volume": 33898.258215274
+   },
+   "order_max": 28000.0,
+   "hours": 0.9997222222222222,
+   "note": null
+  },
+  "USO-USD": {
+   "liq": {
+    "p99": 35509.54323077872,
+    "takers": 9,
+    "volume": 61719.99703469399
+   },
+   "order_max": 32000.0,
+   "hours": 0.9997222222222222,
+   "note": null
+  },
+  "XRP-USD": {
+   "liq": {
+    "p99": 2735.0400274571507,
+    "takers": 12,
+    "volume": 7444.171045055
+   },
+   "order_max": 2500.0,
+   "hours": 0.9997222222222222,
+   "note": null
+  },
+  "ZEC-USD": {
+   "liq": {
+    "p99": 4339.977317445903,
+    "takers": 75,
+    "volume": 46625.783478738
+   },
+   "order_max": 4000.0,
+   "hours": 0.9997222222222222,
+   "note": null
+  }
+ }
+}
