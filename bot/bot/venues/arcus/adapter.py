@@ -138,6 +138,9 @@ class ArcusAdapter:
                     for r in chunk_reqs:
                         await self._reject_local(r, type(e).__name__)
                 raise  # retryable (5xx / transmission): may have landed; reconciliation by clientId decides
+            by_cid = {it.get("clientId"): it for it in items if isinstance(it, dict) and it.get("clientId")}
+            if len(by_cid) == len(items):   # every row echoes its clientId: match on it, not on the row order
+                items = [by_cid.get(r.client_id, {}) for r in chunk_reqs]
             for r, it in zip(chunk_reqs, items, strict=False):
                 st = parse_order({**it, "clientId": it.get("clientId") or r.client_id,
                                   "marketId": self._markets[r.base].venue_market_id}, self._by_id)
@@ -205,7 +208,13 @@ class ArcusAdapter:
                 if D(p.get("size") or 0) != 0]
 
     async def open_orders(self) -> Sequence[OrderState]:
-        return [parse_order(o, self._by_id) for o in await self.rest.open_orders(self.address, self.account_index)]
+        out = [parse_order(o, self._by_id) for o in await self.rest.open_orders(self.address, self.account_index)]
+        for st in out:   # reconciliation also teaches the adapter ids it missed (a lost ack, an errored place)
+            live = self._live.get(st.client_id)
+            if live is not None and st.venue_order_id:
+                live.order_id = st.venue_order_id
+                live.status = st.status
+        return out
 
     async def balances(self) -> dict[str, Decimal]:
         a = await self.rest.account(self.address, self.account_index)
