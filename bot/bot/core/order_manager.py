@@ -300,6 +300,8 @@ class OrderManager:
                 self.risk.check(req, m, modify=True)  # type: ignore[attr-defined]
             except PreTradeReject as e:
                 res.rejected.append((a, str(e)))
+                self._dec("reject_pretrade", str(e), venue=venue.value, market=m.base,
+                                      session=self.session, tag=req.tag, side=req.side.value)
                 continue
             self._dec("modify", req.reason, venue=venue.value, market=m.base, session=self.session,
                                   client_id=a.client_id, price=str(req.price), size=str(req.size))
@@ -321,7 +323,7 @@ class OrderManager:
             except PreTradeReject as e:
                 res.rejected.append((a, str(e)))
                 self._dec("reject_pretrade", str(e), venue=venue.value, market=m.base,
-                                      session=self.session, tag=req.tag)
+                                      session=self.session, tag=req.tag, side=req.side.value)
                 continue
             reqs.append(req)
             self.state.on_intent(req, self.session)  # type: ignore[attr-defined]

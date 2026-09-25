@@ -2,13 +2,14 @@
 
 Sources, all on the machine the bot runs on:
 - the run's state database (state/<mode>.sqlite): every order intent and every venue update with its time, and fills;
-- its decision log (logs/decisions.jsonl*): pauses, stops, rejects;
+- its decision log (logs/decisions.jsonl*): pauses, stops, and orders its own pre-trade checks refused;
 - the scout's recorded tape of the same market (data/scout/tape): the best bid and ask when each order was placed,
   and every taker trade in the window.
 
 It answers, in order: were orders sent and acknowledged; were any rejected (why); how long a buy and a sell rested;
-where they rested against the best price; what blocked quoting; and how many taker trades went through a price the
-bot was resting at (fills the backtest would count) or went by while it had no order on that side.
+where they rested against the best price; what blocked quoting (pauses, and orders the bot's own checks refused
+before sending); and how many taker trades went through a price the bot was resting at (fills the backtest would
+count) or went by while it had no order on that side.
 """
 
 from __future__ import annotations
@@ -16,6 +17,7 @@ from __future__ import annotations
 import json
 import sqlite3
 from collections import Counter
+from itertools import pairwise
 from pathlib import Path
 from typing import Any
 
@@ -154,6 +156,20 @@ def diagnose(*, db: Path, logs: Path, tape_root: Path, markets_json: Path | None
         out.append("Decisions " + " · ".join(f"{k} ×{v}" for k, v in blocks.most_common(6)))
         for d in [d for d in dec if str(d.get("event", "")).startswith("risk:")][:4]:
             out.append(f"          {_utc(int(d['ts']))} {d['event']}: {str(d.get('reason'))[:110]}")
+    # ---- orders the bot's own pre-trade checks refused: never sent, so not in the state database
+    refused = [d for d in dec if d.get("event") == "reject_pretrade"]
+    if refused:
+        by: dict[str, list[dict[str, Any]]] = {}
+        for d in refused:
+            by.setdefault(str(d.get("reason") or "?").split(":")[0], []).append(d)
+        out.append(f"Refused   {len(refused):,} orders by the bot's own checks (never sent to the venue)")
+        for check, ds in sorted(by.items(), key=lambda kv: -len(kv[1]))[:4]:
+            ts = [int(d["ts"]) for d in ds]
+            sides = Counter(_side(d) for d in ds)
+            out.append(f"          {check} ×{len(ds):,} ("
+                       + ", ".join(f"{s} {n:,}" for s, n in sides.most_common())
+                       + f") · {_utc(ts[0])} → {_utc(ts[-1])}, refusing for {_dur(_busy(ts))} · last: "
+                       + str(ds[-1].get("reason"))[len(check) + 2:][:80])
     # ---- fills against the market's takers
     vol = sum(float(f["price"]) * float(f["size"]) for f in fills)
     out.append(f"Fills     {len(fills)} · ${vol:,.0f} ({sum(1 for f in fills if f['is_maker'])} maker)")
@@ -178,6 +194,18 @@ def diagnose(*, db: Path, logs: Path, tape_root: Path, markets_json: Path | None
     elif market:
         out.append(f"Market    no recorded tape for {market} in this window (is the scout recording on this machine?)")
     return "\n".join(out)
+
+
+def _side(d: dict[str, Any]) -> str:
+    """buy/sell of a logged order: its `side`, or for older logs the market maker's tag (b0 = bid, a0 = ask)."""
+    data = d.get("data") or {}
+    side = data.get("side") or {"b": "buy", "a": "sell"}.get(str(data.get("tag") or "?")[:1])
+    return str(side or "?")
+
+
+def _busy(ts: list[int], gap_s: int = 10) -> int:
+    """µs covered by a run of timestamps, counting a gap longer than gap_s as a break."""
+    return sum(min(b - a, gap_s * US_PER_S) for a, b in pairwise(ts))
 
 
 def _tick(markets_json: Path | None, market: str | None) -> float:
