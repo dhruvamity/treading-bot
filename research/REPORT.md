@@ -35,8 +35,8 @@ the live bot's.
 
 > loss per day, in % of the capital = turnover per day × cost per $1M ÷ 10,000
 
-Turnover is volume ÷ capital. A setup that trades 200× its capital per hour (Mid 0 at 10x does) trades 4,800× a day.
-At a cost of $20 per $1M that is a 9.6% loss per day. **The more capital-efficient a setup is, the closer to zero
+Turnover is volume ÷ capital. A setup that trades 150× its capital an hour (Mid 0 at 10x did 155× in the model)
+trades 3,600× a day. At a cost of $20 per $1M that is a 7.2% loss per day. **The more capital-efficient a setup is, the closer to zero
 its cost per $1M must be.** A $237/1M setup (the RiseX Mid −1 runs) is fine at 50× a day (1.2%) and ruinous at
 1,000× (24%).
 
@@ -125,6 +125,12 @@ What the model shows:
    queue" fills (a print at our price fills us too: the upper bound) added 3–5% turnover and moved Mid 0 from $28 to
    $25 per $1M (profitable in 4 of 18 instead of 2). The touch holds so little that most taker orders sweep
    through it (`synthetic/arcus-like/results-front-of-queue.json`).
+9. **The same ranking holds on wider books.** A second batch with 1–3 bp spreads (a thin index perp, a busy crypto
+   major and a mid-cap alt; 12 scenarios each; [synthetic/wide-books/SUMMARY.md](synthetic/wide-books/SUMMARY.md))
+   gave the same picture. `mid+1 skew` was the best trade-off on the index book: near breakeven in 12 of 12 at 123×
+   an hour, −$43 per $1M, R1. Plain Mid 0 was marginal ($11 per $1M, 5 of 12) and the gated Mid 0 better (−$5, 9 of
+   12 near breakeven). Grids lost $94–180 per $1M on every book, and on the busy major every setting lost except
+   Mid +1, which barely traded (15× an hour).
 
 ## 6. The Mid 0 hypothesis
 
