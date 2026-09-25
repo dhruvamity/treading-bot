@@ -180,7 +180,18 @@ rebates) at more than its cost, about $30–130 per $1M on Arcus. For volume at 
 
 ## 7. Live paper run on Arcus
 
-_Pending: blocked by the session's network policy (api.arcus.xyz denied)._
+_Pending._ Two things stopped it in this cloud session:
+
+1. **The network policy denies every exchange host** (`api.arcus.xyz`, `api.hyperliquid.xyz`, Binance, Bybit, OKX
+   and others: the proxy answers 403). Checked every hour from 17:10 to 19:58 UTC on 2026-09-25.
+2. **The container is recycled while the session is idle** (it restarted at about 18:56 and 19:58 UTC). Background
+   processes died with it, so even with network access a 15-hour recording here would have gaps. The farm resumes
+   an existing run folder (`bot farm run research/runs/<id>`), but the hours it missed cannot be recorded later.
+
+**Run it on a machine that stays up** (the same one that runs the scout, [section 11 of the main
+README](../README.md#11-the-server-pc-what-runs-247)): `bot farm run --hours 15`. It commits its results hourly;
+the leaderboard lands in `research/runs/<UTC start>/LEADERBOARD.md`. `bot/scripts/farm_when_reachable.sh` starts it
+once Arcus answers.
 
 ## 8. Recommendation
 
