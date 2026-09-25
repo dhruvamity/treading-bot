@@ -117,7 +117,7 @@ def test_run_market_writes_candles_series_and_fills(tmp_path: Path) -> None:
                               "end": T0 + 7200 * S, "meta": meta, "out": str(tmp_path / "out"), "capital": 100,
                               "alive_market": "SYN-USD", "settings": names, "leverages": [5.0, 10.0]})
     rows = out["rows"]
-    assert len(rows) == 2 * len(names)
+    assert len(rows) == 3 * len(names)   # 5x, 10x and the maximum (25x)
     assert {r["risk"] for r in rows} <= {"R1", "R2", "R3", "R4", "U"}
     assert any(r["volume_usd"] > 0 for r in rows)
     r = next(r for r in rows if r["setting"] == "mid0" and r["leverage"] == 10)
@@ -126,10 +126,27 @@ def test_run_market_writes_candles_series_and_fills(tmp_path: Path) -> None:
         lines = f.read().splitlines()
     assert lines[0].startswith("t,open,high,low,close") and len(lines) == 1 + 90   # 1.5 h of minutes
     z = np.load(tmp_path / "out" / "paper" / "SYN-USD.npz")
-    assert z["minutes"].shape[0] == len(rows) and z["minutes"].shape[2] == len(analyze.MINUTE_COLS)
-    assert len(z["fills"]) == sum(r["maker_fills"] + r["taker_fills"] for r in rows)
+    assert z["minutes"].shape[0] == len(rows) and z["minutes"].shape[2] == len(analyze.MINUTE_COLS) - 1
+    assert z["minute_t"].shape == z["minutes"].shape[:2]
+    assert len(z["fill_t"]) == sum(r["maker_fills"] + r["taker_fills"] for r in rows) == len(z["fill_key"])
     md = analyze.leaderboard(rows, "t", {"k": "v"})
     assert "| setting |" in md and "mid0" in md
+
+
+def test_day_loss_is_capped_by_the_daily_stop() -> None:
+    assert analyze.day_loss(-5.0, 100.0, 12.0, 0) == pytest.approx(10.0)    # 5% in 12 h: 10% a day
+    assert analyze.day_loss(-10.5, 100.0, 12.0, 1) == pytest.approx(10.5)   # stopped for the day: 10.5% that day
+    assert analyze.day_loss(-21.0, 100.0, 36.0, 2) == pytest.approx(10.5)   # two UTC days, two stops
+    assert analyze.day_loss(3.0, 100.0, 12.0, 0) == 0.0
+
+
+def test_leverages_add_the_market_maximum() -> None:
+    meta = {"marketDisplayName": "SPY-USD", "initialMarginFraction": "0.02", "offHoursInitialMarginFraction": "0.03"}
+    assert analyze.leverages_for(meta) == [(5.0, 5.0), (10.0, 10.0), (20.0, 20.0), (50.0, 33.33)]
+    btc = {"marketDisplayName": "BTC-USD", "initialMarginFraction": "0.025"}
+    assert [x for x, _ in analyze.leverages_for(btc)] == [5.0, 10.0, 20.0]   # the owner's 20x cap
+    alt = {"marketDisplayName": "ALT-USD", "initialMarginFraction": "0.1"}
+    assert [x for x, _ in analyze.leverages_for(alt)] == [5.0, 10.0]
 
 
 def test_finished_tape_skips_the_current_hour(tmp_path: Path) -> None:

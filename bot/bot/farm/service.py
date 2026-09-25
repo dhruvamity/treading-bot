@@ -46,6 +46,7 @@ log = Log("farm")
 ALWAYS = ("BTC-USD", "ETH-USD", "SOL-USD", "HYPE-USD", "QQQ-USD", "SPY-USD", "GLD-USD", "SLV-USD", "NVDA-USD",
           "USO-USD", "TSLA-USD", "XRP-USD")
 WARMUP_S = 1800
+SERIES_EVERY_H = 4
 
 
 def utc(ts_us: int) -> str:
@@ -203,10 +204,13 @@ class Farm:
         p.write_text(json.dumps(st, indent=1, default=str))
         return st
 
-    def _commit(self, what: str) -> None:
+    def _commit(self, what: str, *, series: bool = True) -> None:
+        """Commit the run folder. The per-minute paper series are large (every setting, every fill) and rewritten
+        each analysis, so they go in only when `series` (every SERIES_EVERY_H hours and at the end)."""
         if self.repo is None:
             return
-        paths = [self.run_dir / x for x in ("run.json", "LEADERBOARD.md", "results", "candles", "paper")]
+        keep = ("run.json", "LEADERBOARD.md", "results", "candles") + (("paper",) if series else ())
+        paths = [self.run_dir / x for x in keep]
         paths += [self.scout / "markets.json", self.scout / "recorder.json"]
         paths += finished_tape(self.scout / "tape", time.time())
         try:
@@ -257,7 +261,9 @@ class Farm:
                     analyze_window, self.run_dir, self.scout / "tape", self.scout / "markets.json", start, due,
                     capital=self.capital, workers=self.workers, max_markets=self.max_markets, hour_tag=tag))
                 log.info("farm_analysis", data={"hour": tag, "rows": len(rows)})
-                await loop.run_in_executor(None, self._commit, f"hour {tag}, {len(rows)} paper runs")
+                series = final or k % max(1, round(SERIES_EVERY_H * 60 / self.every_min)) == 0
+                await loop.run_in_executor(None, functools.partial(
+                    self._commit, f"hour {tag}, {len(rows)} paper runs", series=series))
                 k += 1
                 if final:
                     break

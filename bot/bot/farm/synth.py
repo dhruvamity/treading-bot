@@ -47,6 +47,7 @@ class Profile:
     revert_s: float = 8.0        # half-life of a sweep's temporary impact
     impact_bps_per_10k: float = 1.0   # temporary impact of a $10k sweep
     imf: float = 0.04            # initial margin fraction (max leverage = 1 / imf)
+    touch_usd: float = 0.0       # median depth at the best bid and ask (0: like any other level)
     mmf: float = 0.02
     min_notional: float = 5.0
 
@@ -58,6 +59,13 @@ PROFILES = {
     "major": Profile("major", 86_600.0, 0.1, 0.00001, 3.0, 2, 12_000, 2.0, 0.08, 4_000, imf=0.05, mmf=0.025),
     # a mid-cap alt: wider, more volatile, less flow
     "alt": Profile("alt", 118.0, 0.001, 0.01, 6.0, 12, 1_000, 6.0, 0.03, 1_200, imf=0.1, mmf=0.05),
+    # Arcus-like books (tests/fixtures/live/arcus_ws_frames.json, 2026-09): one tick wide, very little at the touch,
+    # sparse levels behind it. SPY: $6 orders at 0.06-1.4 bp and $1.5-2k levels; BTC: $0.2-0.5k at the touch, $5-100k
+    # levels within 1 bp.
+    "spy1t": Profile("spy1t", 773.0, 0.01, 0.001, 1.5, 1, 1_500, 5.0, 0.012, 1_500, imf=0.02, mmf=0.01,
+                     touch_usd=100),
+    "btc1t": Profile("btc1t", 86_560.0, 0.1, 0.00001, 3.0, 1, 15_000, 6.0, 0.05, 3_000, imf=0.025, mmf=0.0125,
+                     touch_usd=1_000),
 }
 
 
@@ -118,8 +126,10 @@ def generate(profile: Profile, regimes: Regimes, *, hours: float, start_us: int,
     def levels() -> list[tuple[int, float]]:
         """(ticks from the touch, depth USD) for each level, the touch first."""
         gaps = np.concatenate([[0], rng.geometric(1 / max(1.0, pr.level_gap_ticks), n_levels - 1)])
-        return list(zip(np.cumsum(gaps).tolist(), (pr.level_usd * rng.lognormal(0, 0.8, n_levels)).tolist(),
-                        strict=True))
+        size = pr.level_usd * rng.lognormal(0, 0.8, n_levels)
+        if pr.touch_usd > 0:
+            size[0] = pr.touch_usd * rng.lognormal(0, 0.8)
+        return list(zip(np.cumsum(gaps).tolist(), size.tolist(), strict=True))
 
     depth_b, depth_a = levels(), levels()
     last_quote: tuple[float, float] | None = None

@@ -1,0 +1,4 @@
+# Synthetic tapes and paper series regenerate from their seeds (`bot farm synth`); only results, summaries and
+# candles are kept
+*/tape/
+*/paper/

@@ -56,12 +56,32 @@ def risk_label(cpm: float | None, max_dd_pct: float, killed: bool, day_loss_pct:
     return "R4"
 
 
+def day_loss(pnl: float, used: float, hours: float, day_stops: int) -> float:
+    """Projected loss per day in % of the capital: the loss scaled to 24 hours, except that a run which hit its
+    daily stop loses at most that day's loss per UTC day it spanned (it stops quoting until 00:00 UTC)."""
+    loss = max(0.0, -pnl) / used * 100
+    if day_stops > 0:
+        return loss / max(day_stops, math.ceil(hours / 24 - 1e-9), 1)   # each stop is a different UTC day
+    return loss * 24 / max(hours, 1e-9)
+
+
+def relabel(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """Recompute the projected loss per day and the risk label of stored rows (after a rule change)."""
+    for r in rows:
+        r["day_loss_pct"] = round(day_loss(r["pnl"], r["used"], r["hours"], r["day_stops"]), 3)
+        r["risk"] = risk_label(r["cpm"], r["max_dd_pct"], r["killed"], r["day_loss_pct"])
+    return rows
+
+
 def leverages_for(meta: dict[str, Any], levs: tuple[float, ...] = FARM_LEVERAGES) -> list[tuple[float, float]]:
     imf = float(meta.get("initialMarginFraction") or 0.2)
     off = float(meta.get("offHoursInitialMarginFraction") or imf)
     top = min(1 / imf, LEV_CAPS.get(meta["marketDisplayName"], math.inf))
     top_off = min(1 / off, top)
-    return [(x, min(x, top_off)) for x in levs if x <= top + 1e-9]
+    out = [(x, min(x, top_off)) for x in levs if x <= top + 1e-9]
+    if top > max(levs) + 1e-9:   # also the market's maximum ("max leverage", S04/S38)
+        out.append((round(top, 2), round(top_off, 2)))
+    return out
 
 
 def market_info(meta: dict[str, Any]) -> MarketInfo:
@@ -137,7 +157,7 @@ def summarise(res: dict[str, Any], minutes: list[tuple[Any, ...]], capital: floa
         worst_hour = min(hour_pnl) if hour_pnl else 0.0
     t100 = next((round((m[0] - minutes[0][0]) / 60e6) for m in minutes if m[3] + m[5] >= 100 * used), None) \
         if minutes else None
-    day_loss_pct = max(0.0, -res["pnl"]) / used * 100 * 24 / hours
+    day_loss_pct = day_loss(res["pnl"], used, res["hours"], res["day_stops"])
     out = {
         "market": res["market"], "setting": res["config"], "leverage": res.get("leverage"),
         "family": BY_NAME[res["config"]].family if res["config"] in BY_NAME else "",
@@ -214,21 +234,28 @@ def run_market(args: dict[str, Any]) -> dict[str, Any]:
 
 def write_series(path: Path, keys: list[str], series: dict[str, list[tuple[Any, ...]]],
                  fills: list[tuple[Any, ...]]) -> None:
-    """Per-minute paper series ([setting, minute, column] float64, NaN padded) and every fill."""
+    """Per-minute paper series and every fill, compactly:
+    minute_t [key, minute] int64 (UTC us, 0 = padding) and minutes [key, minute, column] float32 with the columns of
+    MINUTE_COLS after `t` (NaN padded); fills as fill_t int64, fill_key int16, fill_side int8, fill_px float64,
+    fill_qty float64, fill_maker bool, fill_tag."""
     path.parent.mkdir(parents=True, exist_ok=True)
     n = max((len(v) for v in series.values()), default=0)
-    arr = np.full((len(keys), n, len(MINUTE_COLS)), np.nan)
+    mt = np.zeros((len(keys), n), np.int64)
+    arr = np.full((len(keys), n, len(MINUTE_COLS) - 1), np.nan, np.float32)
     for i, k in enumerate(keys):
         for j, m in enumerate(series[k]):
-            arr[i, j] = (*m[:7], STATE_CODE.get(m[7], -1))
+            mt[i, j] = m[0]
+            arr[i, j] = (*m[1:7], STATE_CODE.get(m[7], -1))
     kid = {k: i for i, k in enumerate(keys)}
-    f_key = np.array([kid[f[0]] for f in fills], np.int32)
-    f_arr = np.array([(*f[1:5], 1.0 if f[5] else 0.0) for f in fills], np.float64).reshape(-1, 5)
-    f_tag = np.array([f[6] for f in fills], dtype="U12")
     tmp = path.with_name(path.name + ".tmp.npz")
-    np.savez_compressed(tmp, keys=np.array(keys), minute_cols=np.array(MINUTE_COLS), minutes=arr,
-                        fill_key=f_key, fill_cols=np.array(("t", "side", "px", "qty", "maker")), fills=f_arr,
-                        fill_tag=f_tag)
+    np.savez_compressed(tmp, keys=np.array(keys), minute_cols=np.array(MINUTE_COLS[1:]), minute_t=mt, minutes=arr,
+                        fill_t=np.array([f[1] for f in fills], np.int64),
+                        fill_key=np.array([kid[f[0]] for f in fills], np.int16),
+                        fill_side=np.array([f[2] for f in fills], np.int8),
+                        fill_px=np.array([f[3] for f in fills], np.float64),
+                        fill_qty=np.array([f[4] for f in fills], np.float64),
+                        fill_maker=np.array([bool(f[5]) for f in fills], bool),
+                        fill_tag=np.array([f[6] for f in fills], dtype="U12"))
     tmp.replace(path)
 
 

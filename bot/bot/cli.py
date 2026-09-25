@@ -563,14 +563,27 @@ def cmd_farm(a: argparse.Namespace) -> None:
         tape = run_dir / "scout" / "tape"
         ends = [int(np.load(p)["ts"].max()) for p in tape.rglob("bbo-*.npz")]
         end = max(ends) if ends else int(time.time() * 1e6)
-        rows = analyze_window(run_dir, tape, run_dir / "scout" / "markets.json",
+        out = run_dir / "variants" / a.label if a.label else run_dir
+        out.mkdir(parents=True, exist_ok=True)
+        rows = analyze_window(out, tape, run_dir / "scout" / "markets.json",
                               int(st["started_us"]) + int(st.get("warmup_s", 1800)) * 1_000_000, end,
                               capital=a.capital or float(st["capital"]), workers=workers,
-                              max_markets=a.max_markets, only=a.markets or None)
-        print(f"{len(rows)} paper runs; see {run_dir / 'LEADERBOARD.md'}")
+                              max_markets=a.max_markets, only=a.markets or None,
+                              sim={"front_of_queue": True} if a.front_of_queue else None)
+        print(f"{len(rows)} paper runs; see {out / 'LEADERBOARD.md'}")
+    elif a.action == "crosscheck":
+        from bot.farm.crosscheck import prepare
+        from bot.scout.scan import market_meta
+
+        run_dir = Path(a.run_dir)
+        meta = market_meta(run_dir / "scout" / "markets.json")
+        for m in a.markets or ["QQQ-USD"]:
+            for r in prepare(run_dir / "crosscheck" / m, Path.cwd(), m, meta[m], capital=a.capital):
+                print(f"{m} {r['setting']} @ {r['leverage']:g}x:  {r['command']}")
     elif a.action == "synth":
-        out = base / "synthetic"
-        rows = synth_study(out, hours=a.hours, workers=workers)
+        out = base / "synthetic" / (a.label or "study")
+        kw = {"profiles": tuple(a.profiles)} if a.profiles else {}
+        rows = synth_study(out, hours=a.hours, workers=workers, **kw)
         print(f"{len(rows)} synthetic paper runs in {out / 'results.json'}")
 
 
@@ -753,8 +766,9 @@ def build_parser() -> argparse.ArgumentParser:
     sp.add_argument("--capital",
                     help="the capital to backtest at: auto (the subaccount's equity; paper capital if unfunded) or "
                          "a dollar amount (default: config/app.yaml sizing.capital_usd)")
-    sp = add("farm", cmd_farm, "paper-trade the Tread.fi strategy menu: run (live Arcus data), analyze, synth")
-    sp.add_argument("action", choices=["run", "analyze", "synth"])
+    sp = add("farm", cmd_farm, "paper-trade the Tread.fi strategy menu: run (live Arcus data), analyze, synth, "
+                               "crosscheck (sessions for the live engine's paper mode)")
+    sp.add_argument("action", choices=["run", "analyze", "synth", "crosscheck"])
     sp.add_argument("run_dir", nargs="?", help="run: resume this run folder; analyze: the run folder")
     sp.add_argument("--hours", type=float, default=15.0, help="run: how long to record; synth: hours per tape")
     sp.add_argument("--every-min", type=float, default=60.0, help="run: minutes between analyses")
@@ -765,6 +779,12 @@ def build_parser() -> argparse.ArgumentParser:
     sp.add_argument("--out", default="../research/runs", help="folder for new runs (and synthetic/)")
     sp.add_argument("--no-git", action="store_true", help="run: do not commit the results")
     sp.add_argument("--no-push", action="store_true", help="run: commit but do not push")
+    sp.add_argument("--front-of-queue", action="store_true",
+                    help="analyze: prints AT our price fill us too (an upper bound on fills; the default is a lower "
+                         "bound)")
+    sp.add_argument("--label", help="analyze: write into RUN_DIR/variants/LABEL instead of the run folder; "
+                                    "synth: the study's folder name")
+    sp.add_argument("--profiles", nargs="*", help="synth: model market types (bot/farm/synth.py PROFILES)")
     sp = add("pilot", cmd_pilot, "one deployment at a time: status, approve N [--live], close")
     sp.add_argument("action", choices=["status", "approve", "close"])
     sp.add_argument("n", nargs="?", type=int, default=1, help="approve: which of the top 3")
