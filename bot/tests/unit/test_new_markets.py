@@ -21,7 +21,7 @@ from bot.core.marketdata import MarketView
 from bot.core.risk import RiskAction, RiskEngine
 from bot.scout import record
 from bot.scout.pilot import Pilot
-from bot.scout.scan import Pct, Risk, Scanner, _score, listed_days_ago
+from bot.scout.scan import Pct, Risk, Scanner, _score
 from bot.scout.tape import US_DAY, TapeStore, day_start_us
 from bot.telegram.control import Control
 from bot.venues.arcus.models import parse_market
@@ -173,52 +173,66 @@ def test_a_markets_partial_first_day_is_not_a_full_day(tmp_path: Path) -> None:
     assert sc.full_days("OLD-USD", now) == ["2026-09-20", "2026-09-21", "2026-09-22"]
 
 
-def test_a_new_listing_needs_three_full_days() -> None:
+def test_every_market_needs_three_full_days() -> None:
+    # server, 2026-09-26: CRCL and HOOD (1 full day) ranked beside 5-day setups; MU showed "worst day +$1.08, 1 days"
     day = {"config": "deep 3bp", "pnl": 0.5, "maker_fills": 50, "maker_usd": 10_000, "day_stops": 0, "killed": False,
            "taker_usd": 0, "actions": 100}
     rec = {**day, "hours": 24, "tail_pnl": 0.0}
     r = Risk.for_capital(100, 10).__dict__
 
-    def go(n_days: int, listed: float | None) -> list[str]:
+    def go(n_days: int) -> list[str]:
         bt = {"days": {f"2026-09-2{i}": [day] for i in range(n_days)}, "recent": [rec]}
-        return next(c for c in _score("KBONK-USD", bt, {"age_s": 1}, r, True, Pct(), listed_days=listed)
-                    if c.setting == "deep 3bp").reasons
+        return next(c for c in _score("MU-USD", bt, {"age_s": 1}, r, True, Pct()) if c.setting == "deep 3bp").reasons
 
-    assert "new market (trading 2 days): 2 of 3 full days" in go(2, 2.0)
-    assert go(3, 4.0) == [] and go(1, 400.0) == [] and go(1, None) == []
-    now = int(time.time() * 1e6)
-    assert round(listed_days_ago({"addedTimestamp": now / 1e6 - 5 * 86400}, now) or 0) == 5
-    assert listed_days_ago({}, now) is None
-    d = day_start_us("2026-09-22")        # pre-listed in May, first seen by the recorder (up since 09-19) on 09-22
-    may = {"addedTimestamp": 1778786860}
-    up = day_start_us("2026-09-19") + 12 * 3600 * S
-    assert round(listed_days_ago(may, d + 2 * US_DAY, d, up) or 0) == 2
-    assert (listed_days_ago(may, d, up + 300 * S, up) or 0) > 100   # picked up with the rest at start: not new
+    assert go(1) == ["1 full day of data (needs 3)"]
+    assert go(2) == ["2 full days of data (needs 3)"]
+    assert go(3) == []
 
 
-def test_imported_history_does_not_make_other_markets_look_new(tmp_path: Path) -> None:
-    # 2026-09-26 on the server: the arcus-mm import holds BTC books from 09-19, the scout's recorder started on 09-23,
-    # and every market outside the import (MSFT, listed for months) was flagged "new market (trading 3 days)"
-    st = TapeStore(tmp_path)
+def test_a_setting_added_to_the_menu_fills_into_cached_days(tmp_path: Path, monkeypatch: Any) -> None:
+    """A new menu entry is backtested on the cached days for itself only: no SIM_VERSION bump, no full recompute."""
+    import concurrent.futures as cf
 
-    def bbo(market: str, part: str, t0: int) -> None:
-        ts = np.arange(t0, t0 + 3600 * S, 60 * S, dtype=np.int64)
-        st.write_part(market, "bbo", part, {"ts": ts, "bid": np.full(len(ts), 99.0), "ask": np.full(len(ts), 101.0),
-                                            "bid_sz": np.ones(len(ts)), "ask_sz": np.ones(len(ts))})
+    from bot.scout import scan as sc
 
-    start = day_start_us("2026-09-23") + (20 * 3600 + 36 * 60) * S          # the recorder's first row
-    bbo("BTC-USD", "arcusmm-raw-2026-09-19", day_start_us("2026-09-19"))     # imported history
-    bbo("BTC-USD", "rec203603-497276", start)
-    bbo("MSFT-USD", "rec203603-497276", start + 90 * S)
-    bbo("KBONK-USD", "rec073000-497310", day_start_us("2026-09-25") + 7 * 3600 * S)   # turned ONLINE later
-    bbo("OLD-USD", "arcusmm-raw-2026-09-19", day_start_us("2026-09-19"))     # imported only: no recorder rows
-    assert st.first_recorded_us("BTC-USD") == start and st.first_recorded_us("OLD-USD") is None
-    now = day_start_us("2026-09-26")
-    listed_long_ago = {"addedTimestamp": 1778786860}
-    msft, kbonk = (listed_days_ago(listed_long_ago, now, st.first_recorded_us(m), st.first_recorded_us("BTC-USD"))
-                   for m in ("MSFT-USD", "KBONK-USD"))
-    assert (msft or 0) > 100
-    assert kbonk is not None and 0.5 < kbonk < 1
+    ran: list[dict[str, list[str]] | None] = []
+
+    def fake_window(args: tuple[Any, ...]) -> dict[str, list[dict[str, Any]]]:
+        only = args[10] if len(args) > 10 else None
+        ran.append(only)
+        return {sc.risk_key(r): [{"config": n, "pnl": 0.0} for n in (only or {}).get(sc.risk_key(r), args[5])]
+                for r in args[6]}
+
+    class Inline:   # the scan's process pool, run in this process so the fake window is used
+        def __init__(self, *a: Any, **k: Any) -> None:
+            pass
+
+        def submit(self, fn: Any, job: Any) -> cf.Future[Any]:
+            f: cf.Future[Any] = cf.Future()
+            f.set_result(fn(job))
+            return f
+
+        def shutdown(self, *a: Any, **k: Any) -> None:
+            pass
+
+    monkeypatch.setattr(sc, "_run_window", fake_window)
+    monkeypatch.setattr(sc, "ProcessPoolExecutor", Inline)
+    s = Scanner(tmp_path, capital=100, workers=1)
+    r = Risk.for_capital(100, 10).__dict__ | {"min_capital_usd": 0.0}
+    rk = sc.risk_key(r)
+    cp = s.cache_path("QQQ-USD", "2026-09-22", rk)
+    cp.parent.mkdir(parents=True)
+    cp.write_text(json.dumps([{"config": n, "pnl": 1.0} for n in sc.BY_NAME if n != "touch 0bp"]))   # older menu
+    monkeypatch.setattr(s, "full_days", lambda m, now: ["2026-09-22"])
+    monkeypatch.setattr(s, "order_max", lambda m, days: None)
+    monkeypatch.setattr(s, "risks_for", lambda meta, mi, om: [r])
+    monkeypatch.setattr(s, "shortlist", False)   # re-run every last 24 h: the fake rows carry no stats
+    out = s.backtest(["QQQ-USD"], day_start_us("2026-09-23"), {"QQQ-USD": sc.MarketInfo(0.01, 0.001)},
+                     {"QQQ-USD": {}})
+    assert ran[0] == {rk: ["touch 0bp"]}                        # only the missing setting was backtested
+    day = out["QQQ-USD"][rk]["days"]["2026-09-22"]
+    assert sorted(x["config"] for x in day) == sorted(sc.BY_NAME)
+    assert json.loads(cp.read_text()) == day                     # and the cache now holds it too
 
 
 def test_the_pilot_pauses_a_deployment_whose_market_goes_offline(tmp_path: Path) -> None:

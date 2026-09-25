@@ -64,7 +64,7 @@ interval without editing files). [Section 9](#9-the-telegram-bot) has them all.
 ```mermaid
 flowchart LR
     A[Arcus WebSocket<br/>best bid/offer + trades<br/>all perps] --> B[Scout recorder<br/>data/scout/tape]
-    B --> C[Backtest every 30 min<br/>21 settings x leverage ladder<br/>x every market]
+    B --> C[Backtest every 30 min<br/>22 settings x leverage ladder<br/>x every market]
     C --> D[GO checks + ranking<br/>data/scout/report.txt]
     D --> E[Top 3 offered<br/>CLI or Telegram]
     E -->|you approve| F[Pilot writes<br/>config/sessions/pilot.yaml]
@@ -216,7 +216,7 @@ best per market (any leverage up to the max):
 
 | Column | Meaning |
 |---|---|
-| setting | The strategy setting ([section 7.2](#72-the-scout-menu-21-settings)) and the leverage it was sized at |
+| setting | The strategy setting ([section 7.2](#72-the-scout-menu-22-settings)) and the leverage it was sized at |
 | order | Dollar size of each order |
 | fills/d, volume/d | Average maker fills and maker volume (USD) per full day |
 | pnl/d, worst | Average and worst daily PnL in USD, after fees and after closing any leftover position |
@@ -244,7 +244,7 @@ tail -f logs/runs/pilot-paper-*.log
 `bot status` shows the heartbeat, open orders and positions for each mode; `bot report` shows today's PnL split and
 volume.
 
-Or from Telegram: `/top3` → **Run #1** → **Paper** → Confirm. Let paper run for a few days and compare its daily PnL
+Or from Telegram: `/top3` → **▶️ 1** → a leverage → **📝 Paper** → Confirm. Let paper run for a few days and compare its daily PnL
 and volume with the backtest (`/openpositions` shows both).
 
 ### 3.7 Go live (real money)
@@ -264,8 +264,9 @@ Do these in order:
    It fails a live start on a market that is not ONLINE, and warns about a market listed in the last 21 days and
    about a stock with no earnings date in `config/calendars/earnings.csv` (the file ships empty: add the next report
    date of the stock you trade as `SYMBOL,YYYY-MM-DD,bmo,source` (or `amc`), so the bot pauses around it).
-6. `bot pilot approve 1 --live`, read the summary, and type `LIVE`. From Telegram: **Run #1** → **LIVE**, the bot
-   runs `doctor`, then you type back the one-time code it sends.
+6. `bot pilot approve 1 --live`, read the summary, and type `LIVE`. From Telegram: **▶️ 1** → a leverage →
+   **🔴 LIVE** (or `/openpositions` → **🔴 Go LIVE with this setup** after a paper run), the bot runs `doctor`, then
+   you type back the one-time code it sends.
 
 Before the first order the runner sets the session's leverage on Arcus (cross margin) and arms the dead man's switch.
 
@@ -352,7 +353,7 @@ A setting is **GO** only when all three windows pass:
 
 | Window | Checks |
 |---|---|
-| Long: up to the last 7 full days | average PnL/day ≥ −0.25% of the capital; at most one daily stop; never the kill or a liquidation; at least half the days not negative; at least 5 fills a day |
+| Long: up to the last 7 full days | at least **3 full recorded days** (every market); average PnL/day ≥ −0.25% of the capital; at most one daily stop; never the kill or a liquidation; at least half the days not negative; at least 5 fills a day |
 | Short: last 24 h (re-run every scan) | 24 h PnL ≥ −0.25%; last 6 h ≥ −0.50%; no kill in the last 24 h; at least 30% of its usual fills (the flow is still there) |
 | Now: last 60 one-minute prices | not trending (efficiency ratio < 0.5); volatility and spread under 2× their usual level; data less than 5 minutes old |
 
@@ -361,10 +362,10 @@ The percentages are of the capital the setting uses: −0.25% is −$0.25 a day 
 **New markets.** Arcus pre-lists markets as OFFLINE (September 2026: F, BAC, CCL, VT, SGOV, RVI) and switches them
 on later, and a fresh listing can go back OFFLINE (KBONK did, hours after listing). The scout handles this:
 - a market's first recorded day counts as a full day only if its own data covers 20 hours of it;
-- a market trading for under 21 days (Arcus's listing time, or the recorder first seeing it more than an hour after
-  it started) needs **3 full days** before it can be GO: listing-week flow is unusual, and new listings start with
-  small open-interest caps ($100k for CPER, GME, QNT, MRNA). Only the recorder's own files count here: imported
-  history (the arcus-mm import) covers some markets only and used to make every other market look new;
+- every market needs **3 full recorded days** before it can be in a list. One or two days say little (on
+  2026-09-26 one-day markets ranked beside five-day ones), and it also covers new listings, whose first week trades
+  unusually and which start with small open-interest caps ($100k for CPER, GME, QNT, MRNA). `/run` can still start a
+  market with less; its cards warn "1 day of data";
 - a deployment whose market goes offline is paused, and resumes after two GO scans once it trades again.
 
 **Ranking:** GO settings rank by maker volume per day, then PnL. The best setting per market is kept, and the top 3
@@ -575,7 +576,7 @@ drawdown 10%.
 - **Requote tolerance.** A live order is kept (keeping its queue place) while it is within max(2 ticks,
   0.25 × half-spread) of the wanted price and within 20% of the wanted size; otherwise it is replaced.
 
-### 7.2 The scout menu (21 settings)
+### 7.2 The scout menu (22 settings)
 
 Every setting runs at every leverage on the ladder, so the report labels look like `deep 3bp, skew @ 10x`.
 
@@ -585,6 +586,7 @@ Every setting runs at every leverage on the ladder, so the report labels look li
 | `deep 1.5bp, no pause`, `deep 3bp, no pause` | same, safety pause off | as above, also through volatile moments |
 | `deep 3bp, skew` | mid, passive, κ 1 | as `deep 3bp`, quotes shifted against inventory |
 | `deep 2bp x2`, `deep 4bp x2` | mid, passive, 2 levels | levels at d and d + 3 bps each side |
+| `touch 0bp` | mid, normal | joins the best bid and ask ("Mid 0") |
 | `touch 1bp` | mid, normal | mid ± max(1 bp, half the spread): at the touch when the spread is over 2 bps |
 | `improve touch` | mid, aggressive | one tick inside the best bid and ask |
 | `anchor 3bp`, `anchor 5bp` | anchor, safety pause off | around the **last fill** ± d, soft reset after a 0.1% run against it ([7.7](#77-anchor-quotes-around-the-last-fill-mode-anchor)) |
@@ -594,7 +596,8 @@ Every setting runs at every leverage on the ladder, so the report labels look li
 
 On 2026-09-25 `grid 10bp`, `grid 25bp` and `touch 3bp` left the menu: across 4 days, 19 markets and five
 capital/stop scenarios they never made any of the three lists (`touch 3bp` quotes exactly like `deep 3bp` whenever
-the spread is under 6 bps). The `grid` mode itself is still there for hand-written sessions.
+the spread is under 6 bps). The `grid` mode itself is still there for hand-written sessions. `touch 0bp` joined on 2026-09-26. A setting added
+to the menu is backtested on the cached days for itself only, so it needs no full recompute.
 
 ### 7.3 Mid (`mode: mid`)
 
@@ -742,12 +745,14 @@ Send `/menu` for buttons. Telegram's `/` list shows the everyday commands; the r
 
 | Command | What it does |
 |---|---|
-| `/top3` | The 3 best setups that are about breakeven or better, with sizes and backtest numbers and **Run** buttons |
-| `/volume` | The 3 with the most volume for at most your cost per $1,000 traded (`/set volume_cost`), any strategy setting. Also starts a fresh scan and posts its top 3 when done |
-| `/aggressive` | Aggressive Mid: quotes at or inside the best bid/ask and flips fast ("improve touch", "touch 1bp"), the most volume within the same cost. Also starts a fresh scan |
-| **Run #k** | Asks **Recommended** leverage (what the list picked) or **Max** (the same setting at the market's maximum, with its own backtest and a warning if it falls out of the list), then **Paper** or **LIVE** |
-| `/openpositions` | What is deployed: state, today's PnL vs the backtest, the last check, **Close & stop** |
-| `/dashboard` | A live screen that updates itself every 10 s, pinned at the top of the chat: today's volume (and its pace vs the backtest), today's PnL, the position, and your capital's profit or loss (equity minus deposits). ⏹ stops it, ▶️ starts it again; a newer `/dashboard` replaces the old one |
+| `/top3` | 🟢 The 3 best setups that are about breakeven or better, with ▶️ buttons |
+| `/volume` | 🔥 The most volume for at most your cost per $1,000 traded (`/set volume_cost`), any setting |
+| `/aggressive` | ⚡ The same, only quotes at or inside the best bid/ask ("improve touch", "touch 0bp", "touch 1bp") |
+| `/maxvolume` | 🚀 The most volume whatever it costs; every safety check still applies (no kill or liquidation in the backtest, enough fills, 3 full days of data, market not trending now). Its last 24 h may not be re-checked: the card says so |
+| ▶️ **k** | That setup's whole **leverage ladder** (every rung's volume, PnL, worst day, last 24 h and the lists it is in; ⭐ the list's pick) → pick any rung → the run screen (sizes, also outside US hours; the backtest; warnings) → **📝 Paper** or **🔴 LIVE** |
+| `/run` | 🎯 **Any** market, setting and leverage: market → setting → ladder → run screen. Or in one line: `/run BTC touch 0bp max live`, `/run QQQ "touch 1bp" 20x paper`. A setup that is in no list runs as **your pick**: the scout reports on it but never pauses it for its numbers, only if Arcus takes the market offline |
+| `/openpositions` | What is deployed: state, today's PnL and volume vs the backtest, the last check, **🔴 Go LIVE with this setup** (on a paper run), **Close & stop** |
+| `/dashboard` | A live screen that updates itself every 10 s, pinned at the top of the chat: today's volume (and its maker pace vs the backtest), how much of the day it quoted and what blocked it (e.g. "Quoting 39% · safety pause 61%"), how often it rested at the best bid and ask (else how many ticks behind), today's PnL, the position, and your capital's profit or loss (equity minus deposits). ⏹ stops it, ▶️ starts it again; a newer `/dashboard` replaces the old one |
 | `/status` | Is it running, today's PnL, fills, volume |
 | `/balance` | The account now (read live and logged): equity, free collateral, deposits vs trading PnL, the 1/7/30-day change, and the capital the scout and the bot size for |
 | `/positions`, `/orders` | What you hold; what is waiting on the book |
@@ -771,6 +776,11 @@ Send `/menu` for buttons. Telegram's `/` list shows the everyday commands; the r
 | `/set <name> <value>` | Change one (Confirm button); `/set <name> default` undoes it |
 | `/scannow` | Scan now instead of waiting for the next one |
 
+A list asks the scout for a scan only when the last one is older than 1.5× `scan_every`, or on 🔄 Scan. A scan that
+is already running or queued is not started again, and the ETA under the list comes from the last scans' measured
+times (at the same number of CPU workers; one worker while a bot runs, so several times slower). The fresh list is
+posted once when the scan finishes.
+
 | Setting | Values | What it changes |
 |---|---|---|
 | `capital` | `auto` or dollars | Money the bot sizes for: the account's balance, or a fixed amount (never more than the balance) |
@@ -791,7 +801,7 @@ deliberate step in `.env` (`BOT_PILOT_LIVE=1`), not a Telegram setting.
 |---|---|
 | `/pnl` | PnL by market |
 | `/logs [n]` | The latest decisions (why it did what it did) |
-| `/sessions`, `/run <session> [live]`, `/doctor <session>` | Session files; start one (live needs `live_enabled: true`, a passing `doctor` and a typed code); the readiness check |
+| `/sessions`, `/run <session file> [live]`, `/doctor <session>` | Session files; start one (live needs `live_enabled: true`, a passing `doctor` and a typed code); the readiness check |
 | `/alerts`, `/mute [minutes]`, `/unmute` | Alert settings (fills: each, hourly summary, or off) |
 | `/menu`, `/help`, `/whoami` | Buttons, help, your ids |
 
@@ -800,9 +810,11 @@ The earlier names (`/scout`, `/pilot`, `/report`, `/pause`, `/resume`, `/flatten
 
 ### 9.3 Deploying from your phone
 
-`/top3` → **Run #N** → **Paper** → **Confirm**. For real money: **Run #N** → **LIVE** (shown only with
-`BOT_PILOT_LIVE=1`); the bot runs `doctor` on the generated session and then sends a 6-digit code that you type back
-within 2 minutes. If a bot is already running it first closes its position and stops.
+`/top3` (or `/volume`, `/aggressive`, `/maxvolume`, `/run`) → ▶️ → pick a leverage → **📝 Paper** → **Confirm**.
+For real money: **🔴 LIVE** (shown only with `BOT_PILOT_LIVE=1`); the bot runs `doctor` on the generated session and
+then sends a 6-digit code that you type back within 2 minutes. After a paper run, `/openpositions` → **🔴 Go LIVE
+with this setup** starts the same market, setting and leverage live (same checks and code). If a bot is already
+running it first closes its position and stops.
 
 ### 9.4 Alerts it sends by itself
 
@@ -810,8 +822,8 @@ within 2 minutes. If a bot is already running it first closes its position and s
 - Safe mode, a drawdown stop or a daily stop appeared or cleared.
 - Today's PnL reached half, then all, of the daily limit.
 - Fills (each, an hourly summary, or none) and a digest shortly after 00:00 UTC.
-- The pilot: new top 3 when nothing runs, a deployment paused (with the reason), resumed, a better setup suggested, a
-  deployment that failed to start.
+- The pilot: a new #1 setup when nothing runs (at most every 3 hours), a deployment paused (with the reason),
+  resumed, a better setup suggested, a deployment that failed to start.
 
 `/mute` silences everything except critical alerts.
 
@@ -840,6 +852,7 @@ within 2 minutes. If a bot is already running it first closes its position and s
 | `bot run SESSION [--live] [--yes] [--seconds N]` | Run a session (paper by default) |
 | `bot status [--mode live\|paper\|testnet]` | Heartbeat, open orders, positions |
 | `bot report [--date D] [--mode M]` | Daily report: Net = spread capture + inventory PnL + funding − fees − liquidation loss |
+| `bot diagnose [--mode live] [--hours N \| --since "2026-09-25 20:00" --until …] [--market QQQ]` | Why a run filled what it filled: orders sent and acknowledged, rejects and their reasons, how long a buy and a sell rested, where they rested against the best price, what blocked quoting, and how many taker trades went through a price you rested at or traded while you had no order out. Read-only |
 | `bot resume [--venue V] [--all]` | Clear safe mode / stops |
 | `bot cancel-all --venue arcus [--market M] [--yes]` | Cancel all open orders (asks to confirm) |
 | `bot flatten --venue arcus [--taker]` | Close all positions, reduce-only (asks to confirm) |
@@ -883,11 +896,11 @@ Files: `data/scout/tape/<MARKET>/<YYYY-MM-DD>/{bbo,trades,depth}-*.npz`. Arcus s
 Each scan (the first one 10 s after start):
 
 1. Takes every market with at least one full recorded UTC day.
-2. Backtests **all 21 settings** ([7.2](#72-the-scout-menu-21-settings)) at **every leverage on the ladder**: the
+2. Backtests **all 22 settings** ([7.2](#72-the-scout-menu-22-settings)) at **every leverage on the ladder**: the
    market's maximum, then 20x, 10x, 5x and 2x (BTC and ETH at most 20x). It sizes them for the **capital** in
    `SCOUT_CAPITAL` (default `auto`: the Docker container has no keys, so that means the $100 paper capital; set
    `SCOUT_CAPITAL=500` to rank for a $500 account). With today's 58 markets that is 178
-   market-leverage pairs and **3,738 backtests per window**.
+   market-leverage pairs and **3,916 backtests per window**.
 3. The windows are each of the last **7 full days** (computed once per day, then cached) and the **last 24 hours**.
    The last 24 hours is re-run only for the setups that pass on their full days (about 3–6% of them, measured), and
    for whatever is deployed: a setup that already fails on its full days cannot become GO, so re-running it would
@@ -1059,7 +1072,7 @@ keys expire after at most 180 days; `doctor` refuses to start within 24 h of exp
 | Problem | What to check |
 |---|---|
 | `report.txt` is old | Is the scout running? `pgrep -f "bot scout run"`, `tail logs/scout.out`, `cat data/scout/recorder.json` |
-| "still recording (under a full day of data)" | New markets need one full UTC day before they can be ranked |
+| "still recording (under a full day of data)" / "1 full day of data (needs 3)" | Every market needs 3 full recorded UTC days before it can be in a list; `/run` can still start it |
 | "Nothing passes all checks" | Normal in volatile hours: the "now" checks fail. Wait for the next scan |
 | `doctor` FAIL "never funded" | Deposit USDG to the subaccount the key is bound to |
 | `doctor` warns the calendar is short | Add CPI/FOMC/NFP dates to `config/calendars/events.csv` |

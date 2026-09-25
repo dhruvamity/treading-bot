@@ -96,23 +96,6 @@ class TapeStore:
             return []
         return sorted(p.name for p in d.iterdir() if p.is_dir() and any(p.glob("bbo-*.npz")))
 
-    def first_recorded_us(self, market: str) -> int | None:
-        """Time of the market's first best bid/offer row written by the scout's recorder. Imported history (the
-        arcus-mm import covers 20 markets from 2026-09-19) does not count: it says nothing about when the recorder
-        started or when it first saw a market."""
-        for day in self.days(market):
-            first = []
-            for p in sorted(self.day_dir(market, day).glob(f"bbo-{REC_PART}*.npz")):
-                if p.name.endswith(".tmp.npz"):
-                    continue
-                with np.load(p) as z:
-                    ts = z["ts"]
-                if len(ts):
-                    first.append(int(ts.min()))
-            if first:
-                return min(first)
-        return None
-
     # ---------------------------------------------------------------- write
     def write_part(self, market: str, kind: str, part: str, arrays: dict[str, np.ndarray]) -> list[Path]:
         """Split rows by UTC day and write one part file per day. Atomic (tmp + rename)."""
@@ -163,6 +146,8 @@ class TapeStore:
         out = _concat(parts, empty_depth())
         o = np.argsort(out["ts"], kind="stable")
         sel = o[(out["ts"][o] >= start_us) & (out["ts"][o] < end_us)]
+        ts = out["ts"][sel]
+        sel = sel[np.concatenate([[True], np.diff(ts) != 0])] if len(sel) else sel   # two recorders, one snapshot
         return {k: v[sel] for k, v in out.items()}
 
     def load_range(self, market: str, start_us: int, end_us: int) -> DayTape:

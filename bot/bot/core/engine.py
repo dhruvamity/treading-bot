@@ -46,6 +46,55 @@ class EngineStats:
     mode_time_s: dict[str, float] = field(default_factory=dict)
 
 
+BLOCKS = (("safety pause", "safety pause"), ("skip window", "skip window"), ("daily", "daily stop"),
+          ("position stop", "position stop"), ("cooling down", "cooldown"), ("budget", "order budget"),
+          ("event window", "event window"), ("repeated rejects", "rejects"), ("safe mode", "safe mode"),
+          ("critical stop", "safe mode"), ("stopped", "stopped"), ("scout:", "paused by the scout"),
+          ("telegram", "paused by you"), ("band", "market stopped"), ("oi cap", "market stopped"),
+          ("market is", "market stopped"), ("too small", "capital too small"), ("no book", "no book"))
+
+
+def block_category(why: str) -> str:
+    """A short name for why quoting is blocked (the dashboard's breakdown)."""
+    w = why.lower()
+    return next((name for key, name in BLOCKS if key in w), why[:40] or "blocked")
+
+
+@dataclass
+class QuoteStats:
+    """Seconds of one UTC day: quoting or blocked (and why), with an order resting on each side, and at the best
+    price. Answers "why no fills?": a bot that is paused, or rests behind the best price, is rarely filled."""
+
+    day: str = ""
+    seconds: float = 0.0
+    quoting: float = 0.0
+    blocked: dict[str, float] = field(default_factory=dict)
+    bid: float = 0.0          # seconds with a buy resting (not reduce-only)
+    ask: float = 0.0
+    bid_touch: float = 0.0    # ... at or inside the best bid
+    ask_touch: float = 0.0
+    bid_ticks: float = 0.0    # ticks behind the best bid, summed over the seconds a buy rests
+    ask_ticks: float = 0.0
+
+    def add(self, dt: float, why: str, bid: tuple[float, float] | None, ask: tuple[float, float] | None) -> None:
+        """dt seconds; why = "" while quoting; bid/ask = (our best price, the book's best price) in ticks, when an
+        order rests on that side."""
+        self.seconds += dt
+        if why:
+            cat = block_category(why)
+            self.blocked[cat] = self.blocked.get(cat, 0.0) + dt
+        else:
+            self.quoting += dt
+        if bid is not None:
+            self.bid += dt
+            self.bid_touch += dt if bid[0] >= bid[1] else 0.0
+            self.bid_ticks += dt * max(0.0, bid[1] - bid[0])
+        if ask is not None:
+            self.ask += dt
+            self.ask_touch += dt if ask[0] <= ask[1] else 0.0
+            self.ask_ticks += dt * max(0.0, ask[0] - ask[1])
+
+
 class SessionEngine:
     def __init__(self, *, session: MMSession, strategy: Any, hub: MarketDataHub,
                  adapters: dict[Venue, Any], markets: dict[Venue, dict[str, Market]], state: StateStore,
@@ -78,6 +127,7 @@ class SessionEngine:
                                ids=ids, session=self.sid, account_index=self.account_index, now_fn=lambda: self.now_us)
         self.ids = ids
         self.stats = EngineStats()
+        self.quotes = QuoteStats()
         self.session_start_equity: Decimal | None = None
         self.day_start_equity: dict[str, Decimal] = {}
         self.inflight_intents: dict[tuple[Venue, str], int] = {}
@@ -271,6 +321,7 @@ class SessionEngine:
                 out.ioc_intents.append(replace(self._taker_exit(ctx), reason=f"{why}: maker exit timed out"))
                 self.exit_since_us = now_us  # re-arm: one taker attempt per interval
         mode = str(getattr(self.strategy, "name", ""))
+        dt = min(5.0, (now_us - self.last_tick_us) / 1e6) if self.last_tick_us else 0.0
         if self.last_tick_us:
             self.stats.mode_time_s[mode] = self.stats.mode_time_s.get(mode, 0.0) + (now_us - self.last_tick_us) / 1e6
         self.last_tick_us = now_us
@@ -279,8 +330,34 @@ class SessionEngine:
                                   venue=self.venue.value, market=self.base, session=self.sid, ts_us=now_us)
             self.last_mode = mode
         await self.apply(out, ctx, now_us)
+        if dt:
+            self._count_quotes(ctx, state, now_us, dt)
         await self.pnl_checks(now_us)
         return out
+
+    def _count_quotes(self, ctx: StrategyContext, state: SessionState, now_us: int, dt: float) -> None:
+        from bot.common.time import utc_date_str
+
+        if state is not SessionState.RUNNING:
+            why = "outside the session window"
+        elif not ctx.quoting_allowed:
+            why = ctx.quoting_block_reason or "blocked"
+        else:
+            why = "event window" if ctx.event_window else ""
+        book, tick = ctx.view.book, float(ctx.market.tick_size)
+        mine = [o for o in self.state.open_orders(self.venue, self.base) if not o.req.reduce_only]
+        sides: list[tuple[float, float] | None] = []
+        for is_bid, best in ((True, book.best_bid()), (False, book.best_ask())):
+            px = [float(o.req.price) for o in mine if (o.req.side is Side.BUY) is is_bid]
+            if px and best is not None and tick > 0:
+                ours = max(px) if is_bid else min(px)
+                sides.append((ours / tick, float(best[0]) / tick))
+            else:
+                sides.append(None)
+        day = utc_date_str(now_us)
+        if self.quotes.day != day:
+            self.quotes = QuoteStats(day=day)
+        self.quotes.add(dt, why, sides[0], sides[1])
 
     def _stop_exit(self, ctx: StrategyContext, now_us: int) -> str | None:
         """Position stop, daily-stop exit and the cool-down after a position stop. Returns why quoting is blocked."""

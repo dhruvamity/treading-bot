@@ -48,6 +48,41 @@ def save_scan(root: Path, res: dict[str, Any]) -> Path:
 
 
 SCAN_NOW = "scan_now"   # a file in the state folder: Telegram's /scannow asks for a scan without waiting
+STATUS = "scan_status.json"   # data/scout: is a scan running, and how long recent scans took (Telegram's ETAs)
+HISTORY = 20
+
+
+def read_status(root: Path) -> dict[str, Any]:
+    """{running, started, workers, history: [{ts, took_s, workers, full}]} (root: the project root)."""
+    try:
+        d: dict[str, Any] = json.loads((root / "data" / "scout" / STATUS).read_text())
+        return d
+    except (OSError, ValueError):
+        return {}
+
+
+def _write_status(root: Path, st: dict[str, Any]) -> None:
+    p = root / "data" / "scout" / STATUS
+    p.parent.mkdir(parents=True, exist_ok=True)
+    tmp = p.with_suffix(".tmp")
+    tmp.write_text(json.dumps(st))
+    tmp.replace(p)
+
+
+def eta_s(st: dict[str, Any], workers: int, full: bool) -> float | None:
+    """Expected length of a scan: the median of the last five of the same kind (the once-a-day search over a new
+    day, or a light one) at this many workers; failing that, the same kind at another worker count, scaled."""
+    hist = [h for h in st.get("history") or [] if bool(h.get("full")) == full and h.get("took_s")]
+    same = [h["took_s"] for h in hist if h.get("workers") == workers][-5:]
+    if same:
+        return float(sorted(same)[len(same) // 2])
+    other = [h["took_s"] * max(1, h.get("workers") or 1) / max(1, workers) for h in hist[-5:]]
+    return float(sorted(other)[len(other) // 2]) if other else None
+
+
+def next_is_full(scan: dict[str, Any] | None, now: float) -> bool:
+    """The next scan backtests a new UTC day for every setting when the last one ran on an earlier day."""
+    return not scan or time.gmtime(scan["ts_us"] / 1e6)[:3] != time.gmtime(now)[:3]
 
 
 def scan_workers(requested: int | str | None, bot_running: bool) -> int:
@@ -104,11 +139,16 @@ async def run_service(root: Path, pilot: Pilot, *, rest_url: str, ws_url: str, e
                 cap, src, moved = settle(state_dir, cap, src, today=time.strftime("%Y-%m-%d", time.gmtime()))
                 a = pilot.active()
                 n = scan_workers(want_workers, bool(pilot.control.running_modes()))
+                st = read_status(root)
+                _write_status(root, {**st, "running": True, "started": time.time(), "workers": n})
                 res = await loop.run_in_executor(None, functools.partial(
                     scan, root / "data" / "scout", workers=n, ladder=ladder, capital=cap, pct=z.pct(),
                     capital_source=src, always={(a["market"], a["config"])} if a else None, stop=halt,
                     volume_cost=settings.volume_cost(over)))
                 save_scan(root, res)
+                hist = (st.get("history") or []) + [{"ts": time.time(), "took_s": res["took_s"], "workers": n,
+                                                    "full": bool(res.get("day_jobs"))}]
+                _write_status(root, {"running": False, "workers": n, "history": hist[-HISTORY:]})
                 events = pilot.review(res)
                 log.info("scout_scan", data={"took_s": res["took_s"], "go": len(res["top"]), "capital": cap,
                                              "capital_moved": moved, "workers": n,
@@ -116,9 +156,11 @@ async def run_service(root: Path, pilot: Pilot, *, rest_url: str, ws_url: str, e
                                              "events": [e["kind"] for e in events]})
             except ScanStopped:
                 log.info("scout_scan_stopped", reason="shutting down; finished days stay cached")
+                _write_status(root, {**read_status(root), "running": False})
                 break
             except Exception as e:  # a failed scan must not stop the recorder
                 log.error("scout_scan_failed", reason=type(e).__name__, data={"err": str(e)[:300]}, exc_info=True)
+                _write_status(root, {**read_status(root), "running": False})
             await _wait(stop, state_dir / SCAN_NOW, max(60.0, every * 60 - (time.time() - t0)))
     finally:
         if rec and rec_task:

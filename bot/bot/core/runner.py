@@ -14,7 +14,7 @@ import asyncio
 import contextlib
 import signal
 import time
-from dataclasses import replace
+from dataclasses import asdict, replace
 from decimal import Decimal
 from pathlib import Path
 from typing import Any
@@ -413,7 +413,7 @@ class BotRunner:
                              "stops": {k: getattr(e.session, f, None) for k, f in (
                                  ("position", "pos_stop_usd"), ("daily", "daily_stop_usd"), ("kill", "kill_usd"))},
                              "ticks": e.stats.ticks, "actions": e.stats.actions,
-                             "rejects": e.stats.rejects, "errors": e.stats.errors})
+                             "rejects": e.stats.rejects, "errors": e.stats.errors, "quotes": asdict(e.quotes)})
         return {"ts_us": now, "mode": self.mode.value, "started_us": self.started_us, "markets": markets,
                 "sessions": sessions,
                 "account": self.account,

@@ -208,6 +208,9 @@ class ArcusWS:
             await self._emit("book", canonical_base(Venue.ARCUS, sid), sync, res, recv_us, snapshot, c)
         elif ch == "bbo":
             self.ws.touch(f"bbo:{sid}", recv_us)
+            top = self.books.get(sid)
+            if top is not None and isinstance(c, dict) and top.on_bbo(c):
+                log.info("book_phantoms_dropped", venue="arcus", market=sid, data={"total": top.phantoms})
             await self._emit("bbo", canonical_base(Venue.ARCUS, sid), c, recv_us)
         elif ch == "trades":
             self.ws.touch(f"trades:{sid}", recv_us)

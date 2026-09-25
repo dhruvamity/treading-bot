@@ -4,7 +4,7 @@ PY := .venv/bin/python
 UV ?= uv
 
 install:
-	$(UV) venv --python 3.12 .venv
+	$(UV) venv --allow-existing --python 3.12 .venv
 	$(UV) pip install -e '.[dev]'
 
 lint:
