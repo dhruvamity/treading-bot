@@ -187,6 +187,8 @@ _Pending._ Two things stopped it in this cloud session:
 2. **The container is recycled while the session is idle** (it restarted at about 18:56 and 19:58 UTC). Background
    processes died with it, so even with network access a 15-hour recording here would have gaps. The farm resumes
    an existing run folder (`bot farm run research/runs/<id>`), but the hours it missed cannot be recorded later.
+   Started as a harness-tracked background task instead, the watcher kept the container up (32 minutes and
+   counting at 20:30 UTC), so a run started that way may survive.
 
 **Run it on a machine that stays up** (the same one that runs the scout, [section 11 of the main
 README](../README.md#11-the-server-pc-what-runs-247)): `bot farm run --hours 15`. It commits its results hourly;
