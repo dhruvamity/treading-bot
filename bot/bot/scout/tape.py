@@ -1,8 +1,8 @@
 """Compact market tape for the scout: best bid/offer changes and trades, per market per UTC day.
 
-Layout: <root>/<MARKET>/<YYYY-MM-DD>/{bbo,trades}-<part>.npz. The recorder appends a part every few minutes and the
-importers write one part per source, so writers never touch each other's files; `load_day` concatenates, sorts and
-de-duplicates. All times are the venue's own timestamps in int64 µs UTC.
+Layout: <root>/<MARKET>/<YYYY-MM-DD>/{bbo,trades}-<part>.npz. The recorder appends a part every few minutes (parts
+named `rec...`) and the importers write one part per source (`arcusmm-...`), so writers never touch each other's
+files; `load_day` concatenates, sorts and de-duplicates. All times are the venue's own timestamps in int64 µs UTC.
 
     bbo:    ts, bid, ask, bid_sz, ask_sz        a row when either price changes, or sizes change and >= 1 s passed
     trades: ts, px, sz, buy, seq, tid           buy = the TAKER bought; seq = Arcus sequenceNumber (one taker order)
@@ -26,6 +26,7 @@ import orjson
 US_DAY = 86_400_000_000
 BBO_FIELDS = ("ts", "bid", "ask", "bid_sz", "ask_sz")
 DEPTH_N = 10
+REC_PART = "rec"   # part-name prefix of everything the scout's own recorder writes (imports use other names)
 MIN_REAL_US = 1_750_000_000_000_000  # Arcus REST returns placeholder rows dated 2026-01-01 and earlier
 
 
@@ -94,6 +95,23 @@ class TapeStore:
         if not d.exists():
             return []
         return sorted(p.name for p in d.iterdir() if p.is_dir() and any(p.glob("bbo-*.npz")))
+
+    def first_recorded_us(self, market: str) -> int | None:
+        """Time of the market's first best bid/offer row written by the scout's recorder. Imported history (the
+        arcus-mm import covers 20 markets from 2026-09-19) does not count: it says nothing about when the recorder
+        started or when it first saw a market."""
+        for day in self.days(market):
+            first = []
+            for p in sorted(self.day_dir(market, day).glob(f"bbo-{REC_PART}*.npz")):
+                if p.name.endswith(".tmp.npz"):
+                    continue
+                with np.load(p) as z:
+                    ts = z["ts"]
+                if len(ts):
+                    first.append(int(ts.min()))
+            if first:
+                return min(first)
+        return None
 
     # ---------------------------------------------------------------- write
     def write_part(self, market: str, kind: str, part: str, arrays: dict[str, np.ndarray]) -> list[Path]:

@@ -26,7 +26,7 @@ import numpy as np
 
 from bot.common.logging import Log
 from bot.core.book import ArcusBookSync, SyncResult
-from bot.scout.tape import DEPTH_N, BboBuffer, DepthBuffer, TapeStore, TradeBuffer
+from bot.scout.tape import DEPTH_N, REC_PART, BboBuffer, DepthBuffer, TapeStore, TradeBuffer
 from bot.venues.arcus.rest import ArcusRest
 from bot.venues.arcus.ws import ArcusWS
 from bot.venues.base import Venue
@@ -172,7 +172,7 @@ class ScoutRecorder:
                 chunks = self.parts.setdefault((d, kind), [])
                 chunks.append(new)
                 rows = {k: np.concatenate([c[k] for c in chunks]) for k in new}
-                self.store.write_part(d, kind, f"rec{self.session}-{hour}", rows)
+                self.store.write_part(d, kind, f"{REC_PART}{self.session}-{hour}", rows)
         self.rows += n
         status = {"ts": time.time(), "markets": len(self.bbo), "rows_total": self.rows, "rows_last_flush": n,
                   "last_msg_age_s": round(time.time() - self.last_msg, 1) if self.last_msg else None,

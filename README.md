@@ -361,9 +361,10 @@ The percentages are of the capital the setting uses: −0.25% is −$0.25 a day 
 **New markets.** Arcus pre-lists markets as OFFLINE (September 2026: F, BAC, CCL, VT, SGOV, RVI) and switches them
 on later, and a fresh listing can go back OFFLINE (KBONK did, hours after listing). The scout handles this:
 - a market's first recorded day counts as a full day only if its own data covers 20 hours of it;
-- a market trading for under 21 days (Arcus's listing time, or the recorder first seeing it after it started) needs
-  **3 full days** before it can be GO: listing-week flow is unusual, and new listings start with small open-interest
-  caps ($100k for CPER, GME, QNT, MRNA);
+- a market trading for under 21 days (Arcus's listing time, or the recorder first seeing it more than an hour after
+  it started) needs **3 full days** before it can be GO: listing-week flow is unusual, and new listings start with
+  small open-interest caps ($100k for CPER, GME, QNT, MRNA). Only the recorder's own files count here: imported
+  history (the arcus-mm import) covers some markets only and used to make every other market look new;
 - a deployment whose market goes offline is paused, and resumes after two GO scans once it trades again.
 
 **Ranking:** GO settings rank by maker volume per day, then PnL. The best setting per market is kept, and the top 3
