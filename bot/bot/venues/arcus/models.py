@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import time
 from decimal import Decimal
 from typing import Any
 
@@ -170,17 +171,22 @@ def parse_order(o: dict[str, Any], base_by_id: dict[int, str], ts_us: int | None
 
 
 def parse_fill(f: dict[str, Any], base_by_id: dict[int, str]) -> Fill:
+    """A fill row as REST /v1/fills and the live `userFills` stream send it (price, size, marketId, role, fee). The
+    channel docs' example names price/size fillPrice/fillSize and the market `market`; both are read."""
+    mid = f.get("marketId")
+    name = str(f.get("marketDisplayName") or f.get("market") or "")
+    base = base_by_id.get(int(mid), "") if mid is not None else ""
     return Fill(
         venue=V,
-        base=base_by_id.get(int(f["marketId"]), f.get("marketDisplayName", "")),
+        base=base or (canonical_base(V, name) if name else ""),
         client_id=f.get("clientId") or "",
         side=Side.BUY if f["side"] == "BUY" else Side.SELL,
-        price=D(f["price"]),
-        size=D(f["size"]),
+        price=D(f.get("price") or f["fillPrice"]),
+        size=D(f.get("size") or f["fillSize"]),
         fee=D(f.get("fee") or 0),
         is_maker=f.get("role") == "MAKER",
         liquidation=bool(f.get("liquidation")),
-        ts_us=int(f["createdAt"]),
+        ts_us=int(f.get("createdAt") or f.get("timestamp") or time.time() * 1e6),
         trade_id=str(f["tradeId"]),
         venue_order_id=f.get("orderId"),
     )

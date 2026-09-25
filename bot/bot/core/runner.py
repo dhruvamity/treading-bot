@@ -14,6 +14,7 @@ import asyncio
 import contextlib
 import signal
 import time
+from dataclasses import replace
 from decimal import Decimal
 from pathlib import Path
 from typing import Any
@@ -305,21 +306,57 @@ class BotRunner:
         def a_pf(base: str, c: dict[str, Any], recv: int) -> None:
             self.hub.view(Venue.ARCUS, base).predicted_funding_h = float(c.get("rate1h") or 0)
 
+        def a_session(base: str, m: dict[str, Any]) -> None:
+            """RTH/off-hours state and the off-hours bands of one market. The `marketAttributes` channel streams every
+            RTH <-> off-hours crossing and band change (docs: market-data/marketattributes); the `markets` channel does
+            not carry these today (docs: market-data/markets, "Field coverage"). So only fields a message carries are
+            applied: a markets snapshot must not wipe the bands every 5 s."""
+            v = self.hub.view(Venue.ARCUS, base)
+            if m.get("isOutsideRth") is not None:   # docs: null briefly while the server has no answer: keep ours
+                v.is_outside_rth = bool(m["isOutsideRth"])
+            if "upperTradingBound" in m:
+                v.upper_bound = D(m["upperTradingBound"]) if m["upperTradingBound"] else None
+            if "lowerTradingBound" in m:
+                v.lower_bound = D(m["lowerTradingBound"]) if m["lowerTradingBound"] else None
+            if "isUpperInExpansionZone" in m:
+                v.upper_in_zone = bool(m["isUpperInExpansionZone"])
+            if "isLowerInExpansionZone" in m:
+                v.lower_in_zone = bool(m["isLowerInExpansionZone"])
+            # the pre-trade margin check reads the Market (off-hours IMF while outside RTH): keep it in step with the
+            # session instead of the value read at start-up
+            mk = (self.params.markets.get(Venue.ARCUS) or {}).get(base) if self.params else None
+            if mk is None or self.params is None:
+                return
+            upd: dict[str, Any] = {}
+            if mk.is_outside_rth != v.is_outside_rth:
+                upd["is_outside_rth"] = v.is_outside_rth
+            if m.get("offHoursInitialMarginFraction") and D(m["offHoursInitialMarginFraction"]) != mk.offhours_imf:
+                upd["offhours_imf"] = D(m["offHoursInitialMarginFraction"])
+            if upd:
+                self.params.markets[Venue.ARCUS][base] = replace(mk, **upd)
+
         def a_markets(ms: dict[str, dict[str, Any]], recv: int) -> None:
             for m in ms.values():
                 base = canonical_base(Venue.ARCUS, m.get("marketDisplayName", ""))
                 if base not in self.bases:
                     continue
+                a_session(base, m)
                 v = self.hub.view(Venue.ARCUS, base)
-                v.is_outside_rth = bool(m.get("isOutsideRth"))
                 v.status = str(m["status"]).upper() if m.get("status") else v.status
-                v.upper_bound = D(m["upperTradingBound"]) if m.get("upperTradingBound") else None
-                v.lower_bound = D(m["lowerTradingBound"]) if m.get("lowerTradingBound") else None
-                v.upper_in_zone = bool(m.get("isUpperInExpansionZone"))
-                v.lower_in_zone = bool(m.get("isLowerInExpansionZone"))
-                v.oi = D(m["openInterest"]) if m.get("openInterest") else None
-                v.oi_cap = D(m["openInterestCapNotional"]) if m.get("openInterestCapNotional") else None
+                if m.get("openInterest"):
+                    v.oi = D(m["openInterest"])
+                # REST names it openInterestCapNotional, the channel openInterestCap ("present only while a cap is
+                # active"), so no field means no cap
+                cap = m.get("openInterestCapNotional") or m.get("openInterestCap")
+                v.oi_cap = D(cap) if cap else None
                 v.last_funding_h = float(m.get("fundingRate") or 0)
+
+        def a_attrs(c: dict[str, Any], recv: int) -> None:
+            for m in (c or {}).get("entries") or []:
+                if isinstance(m, dict):
+                    base = canonical_base(Venue.ARCUS, m.get("marketDisplayName", ""))
+                    if base in self.bases:
+                        a_session(base, m)
 
         def l_book(base: str, sync: Any, res: Any, recv: int, snapshot: bool, m: Any) -> None:
             self.hub.view(Venue.LIGHTER_RH, base).book_ts_us = recv
@@ -349,6 +386,7 @@ class BotRunner:
         aw.on("oracle", a_oracle)
         aw.on("predicted_funding", a_pf)
         aw.on("markets", a_markets)
+        aw.on("market_attrs", a_attrs)
         lw.on("book", l_book)
         lw.on("trades", l_trades)
         lw.on("market_stats", l_stats)
@@ -529,7 +567,16 @@ class BotRunner:
                 if eng is not None:
                     await eng.on_fill(f, now_us())
 
-        await asyncio.gather(updates(), fills())
+        async def funding() -> None:
+            """Funding payments (Arcus `funding` channel) into the PnL the stops read; each one counted once."""
+            stream = getattr(ad, "funding", None)
+            if stream is None:
+                return
+            async for fp in stream():
+                if self.state.on_funding(fp.venue, fp.base, fp.ts_us, fp.rate_h, fp.position_size, fp.payment):
+                    self.ledger.on_funding(fp.venue, fp.base, fp.payment)
+
+        await asyncio.gather(updates(), fills(), funding())
 
     async def _heartbeat(self) -> None:
         import orjson

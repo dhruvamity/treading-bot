@@ -14,15 +14,16 @@ from decimal import Decimal
 from typing import Any, Literal
 
 from bot.common.decimal import D
-from bot.common.errors import OrderRejected, VenueError
+from bot.common.errors import OrderRejected, RateLimited, VenueError
 from bot.common.logging import Log
 from bot.venues.arcus import signing as sg
-from bot.venues.arcus.models import parse_fill, parse_order, parse_position
+from bot.venues.arcus.models import parse_fill, parse_funding_payment, parse_order, parse_position
 from bot.venues.arcus.rest import ArcusRest
 from bot.venues.arcus.ws import ArcusWS
 from bot.venues.base import (
     TIF,
     Fill,
+    FundingPayment,
     Market,
     OrderRequest,
     OrderState,
@@ -49,7 +50,8 @@ class ArcusAdapter:
     venue = Venue.ARCUS
 
     def __init__(self, rest: ArcusRest, ws: ArcusWS | None, *, address: str, account_index: int,
-                 markets: dict[str, Market], good_til_days: int = 35, modify_echo_client_id: bool = False) -> None:
+                 markets: dict[str, Market], good_til_days: int = 35, modify_echo_client_id: bool = False,
+                 use_modify: bool = False) -> None:
         self.rest = rest
         self.ws = ws
         self.address = address
@@ -58,9 +60,17 @@ class ArcusAdapter:
         self._by_id = {m.venue_market_id: m.base for m in markets.values()}
         self.good_til_days = good_til_days
         self.modify_echo_client_id = modify_echo_client_id
+        # Requotes go out as cancel + place, not modifyOrder. The first live run with modifies (2026-09-25, QQQ) had
+        # every one rejected (10,604 x CannotModifyImmutableFieldTif, ~110 x ORDER_NOT_FOUND_FOR_MODIFY) though it
+        # echoed the resting order's ALO time-in-force as the docs ask; the docs also disagree on the modify identity
+        # (modify page: exactly one of orderId/clientId; authentication page: id always plus c echoed). Cancel and
+        # place both work live, and Arcus runs every price-changing modify as cancel + replace anyway, so no queue
+        # priority is lost. Turn this on only after `bot selftest --testnet --allow-funded` shows modifies land.
+        self.use_modify = use_modify
         self._live: dict[str, _Live] = {}
         self._orders_q: asyncio.Queue[OrderState] = asyncio.Queue()
         self._fills_q: asyncio.Queue[Fill] = asyncio.Queue()
+        self._funding_q: asyncio.Queue[FundingPayment] = asyncio.Queue()
         self._pool: dict[str, dict[str, Any]] = {}
         self._last_pool_poll = 0.0
         self.errors = 0
@@ -72,9 +82,10 @@ class ArcusAdapter:
         if self.ws is not None:
             self.ws.on("orders", self._on_orders)
             self.ws.on("userFills", self._on_fills)
+            self.ws.on("funding", self._on_funding)
             self.ws.on("degraded", self._on_degraded)
             await self.ws.subscribe_account(self.address, self.account_index, ("orders", "userFills", "positions",
-                                                                               "account"))
+                                                                               "account", "funding"))
             self.ws.start()
             await self.ws.ws.wait_connected()
         await self.poll_rate_limit()
@@ -134,7 +145,8 @@ class ArcusAdapter:
                 out += [await self._reject_local(r, e.reason) for r in chunk_reqs]
                 continue
             except VenueError as e:
-                if not e.retryable:  # 4xx / auth / geo: the request was not accepted, so nothing can be resting
+                # 4xx / auth / geo, and a 429 (the limiter refuses before the handler runs): nothing can be resting
+                if not e.retryable or isinstance(e, RateLimited):
                     for r in chunk_reqs:
                         await self._reject_local(r, type(e).__name__)
                 raise  # retryable (5xx / transmission): may have landed; reconciliation by clientId decides
@@ -232,11 +244,44 @@ class ArcusAdapter:
         return self._pool
 
     # ---------------------------------------------------------------- streams
-    async def _on_orders(self, contents: Any, recv_us: int, frame: dict[str, Any]) -> None:
-        rows = contents.get("orders") if isinstance(contents, dict) else contents
+    @staticmethod
+    def order_rows(contents: Any, live: dict[str, Any] | None = None) -> list[dict[str, Any]]:
+        """The order rows in an `orders` channel frame (docs: api-reference/channels#orders; shapes checked live):
+        - a streaming update is ONE order object per frame (`contents` has `orderId`);
+        - the subscribe snapshot is {isSnapshot, lastSequenceId, openOrders: [...], recentClosedOrders: [...]}.
+          Open orders are applied as they are; recently closed ones only for orders this adapter still thinks live
+          (they end what a disconnect hid). Never treat `recentClosedOrders` as working orders;
+        - older shapes: a list of orders, or {"orders": [...] or {...}}.
+        Reading only the last shape dropped every live update: no order was ever acknowledged (2026-09-25)."""
+        if isinstance(contents, list):
+            return [o for o in contents if isinstance(o, dict)]
+        if not isinstance(contents, dict):
+            return []
+        if "orderId" in contents:
+            return [contents]
+        if "openOrders" in contents or "recentClosedOrders" in contents:
+            closed = [o for o in contents.get("recentClosedOrders") or []
+                      if isinstance(o, dict) and live is not None and o.get("clientId") in live]
+            return [o for o in contents.get("openOrders") or [] if isinstance(o, dict)] + closed
+        rows = contents.get("orders")
         if isinstance(rows, dict):
             rows = list(rows.values())
-        for o in rows or []:
+        return [o for o in rows or [] if isinstance(o, dict)]
+
+    @staticmethod
+    def fill_rows(contents: Any) -> list[dict[str, Any]]:
+        """Fill rows in a `userFills` frame: {"isSnapshot", "fills": [...]} (seen live), a list, or one fill object
+        (the docs' streaming example)."""
+        if isinstance(contents, list):
+            return [f for f in contents if isinstance(f, dict)]
+        if not isinstance(contents, dict):
+            return []
+        if "tradeId" in contents:
+            return [contents]
+        return [f for f in contents.get("fills") or [] if isinstance(f, dict)]
+
+    async def _on_orders(self, contents: Any, recv_us: int, frame: dict[str, Any]) -> None:
+        for o in self.order_rows(contents, self._live):
             if not isinstance(o, dict) or "orderId" not in o:
                 continue
             st = parse_order(o, self._by_id, recv_us)
@@ -249,12 +294,32 @@ class ArcusAdapter:
             await self._orders_q.put(st)
 
     async def _on_fills(self, contents: Any, recv_us: int, frame: dict[str, Any]) -> None:
-        rows = contents.get("fills") if isinstance(contents, dict) else contents
-        if frame.get("type") == "subscribed":
+        if frame.get("type") == "subscribed" or (isinstance(contents, dict) and contents.get("isSnapshot")):
             return  # snapshot of historical fills: reconciliation reads them via REST, not as new fills
-        for f in rows or []:
-            if isinstance(f, dict) and "tradeId" in f:
+        for f in self.fill_rows(contents):
+            if "tradeId" in f:
                 await self._fills_q.put(parse_fill(f, self._by_id))
+
+    async def _on_funding(self, contents: Any, recv_us: int, frame: dict[str, Any]) -> None:
+        """Funding payments (docs: account/funding): the snapshot replays up to 100 past ones (skipped: the state's
+        funding table and the account's equity already hold them); live updates are one payment per market."""
+        if frame.get("type") == "subscribed" or (isinstance(contents, dict) and contents.get("isSnapshot")):
+            return
+        if isinstance(contents, dict) and "payment" in contents:
+            rows: list[Any] = [contents]
+        elif isinstance(contents, list):
+            rows = contents
+        elif isinstance(contents, dict):
+            rows = list(contents.get("fundingPayments") or contents.get("funding") or [])
+        else:
+            rows = []
+        for f in rows:
+            if isinstance(f, dict) and "payment" in f and "marketId" in f and "time" in f:
+                await self._funding_q.put(parse_funding_payment(f, self._by_id))
+
+    async def funding(self) -> AsyncIterator[FundingPayment]:
+        while True:
+            yield await self._funding_q.get()
 
     async def order_updates(self) -> AsyncIterator[OrderState]:
         while True:

@@ -410,7 +410,9 @@ class SessionEngine:
             cap = 30 if v is Venue.LIGHTER_RH else 40
             params = PlanParams(min_ticks=min_ticks, tol_ticks=tol, size_frac=req.min_size_frac if req else 0.2,
                                 max_open_per_market=cap, allow_places=mode is not BudgetMode.CANCELS_ONLY,
-                                allow_modifies=mode is not BudgetMode.CANCELS_ONLY)
+                                allow_modifies=mode is not BudgetMode.CANCELS_ONLY,
+                                # a venue that cannot modify reliably requotes with cancel + place (ArcusAdapter)
+                                allow_modify=bool(getattr(self.om.adapters.get(v), "use_modify", True)))
             res = await self.om.sync(v, m, desired, bbo, params, why=out.reason or "strategy")
             self.stats.actions += len(res.actions)
             self.stats.rejects += len(res.rejected)

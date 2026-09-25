@@ -139,15 +139,25 @@ async def run_selftest(adapter: Any, public_rest: Any, *, market: Market, funded
             await asyncio.sleep(settle_s)
             await drain()
             oid = placed[0].venue_order_id if placed else None
-            if c1 in ad.live_orders() and oid:
+            resting = [o for o in await ad.rest.open_orders(ad.address, ad.account_index)
+                       if o.get("clientId") == c1] if oid else []
+            if resting:
+                # A modify only counts when the book shows the new price: an accepted request, or a "business"
+                # reject, proved nothing (live 2026-09-25: every modify refused, selftest said PASS).
                 await _do(res, "modify (one tick lower)", ad.modify(c1, px - market.tick_size, size))
-            elif oid:  # already rejected (unfunded): the modify is still signed and checked, then not found
-                f = ad._fields(OrderRequest(Venue.ARCUS, market.base, Side.BUY, px - market.tick_size, size,
-                                            TIF.POST_ONLY, client_id=c1), market, ad._good_til())
-                await _do(res, "modify (one tick lower)", ad.rest.modify_order(ad.account_index, f, order_id=oid,
-                                                                             client_id=None))
+                await asyncio.sleep(settle_s)
+                now_px = [Decimal(str(o["price"])) for o in await ad.rest.open_orders(ad.address, ad.account_index)
+                          if o.get("clientId") == c1]
+                last = res.steps[-1]
+                if now_px and now_px[0] == px - market.tick_size and last.level == "PASS":
+                    res.steps[-1] = Step(last.name, "PASS", f"the order now rests at {now_px[0]}")
+                else:
+                    res.steps[-1] = Step(last.name, "FAIL", f"not applied: the order rests at "
+                                         f"{now_px[0] if now_px else 'nothing'} ({last.detail[:120]})")
             else:
-                res.steps.append(Step("modify (one tick lower)", "SKIP", "no order id came back to modify"))
+                res.steps.append(Step("modify (one tick lower)", "SKIP",
+                                      "no resting order to modify (unfunded?): a modify can only be proven on a "
+                                      "resting order; run with --allow-funded on a funded account or on testnet"))
             await asyncio.sleep(settle_s / 2)
             await _do(res, "place (batch of 2)", ad.place([
                 OrderRequest(Venue.ARCUS, market.base, Side.BUY, px - 2 * market.tick_size, size, TIF.POST_ONLY,

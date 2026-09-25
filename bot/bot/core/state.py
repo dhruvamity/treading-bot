@@ -224,9 +224,12 @@ class StateStore:
             venue.value, base, str(size), str(entry or 0), "", now_us()))
 
     def on_funding(self, venue: Venue, base: str, ts_us: int, rate_h: Decimal, position: Decimal,
-                   payment: Decimal) -> None:
-        self._exec("INSERT OR IGNORE INTO funding VALUES (?,?,?,?,?,?)",
-                   (venue.value, base, ts_us, str(rate_h), str(position), str(payment)))
+                   payment: Decimal) -> bool:
+        """Record one funding payment; False when it was already recorded (a replay), so the ledger counts it once."""
+        with self._lock:
+            cur = self._db.execute("INSERT OR IGNORE INTO funding VALUES (?,?,?,?,?,?)",
+                                   (venue.value, base, ts_us, str(rate_h), str(position), str(payment)))
+            return cur.rowcount > 0
 
     # ---------------------------------------------------------------- points (S4 study)
     def add_points(self, venue: str, week: str, points: float) -> None:
