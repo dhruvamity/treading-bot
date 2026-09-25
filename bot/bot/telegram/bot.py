@@ -27,6 +27,7 @@ from typing import Any
 from bot.common import settings
 from bot.common.logging import Log, redact_str
 from bot.core.balances import BalanceLog
+from bot.telegram import dashboard
 from bot.telegram.api import Keyboard, TelegramAPI, TelegramError, split_html
 from bot.telegram.control import MODES, Control
 from bot.telegram.views import (
@@ -35,6 +36,7 @@ from bot.telegram.views import (
     balance_text,
     candidate_lines,
     confirm_keyboard,
+    dashboard_keyboard,
     menu_keyboard,
     orders_text,
     pick_keyboard,
@@ -56,6 +58,7 @@ VENUES = ("arcus", "lighter_rh")
 ALIASES = {"scout": "top3", "pilot": "openpositions", "report": "yesterdayreport", "pause": "pauseneworders",
            "resume": "resumeaftersl", "flatten": "closeall"}
 CONFIRM_TTL_S = 120
+DASH_FILE = "telegram_dashboard.json"   # the live /dashboard message: {chat_id, message_id, since}
 
 
 @dataclass
@@ -96,6 +99,7 @@ class TelegramBot:
         self.pilot_offset = -1
         self.username = ""
         self._tasks: set[asyncio.Task[Any]] = set()
+        self._dash_account: dict[str, Any] | None = None   # the dashboard's own account read (when the bot has none)
 
     # ------------------------------------------------------------------ plumbing
     def authorized(self, chat_id: int, user_id: int | None) -> bool:
@@ -140,7 +144,7 @@ class TelegramBot:
         await self.api.send(self.owner_chat_id, "🤖 <b>Control bot online</b>"
                             + (" (read-only)" if self.read_only else "") + "\n\n" + status_text(views),
                             keyboard=menu_keyboard(), silent=True)
-        await asyncio.gather(self._poll_loop(), self._watch_loop())
+        await asyncio.gather(self._poll_loop(), self._watch_loop(), self._dashboard_loop())
 
     async def _poll_loop(self) -> None:
         offset: int | None = None
@@ -181,6 +185,9 @@ class TelegramBot:
                 text += "\n\n" + candidate_lines(top)
                 await self.api.send(self.owner_chat_id, text, keyboard=pick_keyboard(top),
                                     silent=e.get("kind") == "offer")
+            elif e.get("kind") == "deployed":
+                await self.api.send(self.owner_chat_id, text, keyboard=[[("📺 Live dashboard", "dashboard")]],
+                                    silent=True)
             else:
                 await self.api.send(self.owner_chat_id, text, silent=e.get("kind") not in ("failed", "paused"))
 
@@ -229,7 +236,8 @@ class TelegramBot:
                 "pnl": self.c_pnl, "positions": self.c_positions, "orders": self.c_orders,
                 "sessions": self.c_sessions, "logs": self.c_logs, "yesterdayreport": self.c_report,
                 "ping": self.c_ping, "alerts": self.c_alerts, "mute": self.c_mute, "unmute": self.c_unmute,
-                "ok": self.c_ok, "no": self.c_no, "balance": self.c_balance, "settings": self.c_settings}
+                "ok": self.c_ok, "no": self.c_no, "balance": self.c_balance, "settings": self.c_settings,
+                "dashboard": self.c_dashboard, "dashstop": self.c_dashstop, "dashresume": self.c_dashresume}
         write = {"pauseneworders": self.c_pause, "unpause": self.c_unpause, "stop": self.c_stop,
                  "resumeaftersl": self.c_resume, "run": self.c_run, "doctor": self.c_doctor,
                  "cancelall": self.c_cancelall, "closeall": self.c_flatten, "pick": self.c_pick,
@@ -387,6 +395,111 @@ class TelegramBot:
         p.touch()
         await self.reply(ctx, "🔎 The scout starts a scan within 15 s (if it runs on this machine). /top3 shows the "
                          "result when it is done.")
+
+    # ------------------------------------------------------------------ live dashboard
+    def _dash_load(self) -> dict[str, Any] | None:
+        try:
+            d: dict[str, Any] = json.loads((self._state_dir() / DASH_FILE).read_text())
+            return d if d.get("chat_id") and d.get("message_id") else None
+        except (OSError, ValueError):
+            return None
+
+    def _dash_save(self, d: dict[str, Any] | None) -> None:
+        p = self._state_dir() / DASH_FILE
+        if d is None:
+            with contextlib.suppress(OSError):
+                p.unlink()
+            return
+        p.parent.mkdir(parents=True, exist_ok=True)
+        p.write_text(json.dumps(d))
+
+    async def _dash_text(self, frame: str = "live") -> str:
+        """The dashboard now. When the running bot publishes no fresh account reading (no live bot, or one started
+        before it did), read the account here, at most once a minute."""
+        idx = self.pilot.account_index if self.pilot is not None else 0
+        now = time.time()
+        d = dashboard.collect(self.control, now=now, account=idx, extra=self._dash_account)
+        stale = d.account_age_s is None or d.account_age_s > dashboard.FRESH_S
+        own_age = now - self._dash_account["ts"] if self._dash_account else None
+        if d.mode != "paper" and stale and (own_age is None or own_age > dashboard.FRESH_S):
+            from bot.common.config import load_arcus_config
+            from bot.scout.capital import account_snapshot
+
+            try:
+                url = load_arcus_config(Path(self.control.root) / "config" / "venues" / "arcus.yaml").rest.mainnet
+                snap = await account_snapshot(url, idx)
+            except Exception as e:   # the dashboard shows the last reading instead
+                log.warning("dashboard_account_failed", reason=type(e).__name__)
+                snap = None
+            if snap and snap["equity"] > 0:
+                self._dash_account = {**snap, "ts": now, "from": "the dashboard"}
+                d = dashboard.collect(self.control, now=now, account=idx, extra=self._dash_account)
+        return dashboard.render(d, html=True, frame=frame)
+
+    async def _dash_retire(self, st: dict[str, Any], note: str = "") -> None:
+        """Last frame on a dashboard message that stops updating, with a button to start it again; unpin it."""
+        try:
+            text = await self._dash_text("stopped")
+            await self.api.edit(st["chat_id"], st["message_id"], text + (f"\n{note}" if note else ""),
+                                keyboard=dashboard_keyboard(live=False))
+        except TelegramError:
+            pass   # deleted or too old: nothing to retire
+        with contextlib.suppress(TelegramError):
+            await self.api.call("unpinChatMessage", chat_id=st["chat_id"], message_id=st["message_id"])
+
+    async def _dash_start(self, chat_id: int, message_id: int) -> None:
+        old = self._dash_load()
+        self._dash_save({"chat_id": chat_id, "message_id": message_id, "since": time.time()})
+        if old and (old["chat_id"], old["message_id"]) != (chat_id, message_id):
+            await self._dash_retire(old, "<i>A newer dashboard is below.</i>")
+        with contextlib.suppress(TelegramError):   # pinned: stays at the top of the chat while alerts arrive below
+            await self.api.call("pinChatMessage", chat_id=chat_id, message_id=message_id, disable_notification=True)
+
+    async def c_dashboard(self, ctx: Ctx, args: list[str]) -> None:
+        """A new message that updates itself every 10 s (and replaces any older live dashboard)."""
+        msg = await self.api.send(ctx.chat_id, await self._dash_text(), keyboard=dashboard_keyboard(), silent=True)
+        if msg and msg.get("message_id"):
+            await self._dash_start(ctx.chat_id, int(msg["message_id"]))
+
+    async def c_dashresume(self, ctx: Ctx, args: list[str]) -> None:
+        """▶️ on a stopped dashboard: that same message goes live again."""
+        if ctx.message_id is None:
+            await self.c_dashboard(ctx, args)
+            return
+        await self.api.edit(ctx.chat_id, ctx.message_id, await self._dash_text(), keyboard=dashboard_keyboard())
+        await self._dash_start(ctx.chat_id, ctx.message_id)
+
+    async def c_dashstop(self, ctx: Ctx, args: list[str]) -> None:
+        st = self._dash_load()
+        if st is None and ctx.message_id is not None:
+            st = {"chat_id": ctx.chat_id, "message_id": ctx.message_id}
+        self._dash_save(None)
+        if st is not None:
+            await self._dash_retire(st)
+
+    async def _dashboard_loop(self) -> None:
+        """Edit the live dashboard every 10 s, on the 10 s marks."""
+        while True:
+            await asyncio.sleep(dashboard.REFRESH_S - time.time() % dashboard.REFRESH_S)
+            try:
+                await self._dash_tick()
+            except Exception as e:   # a bad frame must not end the loop
+                log.error("dashboard_failed", reason=type(e).__name__, data={"err": str(e)[:300]}, exc_info=True)
+
+    async def _dash_tick(self) -> None:
+        """One refresh of the live dashboard. A message that was deleted ends it."""
+        st = self._dash_load()
+        if st is None:
+            return
+        try:
+            await self.api.edit(st["chat_id"], st["message_id"], await self._dash_text(), keyboard=dashboard_keyboard())
+        except TelegramError as e:
+            if "not found" not in str(e) and "can't be edited" not in str(e):
+                log.warning("dashboard_edit_failed", reason=str(e)[:200])
+                return
+            log.info("dashboard_gone", reason=str(e)[:120])
+            if self._dash_load() == st:
+                self._dash_save(None)
 
     async def c_menu(self, ctx: Ctx, args: list[str]) -> None:
         await self.reply(ctx, "☰ <b>Menu</b> — pick an action, or /help for every command.", menu_keyboard())

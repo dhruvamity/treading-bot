@@ -123,3 +123,96 @@ def test_max_size_clip() -> None:
     m = replace(M, max_size=D("0.0002"))
     acts = plan([d(Side.BUY, MID - 10, "b0", q=50_000)], [], m, BBOTicks(MID - 1, MID + 1), PlanParams())
     assert acts[0].desired is not None and acts[0].desired.size_quantums == 20_000
+
+
+# ------------------------------------------------------------------------------------------------ sync races
+class _Race:
+    """An adapter whose venue update for an order is handled BEFORE the request returns (what a fast venue does:
+    the WebSocket ack beats the REST response). The first live QQQ run froze every order this way."""
+
+    def __init__(self, state: object) -> None:
+        self.state = state
+        self.om: object = None
+        self.sent: list[str] = []
+
+    def _ack(self, cid: str, status: object) -> None:
+        from bot.venues.base import OrderState, OrderStatus
+
+        o = self.state.orders[cid]  # type: ignore[attr-defined]
+        st = OrderState(cid, "v" + cid, status, D(0), None, None, 0, Venue.ARCUS, o.req.base, o.req.side,  # type: ignore[arg-type]
+                        o.req.price, o.req.size, o.req.tif, o.req.reduce_only, o.req.tag)
+        assert isinstance(status, OrderStatus)
+        self.state.on_update(st)  # type: ignore[attr-defined]
+        self.om.on_order_update(cid, True)  # type: ignore[attr-defined]
+
+    async def place(self, reqs: list[object]) -> list[object]:
+        from bot.venues.base import OrderStatus
+
+        for r in reqs:
+            self.sent.append(f"place {r.client_id}")  # type: ignore[attr-defined]
+            self._ack(r.client_id, OrderStatus.OPEN)  # type: ignore[attr-defined]
+        return []
+
+    async def modify(self, cid: str, price: D, size: D) -> None:
+        self.sent.append(f"modify {cid}")
+
+    async def cancel(self, ids: list[str]) -> None:
+        from bot.venues.base import OrderStatus
+
+        for c in ids:
+            self.sent.append(f"cancel {c}")
+            self._ack(c, OrderStatus.CANCELED)
+
+
+def _om(tmp_path: object, adapter_cls: type = _Race) -> tuple[object, object, list[int]]:
+    from pathlib import Path
+    from types import SimpleNamespace
+
+    from bot.common.ids import ClientIdFactory
+    from bot.core.order_manager import OrderManager
+    from bot.core.state import StateStore
+
+    state = StateStore(Path(str(tmp_path)) / "s.sqlite")
+    ad = adapter_cls(state)
+    clock = [1_000_000_000]
+    gov = SimpleNamespace(for_arcus=lambda ai: SimpleNamespace(record_actions=lambda n, k: None))
+    om = OrderManager(adapters={Venue.ARCUS: ad}, state=state, risk=SimpleNamespace(check=lambda *a, **k: None),
+                      governor=gov, decisions=SimpleNamespace(record=lambda *a, **k: None),  # type: ignore[arg-type]
+                      ids={Venue.ARCUS: ClientIdFactory("mid", 1)}, now_fn=lambda: clock[0])
+    ad.om = om
+    return om, ad, clock
+
+
+async def test_an_ack_that_beats_the_response_does_not_freeze_the_order(tmp_path: object) -> None:
+    om, ad, _ = _om(tmp_path)
+    bbo = BBOTicks(MID - 1, MID + 1)
+    p = PlanParams(tol_ticks=2)
+    await om.sync(Venue.ARCUS, M, [d(Side.BUY, MID - 20, "b0")], bbo, p, why="t")  # type: ignore[attr-defined]
+    cid = ad.sent[0].split()[1]  # type: ignore[attr-defined]
+    await om.sync(Venue.ARCUS, M, [d(Side.BUY, MID - 80, "b0")], bbo, p, why="t")  # type: ignore[attr-defined]
+    assert ad.sent[-1] == f"modify {cid}"  # type: ignore[attr-defined]  # requoted, not left resting
+    await om.sync(Venue.ARCUS, M, [], bbo, p, why="t")  # type: ignore[attr-defined]
+    assert ad.sent[-1] == f"cancel {cid}"  # type: ignore[attr-defined]  # and cancelled when no longer wanted
+
+
+class _Silent(_Race):
+    """A venue that never sends an update for the order (a lost ack)."""
+
+    async def place(self, reqs: list[object]) -> list[object]:
+        self.sent += [f"place {r.client_id}" for r in reqs]  # type: ignore[attr-defined]
+        return []
+
+
+async def test_a_lost_ack_frees_the_order_after_the_limit(tmp_path: object) -> None:
+    from bot.core.order_manager import IN_FLIGHT_MAX_S
+
+    om, ad, clock = _om(tmp_path, _Silent)
+    bbo = BBOTicks(MID - 1, MID + 1)
+    p = PlanParams(tol_ticks=2)
+    await om.sync(Venue.ARCUS, M, [d(Side.BUY, MID - 20, "b0")], bbo, p, why="t")  # type: ignore[attr-defined]
+    cid = ad.sent[0].split()[1]  # type: ignore[attr-defined]
+    await om.sync(Venue.ARCUS, M, [d(Side.BUY, MID - 80, "b0")], bbo, p, why="t")  # type: ignore[attr-defined]
+    assert ad.sent == [f"place {cid}"]  # type: ignore[attr-defined]  # still in flight: left alone
+    clock[0] += int((IN_FLIGHT_MAX_S + 1) * 1e6)
+    await om.sync(Venue.ARCUS, M, [d(Side.BUY, MID - 80, "b0")], bbo, p, why="t")  # type: ignore[attr-defined]
+    assert ad.sent[-1] == f"modify {cid}"  # type: ignore[attr-defined]

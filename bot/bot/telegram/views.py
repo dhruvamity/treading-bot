@@ -183,6 +183,7 @@ HELP = """<b>What you can do</b> (or tap /menu)
 /openpositions — what is running, today vs its backtest; Close & stop
 
 <b>Check</b>
+/dashboard — live screen, updates itself every 10 s: today's volume and PnL, your capital's profit or loss
 /status — running? today's profit, fills, volume
 /balance — money in the account, deposits vs trading profit, change over time
 /positions · /orders — what you hold, what is waiting on the book
@@ -208,6 +209,7 @@ work."""
 
 # Telegram's "/" list: the everyday commands (everything in HELP still works)
 COMMANDS: list[tuple[str, str]] = [
+    ("dashboard", "Live screen: today's volume, PnL, capital (every 10 s)"),
     ("top3", "Best 3 setups now, with Run buttons"), ("openpositions", "What is running and how it is doing"),
     ("status", "Running? today's profit, fills, volume"), ("balance", "Money in the account and its history"),
     ("positions", "What you hold"), ("orders", "Orders waiting on the book"),
@@ -222,6 +224,7 @@ COMMANDS: list[tuple[str, str]] = [
 
 def menu_keyboard() -> Keyboard:
     return [
+        [("📺 Live dashboard", "dashboard")],
         [("🏆 Top 3 now", "top3"), ("▶️ Running now", "openpositions")],
         [("📊 Status", "status"), ("💰 Balance", "balance")],
         [("📦 Positions", "positions"), ("📋 Orders", "orders")],
@@ -234,6 +237,11 @@ def menu_keyboard() -> Keyboard:
 
 def refresh_keyboard(cmd: str) -> Keyboard:
     return [[("🔄 Refresh", cmd), ("☰ Menu", "menu")]]
+
+
+def dashboard_keyboard(live: bool = True) -> Keyboard:
+    # only dashboard buttons: any other button would turn this message into its own reply
+    return [[("⏹ Stop updating", "dashstop")]] if live else [[("▶️ Update live again", "dashresume")]]
 
 
 def confirm_keyboard(pid: str) -> Keyboard:

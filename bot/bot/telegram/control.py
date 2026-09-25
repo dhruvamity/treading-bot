@@ -34,7 +34,8 @@ class ModeView:
     pid: int | None
     snapshot: dict[str, Any] | None
     snapshot_age_s: float | None
-    today: dict[str, dict[str, float]] = field(default_factory=dict)   # market -> fills, volume, maker_volume, fees
+    # market -> fills, volume, maker_volume, fees, first_us (the day's first fill)
+    today: dict[str, dict[str, float]] = field(default_factory=dict)
     open_orders: list[dict[str, str]] = field(default_factory=list)
     positions: dict[str, str] = field(default_factory=dict)
     paused: dict[str, str] = field(default_factory=dict)
@@ -137,9 +138,11 @@ class Control:
             row = con.execute("SELECT v FROM kv WHERE k='resume'").fetchone()
             v.resume_pending = bool(row and row[0])
             t0 = _today_start_us(now)
-            for base, price, size, fee, maker in con.execute(
-                    "SELECT base, price, size, fee, is_maker FROM fills WHERE ts_us >= ?", (t0,)):
-                d = v.today.setdefault(base, {"fills": 0.0, "volume": 0.0, "maker_volume": 0.0, "fees": 0.0})
+            for ts, base, price, size, fee, maker in con.execute(
+                    "SELECT ts_us, base, price, size, fee, is_maker FROM fills WHERE ts_us >= ?", (t0,)):
+                d = v.today.setdefault(base, {"fills": 0.0, "volume": 0.0, "maker_volume": 0.0, "fees": 0.0,
+                                              "first_us": float(ts)})
+                d["first_us"] = min(d["first_us"], float(ts))
                 n = float(price) * float(size)
                 d["fills"] += 1
                 d["volume"] += n

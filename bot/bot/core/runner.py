@@ -142,6 +142,7 @@ class BotRunner:
         self._paused_raw: str | None = None
         self._closing_since: float | None = None
         self.balances = BalanceLog(Path(app.state_dir) / "balances.jsonl")   # live equity every 5 min
+        self.account: dict[str, dict[str, Any]] = {}   # venue -> last balance read (every 15 s), for the dashboard
 
     # ================================================================ build
     async def build(self) -> None:
@@ -461,6 +462,7 @@ class BotRunner:
                              "rejects": e.stats.rejects, "errors": e.stats.errors})
         return {"ts_us": now, "mode": self.mode.value, "started_us": self.started_us, "markets": markets,
                 "sessions": sessions,
+                "account": self.account,
                 "risk": {"all_stopped": self.risk.all_stopped,
                          "safe_mode": {k.value: v for k, v in self.risk.safe_mode.items()},
                          "venue_stopped_day": {k.value: v for k, v in self.risk.venue_stopped_day.items()},
@@ -483,6 +485,10 @@ class BotRunner:
                     last_acct = time.monotonic()
                     for v, ad in self.adapters.items():
                         bal = await ad.balances()
+                        self.account[v.value] = {
+                            "equity": float(bal.get("equity") or 0), "free": float(bal.get("free_collateral") or 0),
+                            "net_deposits": float(bal["net_deposits"]) if bal.get("net_deposits") is not None else None,
+                            "ts_us": now}
                         for e in self.engines:
                             e.set_account(v, D(bal.get("equity", 0)), D(bal.get("free_collateral", 0)))
                         if self.mode is RunMode.LIVE and v is Venue.ARCUS and bal.get("equity"):

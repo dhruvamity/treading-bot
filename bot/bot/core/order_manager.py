@@ -4,7 +4,9 @@
 - match live orders to desired ones by (side, tag); keep a live order if its price is within the requote
   tolerance (max(min_ticks, frac x half-spread) x governor multiplier) and size within 20%;
 - otherwise modify (Arcus/Lighter both support it) or cancel + place;
-- unmatched live orders are cancelled; in-flight (unacked) orders are never touched twice;
+- unmatched live orders are cancelled; in-flight (unacked) orders are never touched twice. An order counts as in
+  flight from just before its request is sent until the venue's first update for it, or IN_FLIGHT_MAX_S at most: on a
+  fast venue the update can arrive before the request returns, and an order must never stay frozen because of that;
 - a post-only order that would cross the CURRENT BBO is re-priced one tick behind the touch, never sent crossing;
 - venue minimums (Arcus $5 opening, Lighter $10 + min base), max size and per-market open-order caps are enforced;
 - actions are ordered cancels -> modifies -> places.
@@ -12,6 +14,7 @@
 
 from __future__ import annotations
 
+import time
 from collections.abc import Callable, Sequence
 from dataclasses import dataclass, field
 from decimal import Decimal
@@ -23,6 +26,7 @@ from bot.common.logging import DecisionLog, Log
 from bot.venues.base import TIF, Market, OrderRequest, Side, Venue
 
 log = Log("order_manager")
+IN_FLIGHT_MAX_S = 5.0   # an order with no venue update after this long is managed again (a lost ack must not freeze it)
 
 
 @dataclass(frozen=True, slots=True)
@@ -179,11 +183,30 @@ class OrderManager:
         self.ids = ids
         self.session = session
         self.account_index = account_index or {}
-        self.in_flight: set[str] = set()
+        self.in_flight: dict[str, int] = {}   # client id -> when its request was sent (us)
         self.now_fn = now_fn
 
     def _dec(self, kind: str, reason: str, **kw: object) -> None:
         self.decisions.record(kind, reason, ts_us=self.now_fn() if self.now_fn else None, **kw)  # type: ignore[arg-type]
+
+    def _now(self) -> int:
+        t = self.now_fn() if self.now_fn else 0
+        return t or int(time.time() * 1e6)
+
+    def is_in_flight(self, client_id: str) -> bool:
+        sent = self.in_flight.get(client_id)
+        if sent is None:
+            return False
+        if self._now() - sent > IN_FLIGHT_MAX_S * 1e6:
+            self.in_flight.pop(client_id, None)
+            log.warning("in_flight_expired", data={"client_id": client_id})
+            return False
+        return True
+
+    def _mark(self, client_ids: Sequence[str]) -> None:
+        now = self._now()
+        for c in client_ids:
+            self.in_flight[c] = now
 
     def new_client_id(self, venue: Venue) -> str:
         f = self.ids[venue]
@@ -197,7 +220,7 @@ class OrderManager:
                 continue
             rem = o.remaining
             out.append(LiveOrderView(r.client_id, r.side, int(r.price / m.tick_size), int(rem / m.step_size), r.tag,
-                                     r.reduce_only, r.client_id in self.in_flight))
+                                     r.reduce_only, self.is_in_flight(r.client_id)))
         return out
 
     def to_request(self, venue: Venue, m: Market, d: DesiredOrder, reason: str, client_id: str | None = None) -> OrderRequest:
@@ -222,11 +245,13 @@ class OrderManager:
             for a in cancels:
                 self._dec("cancel", f"{why}: {a.reason}", venue=venue.value, market=m.base,
                                       session=self.session, client_id=a.client_id)
+            self._mark(ids)   # before sending: the venue's update may arrive before the request returns
             try:
                 await adapter.cancel(ids)  # type: ignore[attr-defined]
-                self.in_flight.update(ids)
                 res.actions += cancels
             except Exception as e:
+                for c in ids:
+                    self.in_flight.pop(c, None)   # not accepted: try again on the next tick
                 res.errors.append(f"cancel: {e}")
         for a in modifies:
             assert a.desired is not None and a.client_id is not None
@@ -261,9 +286,9 @@ class OrderManager:
                                   client_id=req.client_id, side=req.side.value, price=str(req.price),
                                   size=str(req.size), tif=req.tif.value)
         if reqs:
+            self._mark([r.client_id for r in reqs])   # before sending, as for cancels
             try:
                 await adapter.place(reqs)  # type: ignore[attr-defined]
-                self.in_flight.update(r.client_id for r in reqs)
                 res.actions += places
             except Exception as e:
                 res.errors.append(f"place: {e}")
@@ -287,7 +312,7 @@ class OrderManager:
 
     def on_order_update(self, client_id: str, terminal_or_acked: bool) -> None:
         if terminal_or_acked:
-            self.in_flight.discard(client_id)
+            self.in_flight.pop(client_id, None)
 
     async def hedge(self, req: OrderRequest, m: Market) -> None:
         """IOC hedge (DN): passes risk checks, never post-only, logged with its reason."""

@@ -60,6 +60,8 @@ async def test_runner_publishes_status_and_honours_pause_and_stop(tmp_path: Path
     assert time.monotonic() - t0 < 30, "stop flag ignored"
     snap = json.loads(runner.state.kv_get("status") or "{}")
     assert snap["mode"] == "paper" and snap["markets"] and snap["sessions"], snap
+    acct = snap["account"]["arcus"]            # the account reading the dashboard shows (paper: its start money)
+    assert acct["equity"] > 0 and acct["net_deposits"] > 0 and acct["ts_us"] > 0, acct
     assert snap["risk"]["operator_paused"] == ["BTC"]
     btc = next(m for m in snap["markets"] if m["market"] == "BTC")
     assert btc["quoting"] is False and "paused by operator" in btc["why"]

@@ -137,6 +137,7 @@ names `/scout`, `/pilot`, `/report`, `/pause`, `/resume`, `/flatten` still work)
 |---|---|
 | `/top3` | The 3 best setups right now (backtested), with Run buttons: Paper = confirm button, LIVE = `BOT_PILOT_LIVE=1`, doctor, typed code |
 | `/openpositions` | What is deployed, today's PnL vs the backtest, the last check; Close & stop |
+| `/dashboard` | One message edited every 10 s and pinned (state/telegram_dashboard.json, survives a restart): today's volume and pace, today's PnL from the balance history (deposits excluded), position, equity and capital P/L. ⏹ / ▶️ buttons; `bot dashboard` is the terminal version |
 | `/status`, `/pnl`, `/positions`, `/orders` | What is running, today's PnL, fills and maker volume; PnL by market since start |
 | `/sessions`, `/logs [n]`, `/yesterdayreport [date]` | Session files; latest decisions; the daily report (yesterday by default) |
 | `/pauseneworders [MARKET]` | Quoting stops within a second; reduce-only exit orders keep working off any position. Persists across restarts. |
