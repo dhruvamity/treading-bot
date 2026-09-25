@@ -17,6 +17,7 @@ from __future__ import annotations
 import argparse
 import asyncio
 import contextlib
+import datetime as dt
 import json
 import os
 import sys
@@ -584,11 +585,15 @@ def cmd_farm(a: argparse.Namespace) -> None:
         end = max(ends) if ends else int(time.time() * 1e6)
         out = run_dir / "variants" / a.label if a.label else run_dir
         out.mkdir(parents=True, exist_ok=True)
-        rows = analyze_window(out, tape, run_dir / "scout" / "markets.json",
-                              int(st["started_us"]) + int(st.get("warmup_s", 1800)) * 1_000_000, end,
+        start = int(st["started_us"]) + int(st.get("warmup_s", 1800)) * 1_000_000
+        if a.start:   # e.g. the paper engines' start, to compare over the same window
+            start = int(dt.datetime.fromisoformat(a.start).replace(tzinfo=dt.UTC).timestamp() * 1_000_000)
+        pct = dict(zip(("position_stop", "daily_stop", "kill"), a.pct, strict=True)) if a.pct else None
+        rows = analyze_window(out, tape, run_dir / "scout" / "markets.json", start, end,
                               capital=a.capital or float(st["capital"]), workers=workers,
                               max_markets=a.max_markets, only=a.markets or None,
-                              sim={"front_of_queue": True} if a.front_of_queue else None)
+                              sim={"front_of_queue": True} if a.front_of_queue else None,
+                              settings=a.settings or None, pct=pct, leverages=a.leverages or None)
         print(f"{len(rows)} paper runs; see {out / 'LEADERBOARD.md'}")
     elif a.action == "crosscheck":
         from bot.farm.crosscheck import prepare
@@ -844,6 +849,11 @@ def build_parser() -> argparse.ArgumentParser:
     sp.add_argument("--setting", default="touch 0bp", help="paperrun: the scout menu setting (as /run takes it)")
     sp.add_argument("--leverage", default="max", help="paperrun: max or a number")
     sp.add_argument("--loop", type=float, default=0, help="engines: collect and commit every N minutes")
+    sp.add_argument("--settings", nargs="*", help="analyze: only these farm menu settings")
+    sp.add_argument("--pct", nargs=3, type=float, metavar=("POSITION", "DAY", "KILL"),
+                    help="analyze: stops in %% of capital (default the farm's 5 10 20; the scout's are 1 2 10)")
+    sp.add_argument("--leverages", nargs="*", type=float, help="analyze: leverages below the maximum to test")
+    sp.add_argument("--start", help="analyze: window start, UTC ISO time (default: the run's start + warm-up)")
     sp.add_argument("--regimes", nargs="*", help="synth: chop, trend, mixed (bot/farm/synth.py REGIMES)")
     sp.add_argument("--informed", nargs="*", type=float,
                     help="synth: toxicity levels, the informed taker's cost threshold in bps (default 2.5 and 0.5)")

@@ -180,7 +180,46 @@ rebates) at more than its cost, about $30–130 per $1M on Arcus. For volume at 
 
 ## 7. Live paper run on Arcus
 
-_Pending._ Two things stopped it in this cloud session:
+**Running since 2026-09-25 21:47 UTC, until 12:47 UTC** (`runs/20260925-2147/`), after the network was opened. Two
+parts, on the same live Arcus data:
+
+- **The farm** records all 59 perps and replays the whole menu every hour ([LEADERBOARD.md](runs/20260925-2147/LEADERBOARD.md)).
+- **12 real paper engines** run `touch 0bp` at each market's maximum leverage, the session Telegram's
+  `/run MARKET touch 0bp max` deploys ($100, stops 1% / 2% / 10%), with the paper venue's queue-aware fills
+  ([paper-engine/SUMMARY.md](runs/20260925-2147/paper-engine/SUMMARY.md)).
+
+### Interim, after 1.6 hours (23:28 UTC): `touch 0bp` at maximum leverage
+
+| Market | Lev | Engine volume | Engine net | Engine CPM | Daily stop hit | Replay, same window and stops: volume / net |
+|---|---|---|---|---|---|---|
+| SPY | 50x | $42,106 | −$3.25 | $77 | yes | $16,505 / −$0.60 |
+| SOL | 20x | $33,030 | −$2.50 | $76 | yes | $27,712 / +$0.62 |
+| BTC | 20x | $19,648 | −$2.49 | $127 | yes | $25,766 / −$2.53 (stopped) |
+| ETH | 20x | $18,817 | −$2.62 | $139 | yes | $7,176 / −$2.71 (stopped) |
+| QQQ | 25x | $8,818 | **+$0.41** | −$46 | no | $4,599 / +$0.57 |
+| NVDA | 20x | $8,433 | **+$0.78** | −$92 | no | $825 / −$0.50 |
+| ZEC | 10x | $6,219 | −$2.12 | $340 | yes | $4,890 / −$2.35 (stopped) |
+| HYPE | 10x | $3,534 | −$2.45 | $693 | yes | $5,138 / −$2.14 (stopped) |
+| GLD | 25x | $2,036 | −$1.87 | $917 | no | $5 / −$0.00 |
+| NEAR | 10x | $1,769 | −$2.02 | $1,144 | yes | $1,982 / −$3.21 (stopped) |
+| SLV | 25x | $1,000 | −$0.52 | $517 | no | $1,998 / −$1.60 |
+| TSLA | 10x | $0 | $0 | — | no | no trades (US market closed) |
+
+What the first hours show (early and noisy; updated hourly):
+
+1. **At maximum leverage, `touch 0bp` burns the 2% daily stop within 1–2 hours on crypto and SPY.** 7 of 12
+   engines stopped for the UTC day. Their cost per $1M ($76–140 on the busy markets) is in line with the owner's
+   recorded $30–130, but at 120–260× turnover an hour that is about 2% of the capital an hour. This is the formula of
+   section 2 happening live.
+2. **QQQ and NVDA are in profit**, the quiet stock/index perps the earlier evidence favoured.
+3. **The replay and the engines agree on direction** where both traded a lot (BTC, ETH, ZEC, HYPE and NEAR stopped
+   out in both, with similar losses). **They disagree on how much fills at the touch.** The engine's queue-aware
+   paper venue gave 2.5× the replay's volume on SPY and 10× on NVDA. The replay only counts prints through our
+   price, which is the lower bound, and the gap is largest for exactly this setting.
+
+### Why it did not run earlier in this session
+
+Two things had stopped it:
 
 1. **The network policy denies every exchange host** (`api.arcus.xyz`, `api.hyperliquid.xyz`, Binance, Bybit, OKX
    and others: the proxy answers 403). Checked every hour from 17:10 to 19:58 UTC on 2026-09-25.

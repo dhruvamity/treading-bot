@@ -208,7 +208,8 @@ def run_market(args: dict[str, Any]) -> dict[str, Any]:
     order_max = max(bucket(liq["p99"]) or 0.0, bucket(2 * 1.2 * vmin) or 0.0) or None
     rows, series, fills = [], {}, []
     for lev, lev_off in leverages_for(meta, tuple(args.get("leverages", FARM_LEVERAGES))):
-        risk = Risk.for_capital(capital, lev, lev_off, pct=FARM_PCT, order_max=order_max,
+        risk = Risk.for_capital(capital, lev, lev_off, pct=Pct(**args["pct"]) if args.get("pct") else FARM_PCT,
+                                order_max=order_max,
                                 min_capital=round(min_capital(vmin, lev_off), 2))
         if capital < risk.min_capital_usd:
             continue

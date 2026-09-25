@@ -144,7 +144,9 @@ def choose_markets(store: TapeStore, meta: dict[str, dict[str, Any]], start: int
 
 def analyze_window(run_dir: Path, tape_root: Path, markets_json: Path, start: int, end: int, *, capital: float,
                    workers: int, max_markets: int = 20, only: list[str] | None = None,
-                   hour_tag: str | None = None, sim: dict[str, Any] | None = None) -> list[dict[str, Any]]:
+                   hour_tag: str | None = None, sim: dict[str, Any] | None = None,
+                   settings: list[str] | None = None, pct: dict[str, float] | None = None,
+                   leverages: list[float] | None = None) -> list[dict[str, Any]]:
     """Paper-trade the menu on [start, end) for the chosen markets; write results, candles, series, leaderboard."""
     import bot.farm.policies  # noqa: F401
 
@@ -154,7 +156,9 @@ def analyze_window(run_dir: Path, tape_root: Path, markets_json: Path, start: in
     alive = max(act, key=lambda m: act[m]) if act else "BTC-USD"
     jobs = [{"tape_root": str(tape_root), "market": m, "start": start, "end": end, "meta": meta[m],
              "out": str(run_dir), "capital": capital, "alive_market": "BTC-USD" if "BTC-USD" in act else alive,
-             "warmup_s": WARMUP_S, "sim": sim or {}} for m in markets]
+             "warmup_s": WARMUP_S, "sim": sim or {},
+             **({"settings": settings} if settings else {}), **({"pct": pct} if pct else {}),
+             **({"leverages": leverages} if leverages else {})} for m in markets]
     rows: list[dict[str, Any]] = []
     notes = {}
     t0 = time.time()
