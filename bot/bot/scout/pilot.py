@@ -22,6 +22,7 @@ GO review records that capital (kv "sizing_ok"), so the sizes grow with the acco
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import json
 import os
 import time
@@ -288,6 +289,11 @@ class Pilot:
             await asyncio.sleep(3)
             if self.control.is_running(mode):
                 self.event("deployed", f"Running {describe(c)} in {mode.upper()} (approved by {by}).")
+                if live:   # the live bot's independent watchdog (bot/ops.py); best effort, never blocks the deploy
+                    with contextlib.suppress(Exception):
+                        from bot import ops
+
+                        ops.start(self.control.app, "guardian")
                 return f"running in {mode}"
         tail = self.control.log_tail(rec["log"])
         self.event("failed", f"{c['market']} did not start. Last log lines:\n{tail[-1500:]}")

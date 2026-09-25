@@ -13,6 +13,9 @@ Operations for the VPS deployment (`/opt/bot`, systemd). Commands assume `cd /op
 | `bot-guardian` | Separate process watching the LIVE heartbeat (`state/heartbeat.live`). If it is silent for 60 s, or the drawdown limit is hit, it cancels all orders and alerts. | yes (read + cancel) |
 | `bot-telegram` | Telegram control bot (§9): status, pause/stop/run, cancel-all/flatten and live alerts on your phone. | yes, for cancel-all / flatten / doctor |
 
+Without systemd (e.g. a Mac as the server): `bot up` starts the scout, the Telegram bot and, while a live bot runs,
+the guardian in the background; `bot status` shows everything on one screen; `bot down [--all]` stops them.
+
 ```bash
 sudo systemctl status bot-recorder bot bot-guardian
 journalctl -u bot -f -o cat | jq -c 'select(.level!="DEBUG")'     # JSON logs; secrets are redacted
@@ -145,6 +148,9 @@ names `/scout`, `/pilot`, `/report`, `/pause`, `/resume`, `/flatten` still work)
 | `/cancelall [venue]` | Confirm button: cancels every open order on the account (live/testnet only) |
 | `/closeall [venue] [taker]` | One-time code: cancels everything, then closes every position reduce-only (maker, or IOC with `taker`) |
 | `/alerts`, `/mute [min]`, `/unmute` | Alert settings |
+| `/balance` | The account read now and logged (state/balances.jsonl): equity, deposits vs trading PnL, 1/7/30-day change |
+| `/settings`, `/set NAME VALUE` | Change capital, trade_share, max_capital, the stops, scan_every, scan_workers (Confirm button; `/set NAME default` undoes) |
+| `/scannow` | Ask the scout for a scan now |
 
 **Alerts it sends by itself** (critical ones ignore `/mute`)
 
@@ -171,13 +177,15 @@ Run these from this folder (`bot/`, where `docker-compose.yml` is), one at a tim
 | `docker compose logs -f scout` | What it is doing |
 | `cat data/scout/report.txt` | The latest ranking: best per market, then each market at its max leverage |
 | `ls data/scout/reports/` | The last scan of each UTC day |
-| `docker compose down` | Stop; it finishes the scan in progress and writes out its buffers |
+| `docker compose down` | Stop; a scan in progress stops at once (finished days stay cached) and the recorder writes out its buffers |
 
 Don't paste trailing `# comments` into zsh: by default it passes them to the command as arguments
 ("no such service: #").
 
 - Seed it with the history from the laptop first: copy `data/scout/tape/` (a few hundred MB) into the same place.
-- `SCOUT_WORKERS=8 docker compose up -d` uses more cores for the scans.
+- Scans use all cores but one by default, at the lowest CPU priority, and one core while a trading bot runs on the
+  same machine; `SCOUT_WORKERS=2 docker compose up -d` caps them. Each 30-minute scan re-runs the last 24 h only for
+  the setups that pass on their full days; the full search over every setup runs once a day.
 - `SCOUT_CAPITAL=500 docker compose up -d` ranks for a $500 account. The default, `auto`, reads the subaccount's
   equity, but the container has no keys, so it uses the $100 paper capital (`sizing` in `config/app.yaml`).
 - Disk: about 0.2-0.5 GB/day with depth recording, about 0.1 GB/day without. Recording pauses by itself under 5 GB free;

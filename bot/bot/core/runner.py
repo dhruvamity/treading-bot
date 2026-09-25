@@ -32,6 +32,7 @@ from bot.common.ratelimit import TokenBucket
 from bot.common.secrets import SecretStore
 from bot.common.time import now_us, utc_date_str
 from bot.core.alerts import Alerter, Level
+from bot.core.balances import BalanceLog
 from bot.core.budget import BudgetGovernor
 from bot.core.calendar import TradingCalendar
 from bot.core.creds import (
@@ -140,6 +141,7 @@ class BotRunner:
         self.started_us = now_us()
         self._paused_raw: str | None = None
         self._closing_since: float | None = None
+        self.balances = BalanceLog(Path(app.state_dir) / "balances.jsonl")   # live equity every 5 min
 
     # ================================================================ build
     async def build(self) -> None:
@@ -176,6 +178,7 @@ class BotRunner:
                                 ledger=self.ledger, decisions=self.decisions, calendar=self.calendar,
                                 session_num=(now_us() // 60_000_000 + i) % 10**7, alerter=self.alerter,
                                 risk_limits=self.app.risk)
+            eng.settings_dir = Path(self.app.state_dir)   # the owner's Telegram settings, read at each re-size
             self.engines.append(eng)
         self.by_session = {e.sid: e for e in self.engines}
         log.info("runner_built", data={"mode": self.mode.value, "mainnet_writes": self.writes_mainnet,
@@ -453,7 +456,8 @@ class BotRunner:
             start = e.day_start_equity.get(day)
             sessions.append({"session": e.sid, "market": e.base, "venue": e.venue.value, "mode": e.last_mode,
                              "pnl": str(pnl), "day_pnl": str(e.capital + pnl - start) if start is not None else None,
-                             "capital": str(e.capital), "ticks": e.stats.ticks, "actions": e.stats.actions,
+                             "capital": str(e.capital), "size_capital": str(e.size_capital),
+                             "ticks": e.stats.ticks, "actions": e.stats.actions,
                              "rejects": e.stats.rejects, "errors": e.stats.errors})
         return {"ts_us": now, "mode": self.mode.value, "started_us": self.started_us, "markets": markets,
                 "sessions": sessions,
@@ -481,6 +485,13 @@ class BotRunner:
                         bal = await ad.balances()
                         for e in self.engines:
                             e.set_account(v, D(bal.get("equity", 0)), D(bal.get("free_collateral", 0)))
+                        if self.mode is RunMode.LIVE and v is Venue.ARCUS and bal.get("equity"):
+                            self.balances.record(source="bot", account_index=arcus_account_index(self.sessions),
+                                                 equity=float(bal["equity"]),
+                                                 free=float(bal.get("free_collateral") or 0),
+                                                 net_deposits=float(bal["net_deposits"])
+                                                 if bal.get("net_deposits") is not None else None,
+                                                 min_interval_s=300)
                 for e in self.engines:
                     await e.tick(now)
             except LiveLockError:

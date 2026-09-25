@@ -452,12 +452,17 @@ class SignalPolicy(Policy):
         self.entry_px: float | None = None
         self.entry_t = 0
         self.cool_until = 0
+        self._ind_min = -1                                  # the indicators only change when a minute closes
+        self._ind: tuple[float | None, float | None, float | None] = (None, None, None)
 
     def quotes(self, b: Book) -> tuple[list[tuple[int, float, float, str]], float]:
         c, tick = self.c, self.m.tick
-        closes = list(b.closes)
-        r = rsi(closes, 14)
-        e20, e60 = ema(closes[-120:], 20), ema(closes[-180:], 60)
+        minute = b.t // (60 * S)
+        if minute != self._ind_min:   # closes are appended on minute boundaries only
+            closes = list(b.closes)
+            self._ind = (rsi(closes, 14), ema(closes[-120:], 20), ema(closes[-180:], 60))
+            self._ind_min = minute
+        r, e20, e60 = self._ind
         sig_px = b.mid * b.sigma_1h
         flat = e20 is not None and e60 is not None and sig_px > 0 and abs(e20 - e60) < 1.0 * sig_px
         if b.pos != 0:
@@ -511,6 +516,7 @@ class Window:
         rth: callable(seconds array) -> bool array, True while the underlying's session is open (RWA perps);
         None = always in session (crypto)."""
         b, tr = tape.bbo, tape.trades
+        self._cols: tuple[list[Any], ...] | None = None
         self.market, self.start_us, self.end_us = tape.market, start_us, end_us
         first = int(b["ts"][0]) if len(b["ts"]) else start_us
         w0 = max(start_us - warmup_s * S, first)
@@ -571,6 +577,16 @@ class Window:
         cs = np.cumsum((move | wide).astype(np.int64))
         self.paused = (cs - np.concatenate([np.zeros(min(30, n), np.int64), cs[:-30]])) > 0
 
+    def columns(self) -> tuple[list[Any], ...]:
+        """The per-second arrays as Python lists: t, ok, mid, bid, ask, age, paused, rth, bid size, ask size, trade
+        index. Reading one element at a time is several times faster from a list than from a numpy array, and the
+        simulation reads them every second; built once and shared by every config run on this window."""
+        if self._cols is None:
+            self._cols = (self.t.tolist(), self.ok.tolist(), self.mid.tolist(), self.bid.tolist(), self.ask.tolist(),
+                          self.age.tolist(), self.paused.tolist(), self.rth.tolist(), self.bsz.tolist(),
+                          self.asz.tolist(), self.trade_idx.tolist())
+        return self._cols
+
     def bbo_at(self, ts: int) -> tuple[float, float]:
         k = int(np.searchsorted(self.bbo["ts"], ts, side="right")) - 1
         if k < 0:
@@ -590,12 +606,16 @@ class Sim:
             res.notes.append("no data")
             return res
         policy = POLICIES[cfg.mode](cfg, risk, mi)
+        T, OK, MID, BID, ASK, AGE, PAUSED, RTH, BSZ, ASZ, TIDX = w.columns()
         lat = int(sp.latency_ms * 1000)
         tick = mi.tick
         tts, tpx, tsz, tbuy, tseq = w.tts, w.tpx, w.tsz, w.tbuy, w.tseq
         ntr = len(tts)
         orders: list[Order] = []
-        st: dict[str, Any] = {"pos": 0.0, "entry": None, "cash": risk.capital_usd}
+        # "ov" counts changes to the live orders (fills, cancels, placements): with it, a second whose order diff
+        # would change nothing (same wanted quotes, book, budget mode, orders) skips the diff (see `sync`)
+        st: dict[str, Any] = {"pos": 0.0, "entry": None, "cash": risk.capital_usd, "ov": 0, "purge_at": NEVER}
+        last_fp: tuple[Any, ...] | None = None
         start_eq: float | None = None
         peak_eq = -math.inf
         day_eq: float | None = None
@@ -676,10 +696,10 @@ class Sim:
             qty = abs(qty_signed)
             if (side == SELL and pos > 0) or (side == BUY and pos < 0):
                 qty = min(qty, abs(pos))
-            if qty <= 0 or not w.ok[i]:
+            if qty <= 0 or not OK[i]:
                 return
-            px = float(w.ask[i] if side == BUY else w.bid[i])
-            shown = float(w.asz[i] if side == BUY else w.bsz[i])
+            px = ASK[i] if side == BUY else BID[i]
+            shown = ASZ[i] if side == BUY else BSZ[i]
             extra = max(0.0, qty - shown) / qty if shown > 0 else 1.0
             book_fill(side, px * (1 + side * sp.slip_bps * BP * extra), qty, False, t, "taker")
 
@@ -687,16 +707,21 @@ class Sim:
             for o in orders:
                 if o.cancel_at == NEVER:
                     o.cancel_at = t + lat
+                    st["ov"] += 1
+                    st["purge_at"] = min(st["purge_at"], o.cancel_at)
 
-        def sync(desired: list[tuple[int, float, float, str, bool]], i: int, t: int, half_ticks: float) -> None:
+        def sync(desired: list[tuple[int, float, float, str, bool]], i: int, t: int, half_ticks: float) -> bool:
             """The order manager's diff (bot/core/order_manager.py plan): keep a live order within the requote
-            tolerance and 20% of size, else replace it; the old one keeps filling until its cancel takes effect."""
+            tolerance and 20% of size, else replace it; the old one keeps filling until its cancel takes effect.
+            Returns whether it did anything (a cancel, a placement, or a rejected placement): a diff that did
+            nothing does nothing again until one of its inputs changes, which lets the caller skip it."""
+            acted = False
             mult = bud["mult"]
             tol = max(2.0, 0.25 * half_ticks) * (1.0 if math.isinf(mult) else mult)
             active = [o for o in orders if o.cancel_at == NEVER]
             used: set[int] = set()
             new: list[Order] = []
-            bb, ba = float(w.bid[i]), float(w.ask[i])
+            bb, ba = BID[i], ASK[i]
             arr_bid = arr_ask = math.nan
             for side, px, qty, tag, ro in desired:
                 if qty <= 0 or px <= 0:
@@ -715,10 +740,12 @@ class Sim:
                     if math.isinf(mult):
                         continue  # cancels only: leave it
                     m.cancel_at = t + lat
+                    acted = True
                 elif math.isinf(mult):
                     continue
                 if math.isnan(arr_bid):
                     arr_bid, arr_ask = w.bbo_at(t + lat)
+                acted = True
                 if (side == BUY and px >= arr_ask) or (side == SELL and px <= arr_bid):
                     res.rejects += 1
                     continue
@@ -727,13 +754,18 @@ class Sim:
             for o in active:
                 if id(o) not in used:
                     o.cancel_at = t + lat
+                    acted = True
             orders[:] = [o for o in orders if o.cancel_at > t] + new
+            st["purge_at"] = min((o.cancel_at for o in orders), default=NEVER)
+            if acted:
+                st["ov"] += 1
+            return acted
 
         for i in range(w.n):
-            t = int(w.t[i])
-            ok = bool(w.ok[i])
+            t = T[i]
+            ok = OK[i]
             if ok:
-                mid = float(w.mid[i])
+                mid = MID[i]
                 if t % (60 * S) == 0:
                     if last_min_mid:
                         r = math.log(mid / last_min_mid)
@@ -752,17 +784,20 @@ class Sim:
                     start_eq = eq
                 if tail_eq0 is None and t >= tail_from:
                     tail_eq0 = eq
-                res.min_equity_delta = min(res.min_equity_delta, eq - start_eq)
+                if eq - start_eq < res.min_equity_delta:
+                    res.min_equity_delta = eq - start_eq
                 d = t // (86_400 * S)
                 if d != day:
                     day, day_eq = d, eq
                     if state == "day_stopped":
                         state = "normal"
-                policy.scale = 1.0 if w.rth[i] else off_scale
+                policy.scale = 1.0 if RTH[i] else off_scale
                 notional = abs(pos) * mid
-                res.max_pos_usd = max(res.max_pos_usd, notional)
+                if notional > res.max_pos_usd:
+                    res.max_pos_usd = notional
                 # ---- risk rules
-                peak_eq = max(peak_eq, eq)
+                if eq > peak_eq:
+                    peak_eq = eq
                 if state != "killed" and notional > 0 and mi.mmf > 0 and eq <= notional * mi.mmf:
                     state, res.killed, res.liquidated = "killed", True, True   # the venue closes it all
                     cancel_all(t)
@@ -807,16 +842,16 @@ class Sim:
                         exit_since = t
                     else:
                         side = SELL if st["pos"] > 0 else BUY
-                        desired = [(side, float(w.ask[i] if side == SELL else w.bid[i]), abs(st["pos"]), "exit",
+                        desired = [(side, ASK[i] if side == SELL else BID[i], abs(st["pos"]), "exit",
                                     True)]
                 elif state == "normal":
-                    if w.age[i] <= sp.gap_s and not (cfg.safety and w.paused[i]):
-                        key = (w.bid[i], w.ask[i], st["pos"], policy.scale)
+                    if AGE[i] <= sp.gap_s and not (cfg.safety and PAUSED[i]):
+                        key = (BID[i], ASK[i], st["pos"], policy.scale)
                         if cfg.mode == "mid" and key == cache_key:
                             q, tq = cache_q, 0.0
                         else:
                             sig = math.sqrt(vol_1m) if vol_1m else 0.0
-                            b = Book(t, float(w.bid[i]), float(w.ask[i]), mid, st["pos"], st["entry"], sig,
+                            b = Book(t, BID[i], ASK[i], mid, st["pos"], st["entry"], sig,
                                      sig * math.sqrt(60), closes)
                             q, tq = policy.quotes(b)
                             cache_key, cache_q = key, q
@@ -827,7 +862,7 @@ class Sim:
                             taker(tq, i, t)
                     elif st["pos"] != 0:  # paused or stale: the strategy's exit book
                         side = SELL if st["pos"] > 0 else BUY
-                        desired = [(side, float(w.ask[i] if side == SELL else w.bid[i]), abs(st["pos"]), "exit",
+                        desired = [(side, ASK[i] if side == SELL else BID[i], abs(st["pos"]), "exit",
                                     True)]
                 if desired or orders:
                     bud["mult"] = budget_mode(t)
@@ -835,11 +870,17 @@ class Sim:
                         res.frozen_s += 1
                     elif bud["mult"] > 1:
                         res.wide_s += 1
-                    sync(desired, i, t, half_ticks)
+                    fp = (tuple(desired), BID[i], ASK[i], bud["mult"], half_ticks, st["ov"])
+                    if fp == last_fp:   # the diff did nothing last time and nothing it reads has changed
+                        if t >= st["purge_at"]:
+                            orders[:] = [o for o in orders if o.cancel_at > t]
+                            st["purge_at"] = min((o.cancel_at for o in orders), default=NEVER)
+                    else:
+                        last_fp = None if sync(desired, i, t, half_ticks) else fp
             # ---- trades during this second fill resting orders. One taker order (one sequenceNumber) is handled
             # whole: with our order resting at p, the taker would have used up the better levels and the queue at p
             # first, so only what it printed strictly beyond p could have filled us.
-            k, b_ = int(w.trade_idx[i]), int(w.trade_idx[i + 1])
+            k, b_ = TIDX[i], TIDX[i + 1]
             if k == b_ or not orders:
                 continue
             while k < b_:
@@ -870,6 +911,7 @@ class Sim:
                         if fq <= mi.step / 2:
                             continue
                         o.qty -= fq
+                        st["ov"] += 1
                         taken += fq
                         book_fill(o.side, o.px, fq, True, ts, o.tag)
                 k = j

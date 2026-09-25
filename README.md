@@ -18,6 +18,24 @@ It does three things:
 > estimates, not promises: markets change, and the backtest cannot see how your own orders change other traders'
 > behaviour. Nothing here is financial advice. Run in paper mode first, and only trade money you can afford to lose.
 
+### Quick start: the only commands you need
+
+From `treading-bot/bot` on the machine that runs the bot (after the one-time install in [3.2](#32-install)):
+
+| Terminal | What it does |
+|---|---|
+| `bot up` | Starts everything in the background: the scout (records and ranks), the Telegram bot, and the guardian while a live bot runs |
+| `bot status` | One screen: what runs, what is deployed, the last scan and its top 3, the balance |
+| `bot pilot approve 1` | Trades the scout's #1 setup in paper (add `--live` for real money) |
+| `bot pilot close` | Closes the position and stops trading |
+| `bot down` | Stops the scout and the Telegram bot (`bot down --all`: the trading bot too, position kept) |
+
+(`bot` is `.venv/bin/bot`; activate the venv with `source .venv/bin/activate`, or type the full path.)
+
+On your phone, send `/menu` for buttons, or: `/top3` (best setups, Run), `/openpositions` (what runs), `/status`,
+`/balance`, `/pauseneworders`, `/closeall`, `/settings` and `/set` (change capital, share of the balance, stops, scan
+interval without editing files). [Section 9](#9-the-telegram-bot) has them all.
+
 ---
 
 ## Contents
@@ -158,19 +176,23 @@ account, clock and region, and places no orders.
 ### 3.4 Start the scout (recording + backtests)
 
 ```bash
-mkdir -p logs && nohup .venv/bin/bot scout run >> logs/scout.out 2>&1 &
+.venv/bin/bot up
 ```
 
-- Its process id goes to `state/scout.pid`.
+- `bot up` starts the scout in the background (with the Telegram bot if it is set up); logs go to `logs/scout.out`,
+  its process id to `state/scout.pid`. `bot status` shows it, `bot down` stops it.
 - It connects to Arcus's public WebSocket, subscribes to every online perp and writes data every 5 minutes.
-- About 10 seconds after it starts, and then every 30 minutes, it backtests the whole menu on every market and writes
-  `data/scout/latest.json` and `data/scout/report.txt`.
+- About 10 seconds after it starts, and then every 30 minutes, it ranks every market and writes
+  `data/scout/latest.json` and `data/scout/report.txt`. It stays light enough to share a machine with the trading bot
+  ([11.2](#112-what-it-backtests-every-30-minutes)): the full search over all 3,204 setups runs once a day, and each
+  30-minute scan re-checks only the few that pass on their full days.
 - It backtests at **your capital**: before each scan it reads the subaccount's equity (with `ARCUS_ADDRESS` in `.env`;
   an unfunded account or no address means the $100 paper capital). `--capital 250` sizes for a fixed amount instead,
   e.g. for a deposit you have not made yet.
 - A market needs at least one **full day** of data (the recorder up for 20+ hours of a UTC day) before it can be
   ranked. The checks get more reliable as the history grows towards 7 days.
-- Stop it cleanly with `kill $(cat state/scout.pid)`: it finishes the current scan and writes out its buffers.
+- `bot down` stops it cleanly within seconds: a scan in progress stops (the days it finished stay cached) and the
+  recorder writes out its buffers.
 - To record and backtest 24/7 on another machine instead, see [section 11](#11-the-server-pc-what-runs-247).
 
 ### 3.5 Read the ranking
@@ -376,14 +398,26 @@ Nothing in the bot is tied to a fixed amount. Every size and stop is a share of 
 The capital is rounded **down** to a fixed series (…, 90, 100, 110, 125, 140, 160, …; about 20 steps per decade), so
 the backtest and the live bot size from exactly the same number and cached backtests stay valid while equity moves.
 
+**The scout's capital settles** (`state/scout_capital.json`): every new capital means backtesting the whole week
+again, so the scout keeps scanning at the capital it has while the balance stays within 25% of it, and moves at most
+once per UTC day when it leaves that band. A fixed amount, the first deposit (paper → a funded account), or a
+Telegram `/set` of a sizing setting applies at once. Every reading of the balance is kept
+([the balance history](#balance-history)).
+
 **How the live bot follows the account** (sessions written by the pilot have `sizing.follow_equity: true`):
 1. At start and at every 00:00 UTC it reads the equity and re-computes the order size, caps and dollar stops.
-2. It never sizes above **1.25×** the capital the setup was last backtested at. The scout scans at the account's
-   equity every 30 minutes, and every scan in which the running setup is still GO records that capital, so growth is
-   followed one validated step at a time. A deposit that doubles the account takes effect after the scout has
-   confirmed the setup at the new size.
-3. Losses shrink the sizes the same way (at the next 00:00 UTC), and the stops shrink with them.
-4. If the equity falls below the setup's **least capital**, it stops quoting and closes what is left.
+2. It never sizes above **1.25×** the capital the setup was last backtested at. Every scan in which the running
+   setup is still GO records the capital it used, so growth is followed one validated step at a time. A deposit that
+   doubles the account takes effect after the scout has confirmed the setup at the new size.
+3. Your Telegram settings (`trade_share`, `capital`, `max_capital`, the stops) apply at the same re-size.
+4. Losses shrink the sizes the same way (at the next 00:00 UTC), and the stops shrink with them.
+5. If the equity falls below the setup's **least capital**, it stops quoting and closes what is left.
+
+<a id="balance-history"></a>**The balance history** (`state/balances.jsonl`): the scout logs the account before every
+scan, the live bot every 5 minutes, and Telegram's `/balance` each time you ask. Each row has the time, the equity,
+the free collateral and Arcus's **net deposits** (deposits minus withdrawals), so trading profit (equity − net
+deposits) is never confused with money you moved in or out. `/balance` shows the latest reading with its 1-, 7- and
+30-day change; `bot status` shows the last one.
 
 **The floor: least capital.** The smallest order the bot places, the off-hours one on RWA perps, must stay at least
 1.2× the Arcus minimum order (max($5, minimum size × price)). So the least capital is 3 × minimum order ÷ off-hours
@@ -686,22 +720,57 @@ and holds no trading state of its own.
 
 ### 9.2 Commands
 
+Send `/menu` for buttons. Telegram's `/` list shows the everyday commands; the rest work too.
+
+**Every day**
+
 | Command | What it does |
 |---|---|
-| `/top3` | The 3 best setups right now, with sizes and backtest numbers, **Run** buttons, the closest that failed, and each market at maximum leverage |
+| `/top3` | The 3 best setups right now, with sizes and backtest numbers and **Run** buttons (Paper / LIVE) |
 | `/openpositions` | What is deployed: state, today's PnL vs the backtest, the last check, **Close & stop** |
 | `/status` | Is it running, today's PnL, fills, volume |
-| `/pnl` | PnL by market |
-| `/positions`, `/orders`, `/sessions` | Open positions, open orders, configured sessions |
-| `/logs [n]` | The latest decisions (why it did what it did) |
+| `/balance` | The account now (read live and logged): equity, free collateral, deposits vs trading PnL, the 1/7/30-day change, and the capital the scout and the bot size for |
+| `/positions`, `/orders` | What you hold; what is waiting on the book |
 | `/yesterdayreport [YYYY-MM-DD]` | The daily report: yesterday's, or the date given |
-| `/pauseneworders [MARKET]`, `/unpause [MARKET]` | Stop / restart placing new orders; exits keep working |
+
+**Control and emergencies**
+
+| Command | What it does |
+|---|---|
+| `/pauseneworders [MARKET]`, `/unpause [MARKET]` | Stop / restart placing new orders; orders that close a position keep working |
 | `/stop` | Shut the bot down: quotes cancelled, positions kept (Confirm button) |
-| `/resumeaftersl` | Trade again after a safety stop (safe mode, the kill or the daily stop) once you know why (Confirm button) |
-| `/run <session> [live]` | Start a session. Paper: Confirm button. Live: `live_enabled: true`, a passing `doctor`, then a typed code |
-| `/doctor <session>` | Live readiness check (reads only) |
+| `/resumeaftersl` | Trade again after a safety stop (safe mode, the kill or the daily stop), once you know why (Confirm button) |
 | `/cancelall [arcus\|lighter_rh]` | Cancel every open order on the account (Confirm button) |
 | `/closeall [arcus\|lighter_rh] [taker]` | Close every position, maker or with IOC (typed code) |
+
+**Settings** (no file editing, no restart)
+
+| Command | What it does |
+|---|---|
+| `/settings` | Each setting, its value, what it does and when a change applies |
+| `/set <name> <value>` | Change one (Confirm button); `/set <name> default` undoes it |
+| `/scannow` | Scan now instead of waiting for the next one |
+
+| Setting | Values | What it changes |
+|---|---|---|
+| `capital` | `auto` or dollars | Money the bot sizes for: the account's balance, or a fixed amount (never more than the balance) |
+| `trade_share` | 1–100 (%) | Share of the balance to trade; the rest is left untouched |
+| `max_capital` | dollars or `none` | Never size for more than this |
+| `position_stop`, `daily_stop`, `kill` | % of the capital | The stops ([6.1](#61-the-stops-backtest-and-live)); must stay position ≤ daily ≤ kill. Changing them means a full re-backtest (slow, low priority) |
+| `scan_every` | 10–240 (minutes) | Time between scans |
+| `scan_workers` | `auto` or 1–32 | CPU cores a scan may use (always one while a bot runs on the machine) |
+
+The scout picks up a change at its next scan (a sizing change triggers one at once); the running bot at its next
+re-size (00:00 UTC, or when it restarts). Stored in `state/settings.json`. Switching live trading on stays a
+deliberate step in `.env` (`BOT_PILOT_LIVE=1`), not a Telegram setting.
+
+**More** (not in the `/` list)
+
+| Command | What it does |
+|---|---|
+| `/pnl` | PnL by market |
+| `/logs [n]` | The latest decisions (why it did what it did) |
+| `/sessions`, `/run <session> [live]`, `/doctor <session>` | Session files; start one (live needs `live_enabled: true`, a passing `doctor` and a typed code); the readiness check |
 | `/alerts`, `/mute [minutes]`, `/unmute` | Alert settings (fills: each, hourly summary, or off) |
 | `/menu`, `/help`, `/whoami` | Buttons, help, your ids |
 
@@ -733,8 +802,9 @@ within 2 minutes. If a bot is already running it first closes its position and s
 
 | Command | What |
 |---|---|
-| `bot scout run [--workers N] [--every-min M] [--depth] [--max-only] [--capital auto\|USD]` | Record everything and scan every M minutes (the daemon), at the account's equity or a fixed capital |
-| `bot scout scan [--markets …] [--max-only] [--capital auto\|USD]` | One scan now, printed as a table |
+| `bot up` / `bot down [--all]` / `bot status [--json]` | Start or stop the background services (scout, Telegram, guardian); one status screen |
+| `bot scout run [--workers auto\|N] [--every-min M] [--depth] [--max-only] [--capital auto\|USD]` | Record everything and scan every M minutes (the daemon; `bot up` runs it), at the account's equity or a fixed capital |
+| `bot scout scan [--markets …] [--max-only] [--capital auto\|USD] [--full]` | One scan now, printed as a table (`--full`: re-run the last 24 h for every setting) |
 | `bot scout limits [--markets …]` | Per market: the least capital it can run on, the order ceiling, and the capital it can fully use |
 | `bot scout import PATH` | One-off import of older recordings |
 | `bot pilot status` / `approve N [--live]` / `close` | See, deploy, or close the one deployment |
@@ -799,8 +869,11 @@ Each scan (the first one 10 s after start):
    `SCOUT_CAPITAL` (default `auto`: the Docker container has no keys, so that means the $100 paper capital; set
    `SCOUT_CAPITAL=500` to rank for a $500 account). With today's 58 markets that is 178
    market-leverage pairs and **3,204 backtests per window**.
-3. The windows are each of the last **7 full days** (computed once per day, then cached) and the **last 24 hours**
-   (re-run every scan). It also reads the **last hour** for the "now" checks.
+3. The windows are each of the last **7 full days** (computed once per day, then cached) and the **last 24 hours**.
+   The last 24 hours is re-run only for the setups that pass on their full days (about 3–6% of them, measured), and
+   for whatever is deployed: a setup that already fails on its full days cannot become GO, so re-running it would
+   change nothing. The picks are identical to re-running everything (`bot scout scan --full`), measured on 4 days of
+   September data. It also reads the **last hour** for the "now" checks.
 4. Applies the GO checks ([4.4](#44-go-checks)) and ranks by maker volume per day.
 5. Writes the results:
 
@@ -813,8 +886,12 @@ Each scan (the first one 10 s after start):
 | `data/scout/cache/` | The per-day backtest results |
 | `state/pilot_events.jsonl` | The top 3 each time they change (nothing is deployed on the server, so it only offers) |
 
-A scan takes a few minutes (80–240 s with 8 workers on a laptop in September 2026) and grows with the number of
-markets that have full days. It only uses the CPU during the scan.
+**How much CPU.** Measured on an Apple-silicon laptop, re-running everything took about 1,180 CPU-seconds per scan;
+the shortlist scan takes about 90 (12.7× less), and the simulator itself is 2× faster than before with identical
+results. So a 30-minute scan is under a minute of one core, plus the once-a-day search over the new day (roughly
+20 minutes of one core on an Intel MacBook). Scan workers run at the **lowest CPU priority** (nice 19, macOS
+background), and use **one** worker while a trading bot runs on the same machine (else all cores but one), so the
+bot never waits for the CPU. The recorder itself uses about 4% of one core.
 
 ### 11.3 Optional: the full-book research recorder
 
@@ -891,7 +968,7 @@ Hardware: 4 or more CPU cores, 4–8 GB of RAM, and disk for the length of the r
    | Command | Runs |
    |---|---|
    | `docker compose up -d --build` | The scout only (recommended) |
-   | `SCOUT_WORKERS=8 docker compose up -d --build` | The scout, with 8 scan workers instead of 6 (for 8+ cores) |
+   | `SCOUT_WORKERS=2 docker compose up -d --build` | The scout limited to 2 scan workers (default: all cores but one) |
    | `SCOUT_CAPITAL=500 docker compose up -d --build` | The scout, ranking for a $500 account instead of $100 |
    | `docker compose --profile research up -d --build` | The scout plus the research recorder ([11.3](#113-optional-the-full-book-research-recorder)) |
 
@@ -900,6 +977,14 @@ Hardware: 4 or more CPU cores, 4–8 GB of RAM, and disk for the length of the r
    ```bash
    docker compose --profile research stop recorder
    ```
+
+**If this machine also trades** (the live bot runs here too), skip Docker ([11.4](#114-what-the-server-does-not-do)):
+run `make install`, put `.env` in `treading-bot/bot`, then start everything with:
+```bash
+.venv/bin/bot up
+```
+It starts the scout, the Telegram bot and, while a live bot runs, the guardian, all in the background; `bot status`
+checks them and `bot down` stops them. They do not come back by themselves after a reboot: run `bot up` again.
 
 ### 11.6 Check on it
 

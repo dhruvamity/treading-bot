@@ -25,7 +25,7 @@ from dataclasses import dataclass
 from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
-    from bot.common.config import MMSession
+    from bot.common.config import MMSession, SizingCfg
 
 INV_BUFFER = 1.25    # inventory cap = capital x leverage / 1.25; order = cap / 2
 MIN_ORDER_X = 1.2    # every order at least 1.2x the venue minimum (bot/strategies/quoting.py)
@@ -102,9 +102,9 @@ def target_capital(equity: float, *, frac: float = 1.0, max_capital: float | Non
     return bucket(c)
 
 
-def apply(s: MMSession, capital: float) -> Sizes:
-    """Rewrite a session's dollar sizes and stops for `capital`, from its `sizing` recipe."""
-    z = s.sizing
+def apply(s: MMSession, capital: float, z: SizingCfg | None = None) -> Sizes:
+    """Rewrite a session's dollar sizes and stops for `capital`, from its `sizing` recipe (or `z`)."""
+    z = z or s.sizing
     assert z is not None
     pct = Pct(z.position_stop_pct, z.daily_stop_pct, z.kill_pct)
     out = sizes(capital, z.leverage, z.leverage_off, pct=pct, order_max=z.order_max_usd)
