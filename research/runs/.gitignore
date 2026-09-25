@@ -1,0 +1,11 @@
+# Live paper-engine homes: runtime state, logs and the symlinked shared config stay local; the collector commits
+# SUMMARY.md, summary.json, snapshots.jsonl, fills/ and each home's session file
+*/paper-engine/*/state/
+*/paper-engine/*/logs/
+*/paper-engine/*/data/
+*/paper-engine/*/reports/
+*/paper-engine/*/run.out
+*/paper-engine/*/smoke.out
+*/paper-engine/*/config/app.yaml
+*/paper-engine/*/config/venues
+*/paper-engine/*/config/calendars
