@@ -67,6 +67,18 @@ def test_volume_takes_a_known_cost_but_never_a_safety_fail() -> None:
     assert [c["market"] for c in P.top(scan_of(ROWS), "volume", 0.25)] == ["SPY-USD", "NVDA-USD", "QQQ-USD"]
 
 
+def test_max_volume_ignores_the_cost_but_never_a_safety_fail() -> None:
+    top = P.top(scan_of(ROWS), "max", 0.15)
+    # the most volume per market whatever it costs: NVDA ($0.22 per $1,000) is in, HOOD (kill) never is; GLD's
+    # last 24 h was not re-run (only settings within the budget are), which this list does not require
+    assert [c["market"] for c in top] == ["SPY-USD", "GLD-USD", "NVDA-USD"]
+    assert "hit the 10% kill" in P.verdict(ROWS[6], "max", 0.15) and P.verdict(ROWS[5], "max", 0.01) == []
+
+
+def test_the_owners_own_pick_is_never_judged() -> None:
+    assert P.verdict(ROWS[6], "manual", 0.15) == []   # even a kill in the backtest: the owner chose it
+
+
 def test_aggressive_only_lists_touch_settings() -> None:
     rows = [*ROWS, row("TSLA-USD", "deep 1bp", 10, vol=20000, pnl=-0.2)]     # cheap and big, but not aggressive
     top = P.top(scan_of(rows), "aggressive", 0.15)
@@ -171,7 +183,8 @@ def test_review_judges_a_deployment_by_its_own_list(tmp_path: Path) -> None:
     pilot.save(st)
     ev = pilot.review(scan_of(ROWS))                                    # loses a little, within budget: keep going
     assert pilot.state()["last_review"]["go"] is True and not pilot.state().get("paused_by_scout")
-    assert [e["kind"] for e in ev] == ["suggest"] and ev[0]["text"].startswith("SPY-USD")   # 1.6x the volume, same list
+    assert [e["kind"] for e in ev] == ["suggest"] and "SPY-USD" in ev[0]["text"]   # 1.6x the volume, same list
+    assert ev[0]["profile"] == "volume"                                  # its Run buttons open that list
     st = pilot.state()
     st["active"]["profile"] = "breakeven"                               # the same setup under the breakeven list
     pilot.save(st)
@@ -180,54 +193,54 @@ def test_review_judges_a_deployment_by_its_own_list(tmp_path: Path) -> None:
 
 
 # ------------------------------------------------------------------------------------------------ Telegram
-async def test_aggressive_command_shows_the_list_and_asks_for_a_fresh_scan(tmp_path: Path) -> None:
+async def test_a_stale_list_asks_for_a_scan_and_posts_the_fresh_list(tmp_path: Path) -> None:
     from bot.scout.service import SCAN_NOW
 
     bot, api, _ = _pilot(tmp_path, ROWS)
+    old = {**scan_of(ROWS), "ts_us": int((time.time() - 3 * 3600) * 1e6)}   # the last scan is 3 h old
+    (tmp_path / "data" / "scout" / "latest.json").write_text(json.dumps(old))
     await bot.handle(msg("/aggressive"))
-    first = next(t for _, t, _ in api.sent if "Aggressive Mid" in t and "top 3" in t)
-    assert "SPY-USD" in first and "costs $0.12 per $1,000" in first
-    assert (tmp_path / "state" / SCAN_NOW).exists() and "Scanning every market" in api.sent[-1][1]
-    kb = next(k for _, t, k in api.sent if "top 3" in t)
-    assert kb[0][0] == ("Run #1", "pick aggressive 1") and ("🔄 Fresh scan", "rescan aggressive") in kb[-1]
+    text, kb = api.sent[-1][1], api.sent[-1][2]
+    assert "⚡ <b>Aggressive Mid</b>" in text and "SPY · touch 1bp · 50x" in text and "$0.12/1k" in text
+    assert (tmp_path / "state" / SCAN_NOW).exists() and "Scan started" in text
+    assert kb[0][0] == ("▶️ 1", "pick aggressive 1") and ("🔄 Scan", "rescan aggressive") in kb[-1]
     n = len(api.sent)
     await bot.scan_waiters_tick()
     assert len(api.sent) == n                                            # the old scan does not count
-    (tmp_path / "data" / "scout" / "latest.json").write_text(json.dumps(scan_of(ROWS)))   # a scan finishes
-    await asyncio.sleep(0.01)
-    s = json.loads((tmp_path / "data" / "scout" / "latest.json").read_text())
-    s["ts_us"] = int((time.time() + 1) * 1e6)
+    s = {**scan_of(ROWS), "ts_us": int((time.time() + 1) * 1e6)}        # a scan finishes
     (tmp_path / "data" / "scout" / "latest.json").write_text(json.dumps(s))
     await bot.scan_waiters_tick()
     assert len(api.sent) == n + 1 and "Aggressive Mid" in api.sent[-1][1] and bot.scan_waiters == []
 
 
-async def test_run_asks_recommended_or_max_leverage_then_deploys_that(tmp_path: Path) -> None:
+async def test_a_list_pick_can_run_at_another_leverage_of_the_ladder(tmp_path: Path) -> None:
+    from bot.scout.pilot import setting_id
+
     bot, api, pilot = _pilot(tmp_path, ROWS)
-    await bot.handle(press("pick volume 2"))
-    text, kb = api.edits[-1][2], api.edit_keyboards[-1]
-    assert "touch 1bp @ 10x" in text and "At the maximum, 25x" in text
-    assert kb[0] == [("✅ Recommended 10x", "lev volume 2 rec"), ("🚀 Max 25x", "lev volume 2 max")]
-    await bot.handle(press("lev volume 2 max"))
-    assert "touch 1bp @ 25x" in api.edits[-1][2] and api.edit_keyboards[-1][0][0] == ("Paper", "deploy volume 2 max paper")
-    calls: list[tuple[int, bool, str, str]] = []
+    calls: list[tuple[str, float, str]] = []
 
-    async def fake_approve(k: int, *, live: bool, by: str, profile: str = "breakeven", lev: str = "rec") -> str:
-        calls.append((k, live, profile, lev))
+    async def fake_deploy(c: dict[str, Any], *, live: bool, by: str) -> str:
+        calls.append((c["market"], c["leverage"], c["profile"]))
         return "ok"
-    pilot.approve = fake_approve  # type: ignore[method-assign]
-    await bot.handle(press("deploy volume 2 max paper"))
-    pid = next(iter(bot.pending))
-    await bot.handle(press(f"ok {pid}"))
+    pilot.deploy = fake_deploy  # type: ignore[method-assign]
+    sid = setting_id("touch 1bp")
+    await bot.handle(press("pick volume 2"))                             # QQQ touch 1bp, the list's pick at 10x
+    text, kb = api.edits[-1][2], api.edit_keyboards[-1]
+    assert "25x" in text and "10x" in text and "⭐" in text
+    assert kb[0] == [("25x max", f"rl QQQ-USD {sid} 25 volume"), ("10x", f"rl QQQ-USD {sid} 10 volume")]
+    await bot.handle(press(f"rl QQQ-USD {sid} 25 volume"))              # also in the volume list at 25x
+    assert "In 🔥 Volume" in api.edits[-1][2] and "Runs as 🔥 Volume" in api.edits[-1][2]
+    await bot.handle(press(f"rd QQQ-USD {sid} 25 volume paper"))
+    await bot.handle(press(f"ok {next(iter(bot.pending))}"))
     await asyncio.sleep(0.05)
-    assert calls == [(2, False, "volume", "max")]
+    assert calls == [("QQQ-USD", 25, "volume")]
 
 
-async def test_at_max_already_skips_the_leverage_question(tmp_path: Path) -> None:
+async def test_maxvolume_command_lists_the_most_volume(tmp_path: Path) -> None:
     bot, api, _ = _pilot(tmp_path, ROWS)
-    await bot.handle(press("pick volume 1"))                             # SPY touch 1bp is at its 50x maximum
-    assert "already is the maximum" in api.edits[-1][2]
-    assert api.edit_keyboards[-1][0][0] == ("Paper", "deploy volume 1 rec paper")
+    await bot.handle(msg("/maxvolume"))
+    assert "🚀 <b>Max volume</b>" in api.sent[-1][1] and "NVDA · improve touch · 5x" in api.sent[-1][1]
+    assert "≤$" not in api.sent[-1][1]                                   # no budget on this list
 
 
 async def test_set_volume_cost_rescans(tmp_path: Path) -> None:
@@ -239,12 +252,14 @@ async def test_set_volume_cost_rescans(tmp_path: Path) -> None:
     await bot.handle(press(f"ok {pid}"))
     assert settings.load(tmp_path / "state")["volume_cost"] == 0.25 and (tmp_path / "state" / SCAN_NOW).exists()
     await bot.handle(msg("/top3 volume"))
-    assert "NVDA-USD" in api.sent[-1][1]                                 # $0.22 per $1,000 now fits
+    assert "NVDA · improve touch" in api.sent[-1][1]                     # $0.22 per $1,000 now fits
 
 
 def test_menu_and_commands_have_the_lists() -> None:
     from bot.telegram.views import COMMANDS, HELP, menu_keyboard
 
     names = [n for n, _ in COMMANDS]
-    assert {"volume", "aggressive"} <= set(names) and "/volume" in HELP and "/aggressive" in HELP
-    assert [("🔥 Volume top 3", "volume"), ("⚡ Aggressive Mid", "aggressive")] in menu_keyboard()
+    assert {"volume", "aggressive", "maxvolume", "run"} <= set(names)
+    assert all(f"/{n}" in HELP for n in ("volume", "aggressive", "maxvolume", "run"))
+    buttons = {d for row in menu_keyboard() for _t, d in row}
+    assert {"top3", "volume", "aggressive", "maxvolume", "run", "openpositions"} <= buttons

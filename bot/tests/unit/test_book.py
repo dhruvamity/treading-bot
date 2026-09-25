@@ -67,3 +67,43 @@ def test_replay_live_arcus_frames_no_midstream_gap() -> None:
     for s in syncs.values():
         assert not s.book.crossed()
 
+
+
+# ------------------------------------------------------------------------------------------------ phantom levels
+def test_a_delete_lost_in_the_boundary_gap_never_leaves_the_book_crossed() -> None:
+    """Real frames, BTC-USD, 2026-09-25: the first delta came 56 sequences after the snapshot; the best bid (84028)
+    was removed inside that gap, so an ask resting at 84028 later made the book read crossed half the time."""
+    import json
+    from pathlib import Path
+
+    from bot.core.book import ArcusBookSync
+
+    frames = json.loads((Path(__file__).parents[1] / "fixtures" / "live" / "arcus_btc_boundary_gap.json").read_text())
+    s = ArcusBookSync()
+    checked = 0
+    for m in frames:
+        c = m.get("contents") or {}
+        if m["channel"] == "l2OrderbookUpdates":
+            s.on_snapshot(c) if m["type"] == "subscribed" else s.on_delta(c)
+            b, a = s.book.best_bid(), s.book.best_ask()
+            assert not (b and a and b[0] >= a[0]), "crossed book"
+        elif m["type"] == "channel_data" and c.get("lastSequenceId") == s.last_seq:
+            s.on_bbo(c)
+            b, a = s.book.best_bid(), s.book.best_ask()
+            assert b is not None and a is not None
+            assert (str(b[0]), str(a[0])) == (c["bestBid"]["price"], c["bestAsk"]["price"])   # the same top of book
+            checked += 1
+    assert s.boundary_gaps == 1 and s.phantoms >= 1 and checked > 50
+
+
+def test_phantom_levels_are_dropped_by_a_resting_order_or_the_bbo() -> None:
+    from bot.core.book import ArcusBookSync
+
+    s = ArcusBookSync()
+    s.on_snapshot({"bids": [["100", "1"], ["99.5", "1"], ["99", "1"]], "asks": [["101", "1"]], "lastSequenceId": 10})
+    s.on_delta({"bids": [], "asks": [["100", "2"]], "lastSequenceId": 20})   # boundary gap; 100's delete was lost
+    assert s.book.best_bid() == (D("99.5"), D("1")) and s.book.best_ask() == (D("100"), D("2"))
+    s.on_bbo({"bestBid": {"price": "99"}, "bestAsk": {"price": "100"}, "lastSequenceId": 20})   # 99.5 is gone too
+    assert s.book.best_bid() == (D("99"), D("1")) and s.phantoms == 2
+    s.on_bbo({"bestBid": {"price": "98"}, "bestAsk": {"price": "100"}, "lastSequenceId": 19})   # another state:
+    assert s.book.best_bid() == (D("99"), D("1"))                                               # nothing changes

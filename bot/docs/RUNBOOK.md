@@ -136,7 +136,8 @@ names `/scout`, `/pilot`, `/report`, `/pause`, `/resume`, `/flatten` still work)
 | Command | What happens |
 |---|---|
 | `/top3` | The 3 best setups right now (backtested), with Run buttons: Paper = confirm button, LIVE = `BOT_PILOT_LIVE=1`, doctor, typed code |
-| `/volume`, `/aggressive` | The volume lists (bot/scout/profiles.py): most volume within `volume_cost` per $1,000, any setting or aggressive Mid only. Each also asks the scout for a scan (state/scan_now) and posts the fresh top 3; Run → Recommended or Max leverage → Paper/LIVE |
+| `/volume`, `/aggressive`, `/maxvolume` | The volume lists (bot/scout/profiles.py): most volume within `volume_cost` per $1,000 (any setting, or aggressive Mid only), or at any cost. A list asks the scout for a scan (state/scan_now) only when the last is stale; the ETA comes from data/scout/scan_status.json. ▶️ → the leverage ladder → Paper/LIVE |
+| `/run` | Any market, setting and leverage (market → setting → ladder), or `/run BTC touch 0bp max paper`. Runs as the owner's pick (profile `manual`): never paused for its numbers |
 | `/openpositions` | What is deployed, today's PnL vs the backtest, the last check; Close & stop |
 | `/dashboard` | One message edited every 10 s and pinned (state/telegram_dashboard.json, survives a restart): today's volume and pace, today's PnL from the balance history (deposits excluded), position, equity and capital P/L. ⏹ / ▶️ buttons; `bot dashboard` is the terminal version |
 | `/status`, `/pnl`, `/positions`, `/orders` | What is running, today's PnL, fills and maker volume; PnL by market since start |

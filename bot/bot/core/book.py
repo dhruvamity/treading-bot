@@ -83,6 +83,18 @@ class L2Book:
         for p, s in asks:
             self.set_level(False, p, s)
 
+    def drop_beyond(self, is_bid: bool, price: Decimal, *, inclusive: bool) -> int:
+        """Remove this side's levels better than `price` (bids above it, asks below it), and at it when inclusive.
+        Returns how many were removed."""
+        keys = self._bid_keys if is_bid else self._ask_keys
+        if is_bid:
+            gone = [p for p in reversed(keys) if p > price or (inclusive and p == price)] if keys else []
+        else:
+            gone = [p for p in keys if p < price or (inclusive and p == price)] if keys else []
+        for p in gone:
+            self.set_level(is_bid, p, ZERO)
+        return len(gone)
+
     # ------------------------------------------------------------------ reads
     def best_bid(self) -> tuple[Decimal, Decimal] | None:
         if not self._bid_keys:
@@ -176,6 +188,7 @@ class ArcusBookSync:
     first_delta: bool = True
     boundary_gaps: int = 0
     gaps: int = 0
+    phantoms: int = 0            # stale levels dropped (on_delta's cross rule and on_bbo)
 
     def on_snapshot(self, contents: dict[str, object], ts_us: int = 0) -> SyncResult:
         """Load a snapshot. Arcus answers a subscription to a market that is not available (OFFLINE, a pre-listing,
@@ -213,8 +226,34 @@ class ArcusBookSync:
         elif seq != self.last_seq + 1:
             self.gaps += 1
             return SyncResult.GAP
-        self.book.apply(_pairs(contents.get("bids") or []), _pairs(contents.get("asks") or []))  # type: ignore[arg-type]
+        # Resting orders never lock or cross on Arcus (they would have matched; post-only ones are rejected), so a
+        # level at or through a price the other side just rested at is a phantom: a delete that fell into the gap
+        # between the snapshot and the first delta (the docs' "boundary gap"). Seen live on BTC, 2026-09-25: a bid
+        # removed during a 55-sequence gap stayed at the top, and the book read crossed half the time.
+        for p, sz in _pairs(contents.get("bids") or []):  # type: ignore[arg-type]
+            self.book.set_level(True, p, sz)
+            if sz > 0:
+                self.phantoms += self.book.drop_beyond(False, p, inclusive=True)
+        for p, sz in _pairs(contents.get("asks") or []):  # type: ignore[arg-type]
+            self.book.set_level(False, p, sz)
+            if sz > 0:
+                self.phantoms += self.book.drop_beyond(True, p, inclusive=True)
         self.last_seq = seq
         self.book.seq = seq
         self.book.ts_us = ts_us
         return SyncResult.APPLIED
+
+    def on_bbo(self, contents: dict[str, object]) -> int:
+        """The bbo channel shares the book's per-market sequence. When it describes the same state (equal
+        lastSequenceId), a level better than its best bid or ask is a phantom left by the boundary gap, even one
+        that does not cross: drop it. Returns how many levels were dropped."""
+        seq = contents.get("lastSequenceId")
+        if seq is None or self.last_seq is None or int(seq) != self.last_seq:  # type: ignore[call-overload]
+            return 0
+        n = 0
+        for key, is_bid in (("bestBid", True), ("bestAsk", False)):
+            px = (contents.get(key) or {}).get("price")  # type: ignore[attr-defined]
+            if px:
+                n += self.book.drop_beyond(is_bid, Decimal(str(px)), inclusive=False)
+        self.phantoms += n
+        return n

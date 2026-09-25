@@ -33,13 +33,14 @@ DAY = {"config": "deep 3bp", "pnl": 0.5, "maker_fills": 50, "maker_usd": 10_000,
 # ------------------------------------------------------------------------------------------------ the shortlist
 def test_only_settings_that_pass_on_their_full_days_are_rechecked() -> None:
     r = Risk.for_capital(100, 10).__dict__
-    good = {"risk": r, "days": {"2026-09-20": [DAY], "2026-09-21": [DAY]}}
-    bad = {"risk": r, "days": {"2026-09-20": [DAY | {"pnl": -3.0}], "2026-09-21": [DAY | {"pnl": -3.0}]}}
+    days = ("2026-09-20", "2026-09-21", "2026-09-22")
+    good = {"risk": r, "days": {d: [DAY] for d in days}}
+    bad = {"risk": r, "days": {d: [DAY | {"pnl": -3.0}] for d in days}}
     assert passes_long(good, "deep 3bp", Pct()) and not passes_long(bad, "deep 3bp", Pct())
     assert not passes_long({"risk": r, "days": {}}, "deep 3bp", Pct())                    # no full day yet
     assert not passes_long({**good, "skip": "needs $8"}, "deep 3bp", Pct())               # capital too small
-    assert long_reasons([DAY], 100, Pct(), listed_days=2)[0].startswith("new market")
-    assert long_reasons([DAY | {"maker_fills": 2}], 100, Pct()) == ["too few fills (2.0/day)"]
+    assert long_reasons([DAY], 100, Pct()) == ["1 full day of data (needs 3)"]
+    assert long_reasons([DAY | {"maker_fills": 2}] * 3, 100, Pct()) == ["too few fills (2.0/day)"]
 
 
 def test_scan_workers_step_aside_for_a_running_bot() -> None:
@@ -143,7 +144,7 @@ async def test_telegram_changes_a_setting_after_a_confirm(tmp_path: Path) -> Non
     await bot.handle(msg("/set position_stop 5"))                             # above the daily stop
     assert "⚠️" in api.sent[-1][1] and not bot.pending
     await bot.handle(msg("/settings"))
-    assert "trade_share</b> = 50% <i>(changed)</i>" in api.sent[-1][1]
+    assert "trade_share</b> 50% ✏️" in api.sent[-1][1]
     await bot.handle(msg("/set trade_share default"))
     await bot.handle(press(f"ok {next(iter(bot.pending))}"))
     assert settings.load(tmp_path / "state") == {}
@@ -175,7 +176,7 @@ async def test_telegram_scan_now_touches_the_trigger(tmp_path: Path) -> None:
     _running_paper(tmp_path, app)
     bot, api, _ = _bot(tmp_path, app)
     await bot.handle(msg("/scannow"))
-    assert (tmp_path / "state" / SCAN_NOW).exists() and "scan" in api.sent[-1][1]
+    assert (tmp_path / "state" / SCAN_NOW).exists() and "Scan started" in api.sent[-1][1]
     assert api.sent[-1][0] == OWNER
 
 
