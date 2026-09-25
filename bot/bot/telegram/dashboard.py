@@ -229,6 +229,8 @@ def quote_lines(q: dict[str, Any] | None) -> list[str]:
     blocks = sorted((q.get("blocked") or {}).items(), key=lambda kv: -kv[1])
     out = [f"Quoting {q['quoting'] / tot * 100:.0f}% of {ago(tot)}"
            + "".join(f" · {k} {v / tot * 100:.0f}%" for k, v in blocks[:2] if v / tot >= 0.01)]
+    out.append("On the book: " + " · ".join(f"{name} {float(q.get(side) or 0) / tot * 100:.0f}%"
+                                            for side, name in (("bid", "buy"), ("ask", "sell"))))
     sides = []
     for side in ("bid", "ask"):
         rest = float(q.get(side) or 0)
@@ -238,6 +240,8 @@ def quote_lines(q: dict[str, Any] | None) -> list[str]:
             sides.append(f"{side} {at * 100:.0f}%" + (f" (avg {behind:.1f} ticks behind)" if at < 0.95 else ""))
     if sides:
         out.append("At the best price: " + " · ".join(sides))
+    if q.get("refused"):
+        out.append(f"⚠️ {q['refused']:,} orders refused by the bot's own checks: {q.get('refused_why', '')[:100]}")
     return out
 
 

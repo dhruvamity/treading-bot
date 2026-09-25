@@ -176,19 +176,30 @@ class RiskEngine:
         worst = abs(after) + resting if (after >= 0) == (req.side is Side.BUY) else abs(after)
         if increasing and worst > 2 * lim.position_cap_usd:
             raise PreTradeReject("exposure_cap", f"position + resting ${worst:.2f} > 2x cap ${lim.position_cap_usd}")
+        # Only the part of an order that opens or adds to a position needs initial margin, OI headroom and leverage
+        # room (docs, concepts/perpetuals/margin: initial margin is "required to open a new position or add to an
+        # existing one"; off-hours a position above the higher requirement "can still be reduced or closed"). An
+        # order against the position reduces it as far as the position goes, less what other resting orders on the
+        # same side already cover. 2026-09-25, QQQ after the US close: the reducing sell was refused ~4,900 times
+        # (it wanted ~$20 of margin with ~$12 free) and the bot sat on a $416 long, unable to work it off.
+        opening = req.notional
+        if pos and (pos > 0) != (req.side is Side.BUY):
+            opening = max(Decimal(0), req.notional - max(Decimal(0), abs(pos) * px - resting))
+        if not opening:
+            return
         # OI cap headroom (Arcus): OI-increasing fills are rejected at the cap
         oi, cap = self.ctx.oi(v, b)
-        if cap is not None and oi is not None and oi * px + req.notional > cap:
+        if cap is not None and oi is not None and oi * px + opening > cap:
             raise PreTradeReject("oi_cap", f"market OI ${oi * px:.0f} + order would exceed cap ${cap:.0f}")
         # free collateral and leverage (use off-hours IMF when the RWA market is outside RTH)
         acct = self.ctx.account(v)
         imf = m.offhours_imf if (m.is_outside_rth and m.offhours_imf) else m.imf
-        need = req.notional * imf
+        need = opening * imf
         if acct.equity > 0:
             if acct.free_collateral - need < 0:
                 raise PreTradeReject("free_collateral", f"needs ${need:.2f}, free ${acct.free_collateral:.2f}")
             lev = abs(after) / acct.equity
-            if lev > lim.leverage_cap:
+            if increasing and lev > lim.leverage_cap:
                 raise PreTradeReject("leverage_cap", f"gross leverage {lev:.2f}x > {lim.leverage_cap}x")
 
     # ================================================================ kill switches

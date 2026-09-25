@@ -20,6 +20,7 @@ from bot.common import settings, sizing
 from bot.common.config import MMSession, RiskLimitsCfg
 from bot.common.ids import ClientIdFactory
 from bot.common.logging import DecisionLog, Log
+from bot.common.time import US_PER_S
 from bot.core.budget import BudgetGovernor, BudgetMode
 from bot.core.calendar import TradingCalendar
 from bot.core.ledger import Ledger
@@ -46,6 +47,7 @@ class EngineStats:
     mode_time_s: dict[str, float] = field(default_factory=dict)
 
 
+REFUSED_ALERT_PER_MIN = 30   # pre-trade refusals in one minute that make an alert
 BLOCKS = (("safety pause", "safety pause"), ("skip window", "skip window"), ("daily", "daily stop"),
           ("position stop", "position stop"), ("cooling down", "cooldown"), ("budget", "order budget"),
           ("event window", "event window"), ("repeated rejects", "rejects"), ("safe mode", "safe mode"),
@@ -75,6 +77,8 @@ class QuoteStats:
     ask_touch: float = 0.0
     bid_ticks: float = 0.0    # ticks behind the best bid, summed over the seconds a buy rests
     ask_ticks: float = 0.0
+    refused: int = 0          # orders the bot's own pre-trade check refused (they never reach the venue)
+    refused_why: str = ""     # the last such reason
 
     def add(self, dt: float, why: str, bid: tuple[float, float] | None, ask: tuple[float, float] | None) -> None:
         """dt seconds; why = "" while quoting; bid/ask = (our best price, the book's best price) in ticks, when an
@@ -128,6 +132,8 @@ class SessionEngine:
         self.ids = ids
         self.stats = EngineStats()
         self.quotes = QuoteStats()
+        self._refused_at: deque[int] = deque()           # pre-trade refusals in the last minute
+        self._refused_alert_us: dict[str, int] = {}      # last alert per check
         self.session_start_equity: Decimal | None = None
         self.day_start_equity: dict[str, Decimal] = {}
         self.inflight_intents: dict[tuple[Venue, str], int] = {}
@@ -335,6 +341,23 @@ class SessionEngine:
         await self.pnl_checks(now_us)
         return out
 
+    def _refused(self, why: str, n: int, now_us: int) -> None:
+        """Our own pre-trade check refused orders: count them for the dashboard, and warn once (at most every 30 min
+        per check) when it keeps refusing for a minute. Such orders never reach the venue, so without this a bot can
+        sit for hours with nothing on the book and no alert (QQQ, 2026-09-25: ~4,900 refusals in 2 h)."""
+        self.quotes.refused += n
+        self.quotes.refused_why = why[:160]
+        self._refused_at.extend([now_us] * n)
+        while self._refused_at and now_us - self._refused_at[0] > 60 * US_PER_S:
+            self._refused_at.popleft()
+        check = why.split(":")[0]
+        if len(self._refused_at) >= REFUSED_ALERT_PER_MIN and self.alerter is not None and \
+                now_us - self._refused_alert_us.get(check, 0) > 1800 * US_PER_S:
+            self._refused_alert_us[check] = now_us
+            self.alerter.warn("orders_refused", f"{self.base}: the bot's own pre-trade check refused "
+                              f"{len(self._refused_at)} orders in the last minute ({why[:160]}). Nothing reaches "
+                              "Arcus; /status")
+
     def _count_quotes(self, ctx: StrategyContext, state: SessionState, now_us: int, dt: float) -> None:
         from bot.common.time import utc_date_str
 
@@ -425,6 +448,8 @@ class SessionEngine:
             res = await self.om.sync(v, m, desired, bbo, params, why=out.reason or "strategy")
             self.stats.actions += len(res.actions)
             self.stats.rejects += len(res.rejected)
+            if res.rejected:
+                self._refused(res.rejected[-1][1], len(res.rejected), now_us)
             if res.errors:
                 self.stats.errors += len(res.errors)
                 log.warning("sync_errors", venue=v.value, market=b, session=self.sid, data={"errors": res.errors[:5]})

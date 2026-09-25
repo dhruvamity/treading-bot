@@ -350,3 +350,23 @@ def test_the_engine_counts_why_it_did_not_quote_and_how_often_it_rested_at_the_b
     assert q.bid > 500 and q.bid_touch == 0 and q.bid_ticks / q.bid > 50
     q = quotes(execution_style="aggressive", spacing_bps=2, session={"skip_et": ["09:00-16:30"]})
     assert q.quoting == 0 and q.blocked == {"skip window": q.seconds}
+
+
+def test_orders_refused_by_our_own_checks_are_counted_and_alerted_once() -> None:
+    mk = fixture_markets()
+    a = mk[Venue.ARCUS]["BTC"]
+    ev = list(merge([book_events(Venue.ARCUS, "BTC", trend_path(86000, 0.0), start_us=1_790_000_000_000_000,
+                                 seconds=300, tick=a.tick_size, step=a.step_size, half_spread_ticks=5,
+                                 trades_per_s=1.0, trade_size=D("0.01"), seed=7)]))
+    sess = mm_session(mode="mid", execution_style="aggressive", spacing_bps=2, levels_per_side=1,
+                      order_size_usd=250, inventory_cap_usd=500, capital_usd=100)
+    sim = Simulator([sess], mk, SimConfig(starting_equity={Venue.ARCUS: D("0.5")}))   # no room for any margin
+    warned: list[str] = []
+
+    class Alerts:
+        def warn(self, key: str, text: str) -> None:
+            warned.append(text)
+    sim.engines[0].alerter = Alerts()
+    q = sim.run_sync(ev).stats["t"]["quotes"]
+    assert q.refused > 100 and q.refused_why.startswith("free_collateral") and q.bid == 0 and q.ask == 0
+    assert len(warned) == 1 and "refused" in warned[0] and "free_collateral" in warned[0]
