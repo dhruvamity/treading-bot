@@ -3,7 +3,7 @@
 One position at a time. Long entry when RSI(n) on 1-minute bars < low and the trend filter is flat
 (|EMA20 - EMA60| < z x sigma, sigma in price units from the 1 h vol); short mirrors it above `high`.
 Entry: maker at the touch. Exit: take-profit maker at +tp bps, reduce-only stop at -sl bps (IOC intent), or max
-holding time (maker then IOC). Cooldown after each trade. Few requests: suits Lighter and weekend crypto.
+holding time (maker then IOC). Cooldown after each trade. Few requests: suits weekend crypto.
 """
 
 from __future__ import annotations
@@ -11,6 +11,7 @@ from __future__ import annotations
 from decimal import Decimal
 
 from bot.common.config import MMSession
+from bot.common.indicators import ema, rsi
 from bot.strategies import quoting as qt
 from bot.strategies.base import StrategyContext, StrategyOutput
 from bot.strategies.mm_base import MMBase
@@ -25,7 +26,6 @@ class SignalStrategy(MMBase):
         self.entry_px: float | None = None
         self.entry_us: int = 0
         self.cooldown_until_us: int = 0
-        self.last_rsi: float | None = None
         self.trades = 0
 
     def on_fill(self, ctx: StrategyContext, fill: Fill) -> None:
@@ -45,9 +45,8 @@ class SignalStrategy(MMBase):
         bb, ba = bbo
         m = ctx.market
         closes = [b.c for b in ctx.view.closed_bars()]
-        r = qt.rsi(closes, s.rsi_len)
-        self.last_rsi = r
-        e20, e60 = qt.ema(closes[-120:], 20), qt.ema(closes[-180:], 60)
+        r = rsi(closes, s.rsi_len)
+        e20, e60 = ema(closes[-120:], 20), ema(closes[-180:], 60)
         sigma_px = mid * ctx.view.sigma_1h()
         flat = e20 is not None and e60 is not None and sigma_px > 0 and abs(e20 - e60) < s.trend_z * sigma_px
         inv = ctx.inventory
@@ -60,7 +59,7 @@ class SignalStrategy(MMBase):
             pnl_bps = ((mid - self.entry_px) / self.entry_px / qt.BP) * (1 if long else -1)
             held_min = (ctx.now_us - self.entry_us) / 60e6
             if pnl_bps <= -s.sl_bps:
-                out.hedge_intents.append(self._ioc_exit(ctx, mid, "sig_sl", f"stop {pnl_bps:.1f} bps"))
+                out.ioc_intents.append(self._ioc_exit(ctx, mid, "sig_sl", f"stop {pnl_bps:.1f} bps"))
                 self.cooldown_until_us = ctx.now_us + int(s.cooldown_s * 1e6)
                 self.entry_px = None
                 out.reason = f"signal stop-loss at {pnl_bps:.1f} bps"

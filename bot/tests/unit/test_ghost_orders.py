@@ -92,6 +92,21 @@ def test_arcus_requotes_with_cancel_and_place_by_default() -> None:
     assert [a.kind for a in acts] == [ActionKind.CANCEL, ActionKind.PLACE] and acts[0].client_id == "a"
 
 
+def test_a_modify_goes_by_venue_order_id_or_becomes_cancel_and_place() -> None:
+    """With modify on, an order whose Arcus id is not known yet is requoted with cancel + place: every modify the
+    first live run sent by clientId alone was refused (CannotModifyImmutableFieldTif), the ones sent by id were not."""
+    from bot.core.order_manager import ActionKind, BBOTicks, DesiredOrder, LiveOrderView, PlanParams, plan
+
+    m = fixture_markets()[Venue.ARCUS]["BTC"]
+    want = [DesiredOrder(Side.BUY, 859_900, 12_000, "b0")]
+    p = PlanParams(tol_ticks=2, allow_modify=True)
+    known = LiveOrderView("a", Side.BUY, 859_950, 12_000, "b0", False, False, True)
+    unknown = LiveOrderView("a", Side.BUY, 859_950, 12_000, "b0", False, False, False)
+    assert [a.kind for a in plan(want, [known], m, BBOTicks(860_000, 860_001), p)] == [ActionKind.MODIFY]
+    assert [a.kind for a in plan(want, [unknown], m, BBOTicks(860_000, 860_001), p)] == [ActionKind.CANCEL,
+                                                                                          ActionKind.PLACE]
+
+
 def test_the_engine_takes_the_venues_modify_choice(tmp_path: Path) -> None:
     from bot.strategies.base import StrategyOutput
     from tests.unit.test_sizing import _engine

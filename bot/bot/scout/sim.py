@@ -38,6 +38,7 @@ from typing import Any
 
 import numpy as np
 
+from bot.common.indicators import ema, rsi
 from bot.common.sizing import Pct, sizes
 from bot.scout.tape import DayTape
 
@@ -189,29 +190,6 @@ def round_ask(p: float, tick: float) -> float:
 
 def base_for_usd(usd: float, px: float, step: float) -> float:
     return math.ceil(usd / px / step - 1e-9) * step if px > 0 else 0.0
-
-
-def rsi(closes: list[float], n: int = 14) -> float | None:
-    if len(closes) < n + 1:
-        return None
-    gains = losses = 0.0
-    for a, b in zip(closes[-n - 1:-1], closes[-n:], strict=True):
-        d = b - a
-        gains += max(d, 0.0)
-        losses += max(-d, 0.0)
-    if losses == 0:
-        return 100.0 if gains > 0 else 50.0
-    return 100 - 100 / (1 + gains / losses)
-
-
-def ema(values: list[float], n: int) -> float | None:
-    if len(values) < n:
-        return None
-    a = 2 / (n + 1)
-    e = values[0]
-    for v in values[1:]:
-        e = a * v + (1 - a) * e
-    return e
 
 
 @dataclass

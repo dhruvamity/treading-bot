@@ -1,8 +1,8 @@
 """BotRunner end-to-end in PAPER mode against an in-process fake venue server (no network).
 
-The fake server answers the public REST reads LiveParams needs (markets, fee tiers, order books, details) from the
-captured fixtures and replays the captured LIVE WebSocket frames for both venues. The runner must build, sync the
-books into the hub, run its loops, quote into the paper venues, write a heartbeat and shut down cleanly.
+The fake server answers the public REST reads LiveParams needs (markets, fee tiers) from the captured fixtures and
+replays the captured LIVE Arcus WebSocket frames. The runner must build, sync the book into the hub, run its loops,
+quote into the paper venue, write a heartbeat and shut down cleanly.
 """
 
 from __future__ import annotations
@@ -14,7 +14,7 @@ from typing import Any
 
 from aiohttp import WSMsgType, web
 
-from bot.common.config import load_app, load_arcus_config, load_lighter_config, load_session
+from bot.common.config import load_app, load_arcus_config, load_session
 from bot.common.secrets import SecretStore
 from bot.core.calendar import TradingCalendar
 from bot.core.livelock import RunMode
@@ -32,14 +32,10 @@ class FakeVenues:
         self.rest = {
             "/v1/markets": json.loads((FIX / "arcus_markets.json").read_text()),
             "/v1/feetiers": json.loads((FIX / "arcus_feetiers.json").read_text()),
-            "/api/v1/orderBooks": json.loads((FIX / "lighter_orderbooks.json").read_text()),
-            "/api/v1/orderBookDetails": json.loads((FIX / "lighter_obd_btc.json").read_text()),
         }
-        self.frames = {n: [f["raw"] for f in json.loads((FIX / f"{n}_ws_frames.json").read_text())]
-                       for n in ("arcus", "lighter")}
-        self.subs: dict[str, list[Any]] = {"arcus": [], "lighter": []}
+        self.frames = {"arcus": [f["raw"] for f in json.loads((FIX / "arcus_ws_frames.json").read_text())]}
+        self.subs: dict[str, list[Any]] = {"arcus": []}
         self.app.router.add_get("/arcus-ws", lambda r: self.ws(r, "arcus"))
-        self.app.router.add_get("/lighter-ws", lambda r: self.ws(r, "lighter"))
         self.app.router.add_route("*", "/{tail:.*}", self.handle)
         self.runner: web.AppRunner | None = None
         self.url = ""
@@ -80,15 +76,13 @@ class FakeVenues:
 async def test_paper_runner_end_to_end(tmp_path: Path) -> None:
     srv = FakeVenues()
     await srv.start()
-    acfg, lcfg = load_arcus_config(ROOT / "config/venues/arcus.yaml"), load_lighter_config(ROOT / "config/venues/lighter_rh.yaml")
+    acfg = load_arcus_config(ROOT / "config/venues/arcus.yaml")
     acfg.rest.mainnet, acfg.ws.mainnet = f"http://{srv.url}", f"ws://{srv.url}/arcus-ws"
-    lcfg.rest.mainnet, lcfg.ws.mainnet = f"http://{srv.url}", f"ws://{srv.url}/lighter-ws"
     app = load_app(ROOT / "config/app.yaml")
     app.data_dir, app.reports_dir = str(tmp_path / "data"), str(tmp_path / "reports")
     app.state_dir = str(tmp_path / "state")
-    sessions = [load_session(ROOT / "config/sessions/arcus_btc_mm.yaml"),
-                load_session(ROOT / "config/sessions/lighter_btc_grid.yaml")]
-    runner = BotRunner(sessions, mode=RunMode.PAPER, cli_live=False, app=app, arcus_cfg=acfg, lighter_cfg=lcfg,
+    sessions = [load_session(ROOT / "config/sessions/arcus_btc_mm.yaml")]
+    runner = BotRunner(sessions, mode=RunMode.PAPER, cli_live=False, app=app, arcus_cfg=acfg,
                        secrets=SecretStore(tmp_path / "none.enc", password=""),
                        calendar=TradingCalendar.load(ROOT / "config/calendars"), state_db=str(tmp_path / "s.sqlite"))
     assert runner.mode is RunMode.PAPER and not runner.writes_mainnet
@@ -98,13 +92,13 @@ async def test_paper_runner_end_to_end(tmp_path: Path) -> None:
         if srv.runner:
             await srv.runner.cleanup()
     assert all(isinstance(a, PaperVenue) for a in runner.adapters.values())
-    assert set(runner.adapters) == {Venue.ARCUS, Venue.LIGHTER_RH}
-    for v in (Venue.ARCUS, Venue.LIGHTER_RH):
-        view = runner.hub.get(v, "BTC")
-        assert view is not None and view.mid() is not None, v
+    assert set(runner.adapters) == {Venue.ARCUS}
+    view = runner.hub.get(Venue.ARCUS, "BTC")
+    assert view is not None and view.mid() is not None
     assert runner.hub.view(Venue.ARCUS, "BTC").predicted_funding_h is not None
-    assert runner.hub.view(Venue.LIGHTER_RH, "BTC").mark is not None
     assert Path(app.heartbeat_for("paper")).exists() and not Path(app.heartbeat_for("live")).exists()
+    # a clean stop leaves a last heartbeat saying so: the guardian stands down instead of alarming
+    assert "stopped" in json.loads(Path(app.heartbeat_for("paper")).read_text())
     kinds = {d["kind"] for d in runner.decisions.records}
     assert {"mode", "place"} <= kinds, kinds
     assert runner.state.orders and all(o.req.venue in runner.adapters for o in runner.state.orders.values())

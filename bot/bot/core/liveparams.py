@@ -21,15 +21,12 @@ from bot.venues.arcus.models import base_fee_tier
 from bot.venues.arcus.models import parse_market as parse_arcus_market
 from bot.venues.arcus.rest import ArcusRest
 from bot.venues.base import Market, Venue
-from bot.venues.lighter_rh.models import parse_market as parse_lighter_market
-from bot.venues.lighter_rh.rest import LighterRest
 from bot.venues.symbols import SymbolMap
 
 log = Log("liveparams")
 
 PARAM_FIELDS = ("status", "tick_size", "tick_tiers", "step_size", "min_notional", "min_size", "max_size", "imf",
-                "mmf", "offhours_imf", "close_out_mf", "rth", "maker_fee", "taker_fee", "oi_cap_usd",
-                "size_decimals", "price_decimals", "multiplier", "liquidation_fee")
+                "mmf", "offhours_imf", "rth", "maker_fee", "taker_fee", "oi_cap_usd")
 
 
 @dataclass(frozen=True, slots=True)
@@ -62,7 +59,6 @@ def diff_markets(old: dict[str, Market], new: dict[str, Market], ts_us: int) -> 
 @dataclass
 class LiveParams:
     arcus: ArcusRest | None = None
-    lighter: LighterRest | None = None
     out_dir: Path = Path("data/param_changes")
     refresh_s: float = 3600.0
     markets: dict[Venue, dict[str, Market]] = field(default_factory=dict)
@@ -70,7 +66,6 @@ class LiveParams:
     symbol_map: SymbolMap = field(default_factory=SymbolMap)
     listeners: list[Callable[[list[ParamChange]], None]] = field(default_factory=list)
     last_refresh_us: int = 0
-    perps_only: bool = True
 
     async def refresh(self) -> list[ParamChange]:
         ts = now_us()
@@ -79,10 +74,6 @@ class LiveParams:
             new_a = await self._fetch_arcus()
             changes += diff_markets(self.markets.get(Venue.ARCUS, {}), new_a, ts)
             self.markets[Venue.ARCUS] = new_a
-        if self.lighter is not None:
-            new_l = await self._fetch_lighter()
-            changes += diff_markets(self.markets.get(Venue.LIGHTER_RH, {}), new_l, ts)
-            self.markets[Venue.LIGHTER_RH] = new_l
         self.symbol_map = SymbolMap.build([m for per in self.markets.values() for m in per.values()])
         self.last_refresh_us = ts
         if changes:
@@ -109,22 +100,6 @@ class LiveParams:
                 # A new listing with a field missing or not yet set must not stop every other market from loading
                 log.warning("arcus_market_skipped", market=str(m.get("marketDisplayName")),
                             reason=f"{type(e).__name__}: {e}"[:200])
-                continue
-            out[mk.base] = mk
-        return out
-
-    async def _fetch_lighter(self) -> dict[str, Market]:
-        assert self.lighter is not None
-        obs = await self.lighter.order_books()
-        details = {int(d["market_id"]): d for d in await self.lighter.order_book_details()}
-        out = {}
-        for ob in obs:
-            if self.perps_only and ob.get("market_type") != "perp":
-                continue
-            try:
-                mk = parse_lighter_market(ob, details.get(int(ob["market_id"])))
-            except (KeyError, TypeError, ValueError, ArithmeticError) as e:
-                log.warning("lighter_market_skipped", market=str(ob.get("symbol")), reason=f"{type(e).__name__}: {e}"[:200])
                 continue
             out[mk.base] = mk
         return out

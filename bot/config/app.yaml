@@ -7,18 +7,10 @@ alerts: {telegram_enabled: true, min_interval_s: 30, levels: [WARN, CRIT]}
 risk:
   daily_loss_pct: 3.0
   drawdown_pct: 10.0
-  drawdown_pct_dn: 8.0
   liq_distance_sigma: 4.0
   liq_resume_sigma: 6.0
-  hedge_missing_s: 5.0
   heartbeat_timeout_s: 60.0
-  arcus_pool_freeze_frac: 0.05
-  arcus_pool_widen_frac: 0.20
   max_leverage_mm: 50.0           # Arcus maximum; each session's leverage_max (the market max, BTC/ETH 20x) binds
-  max_leverage_dn: 3.0
-  max_actions_per_filled_usd: 8.0
-  feed_stale_s: 2.0
-  max_error_rate: 0.05
 sizing:                          # every dollar figure is a share of the capital (bot/common/sizing.py)
   capital_usd: auto              # auto: the Arcus subaccount's equity, re-read before each scan and at 00:00 UTC
                                  # by the bot; or a fixed amount (e.g. 250) to size for money not deposited yet

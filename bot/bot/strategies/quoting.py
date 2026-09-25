@@ -6,32 +6,19 @@
 Execution anchors: Aggressive = improve best by 1 tick if spread > 1 tick else join; Normal = r +/- max(h, spread/2);
 Passive = r +/- (h + k x sigma_1m). Tread offset in bps is added (negative = inward). Post-only guard: bid < best
 ask, ask > best bid. Rounding: bids DOWN, asks UP to the tick of the price band.
-DGrid spacing: delta = clamp(k x sigma_1h / sqrt(F), delta_min, delta_max), delta_min >= max(2 f_m + 1 bp, 2 ticks);
-Lighter standard also >= 3 sigma over the 300 ms cancel delay.
+Auto grid spacing: delta = clamp(k x sigma_1h / sqrt(F), delta_min, delta_max), delta_min >= max(2 f_m + 1 bp, 2 ticks).
 """
 
 from __future__ import annotations
 
 import math
-from dataclasses import dataclass
 from decimal import Decimal
 
 from bot.common.decimal import clamp
 from bot.core.order_manager import DesiredOrder
-from bot.venues.base import Market, Side, Venue
+from bot.venues.base import Market, Side
 
 BP = 1e-4
-
-
-@dataclass(frozen=True, slots=True)
-class Quote:
-    bid: Decimal | None
-    ask: Decimal | None
-    q_bid: Decimal
-    q_ask: Decimal
-    r: float
-    u: float
-    h: float
 
 
 def skew_u(inventory_base: float, target_base: float, mid: float, cap_usd: float) -> float:
@@ -95,13 +82,10 @@ def participation_mult(our_fill_usd_5m: float, market_usd_5m: float, cap_pct: fl
     return 1.5 if our_fill_usd_5m / market_usd_5m * 100 > cap_pct else 1.0
 
 
-def dgrid_delta(sigma_1h: float, fills_per_hour: float, *, k_delta: float, delta_min: float, delta_max: float,
-                maker_fee: float, tick_frac: float, venue: Venue, sigma_1s: float = 0.0,
-                cancel_latency_s: float = 0.3) -> float:
+def vol_spacing(sigma_1h: float, fills_per_hour: float, *, k_delta: float, delta_min: float, delta_max: float,
+                maker_fee: float, tick_frac: float) -> float:
     """All in fractions (1 bp = 1e-4)."""
     lo = max(delta_min, 2 * maker_fee + 1 * BP, 2 * tick_frac)
-    if venue is Venue.LIGHTER_RH and sigma_1s > 0:
-        lo = max(lo, 3 * sigma_1s * math.sqrt(cancel_latency_s))
     if fills_per_hour <= 0 or sigma_1h <= 0:
         return max(lo, delta_max) if sigma_1h <= 0 else lo
     raw = k_delta * sigma_1h / math.sqrt(fills_per_hour)
@@ -136,27 +120,3 @@ def base_for_usd(usd: float, price: float, m: Market) -> float:
     step = float(m.step_size)
     return math.ceil(usd / price / step) * step
 
-
-def rsi(closes: list[float], n: int = 14) -> float | None:
-    """Wilder RSI over the last n+ closes."""
-    if len(closes) < n + 1:
-        return None
-    gains = losses = 0.0
-    for a, b in zip(closes[-n - 1:-1], closes[-n:], strict=True):
-        d = b - a
-        gains += max(d, 0.0)
-        losses += max(-d, 0.0)
-    if losses == 0:
-        return 100.0 if gains > 0 else 50.0
-    rs = (gains / n) / (losses / n)
-    return 100 - 100 / (1 + rs)
-
-
-def ema(values: list[float], n: int) -> float | None:
-    if len(values) < n:
-        return None
-    a = 2 / (n + 1)
-    e = values[0]
-    for v in values[1:]:
-        e = a * v + (1 - a) * e
-    return e

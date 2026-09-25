@@ -102,10 +102,32 @@ Doc conflicts (so modify stays off):
 - modify size is the order's new TOTAL size (filled quantity included); the adapter sends the remaining size;
 - the live `CannotModifyImmutableFieldTif` refusals despite echoing `ALO`.
 
+## Follow-up (same day, repository audit)
+
+- **Modify identity.** The SPY run (PR #6 code) learned the venue order ids by reconciliation and then sent 14
+  modifies by orderId with no error; the QQQ run never learned them and every modify by clientId alone was refused.
+  So `CannotModifyImmutableFieldTif` looks like how Arcus refuses a clientId-only modify. The adapter now only ever
+  modifies by orderId, and the order manager requotes an order whose id is not known yet with cancel + place.
+  Modify stays off (`use_modify: false` in `config/venues/arcus.yaml`) until `bot selftest --allow-funded` shows a
+  resting order move.
+- **False guardian alarm.** The SPY run was stopped from Telegram at 12:20:23 UTC; its guardian kept running and at
+  12:21:22 raised CRITICAL "bot heartbeat silent for 62s" and sent a cancel-all (harmless: nothing was open). A bot
+  that stops on purpose and has pulled its quotes now writes a last heartbeat saying so, and the guardian exits.
+- **Order-pool brakes never engaged.** The budget governor widens requotes under 20% of the order pool and sends
+  cancels only under 5%, but nothing ever gave it the pool: that is why run 2 drained about a quarter of the cap
+  unnoticed. The runner now polls `GET /v1/rateLimit` every 15 s (weight 2; the docs recommend it for aggressive
+  order loops) and hands the numbers to the governor.
+- **Lighter was still wired into every Arcus run.** The runner read Lighter's markets at start-up (an outage there
+  could stop the bot from starting) and subscribed to Lighter's book for the same market. The engine ran the safety
+  pause on that book too: every Lighter spread spike was logged and alerted as a `safety_pause` (for venue
+  `lighter_rh`), although it never stopped Arcus quoting. Part of the 16–24 pauses an hour counted below may be
+  those. Lighter and the other two-venue code were removed.
+
 ## Still open
 
 - The live safety pause fired about 16–24 times an hour on QQQ (08:00–12:00 UTC). On the recorded tape the simulator,
-  which models the same spread rule, pauses 2–13 times an hour for those hours. Live also pauses on thin depth
-  (< 30% of the median), which the simulator does not model. Either drop that rule for pilot runs or add it to the
-  simulator (a full re-backtest), so live matches the backtest.
-- A testnet selftest with a resting order, to find the modify form Arcus accepts before `use_modify` is turned on.
+  which models the same spread rule, pauses 2–13 times an hour for those hours. First recount on the next run: only
+  pauses for venue `arcus` (the Lighter ones above no longer happen). Live also pauses on thin depth (< 30% of the
+  median), which the simulator does not model. Either drop that rule for pilot runs or add it to the simulator (a full
+  re-backtest), so live matches the backtest.
+- `bot selftest --allow-funded` with a resting order, to confirm modify by orderId before `use_modify` is turned on.

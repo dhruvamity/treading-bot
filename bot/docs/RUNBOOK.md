@@ -7,17 +7,16 @@ Operations for the VPS deployment (`/opt/bot`, systemd). Commands assume `cd /op
 
 | Unit | What it does | Needs keys |
 |---|---|---|
-| `bot-recorder` | Records public books, trades, prices and funding to `data/` as Parquet. Runs 24/7 from day one. | no |
-| `bot-maintenance.timer` | Daily: `compact` closed days, then `dq-report` for yesterday. | no |
+| `bot-scout` | `bot scout run`: records every Arcus perp to `data/scout/tape/` and re-ranks the setups every 30 min. | no |
 | `bot` | `bot run $BOT_RUN_ARGS` (e.g. `arcus_btc_mm --live --yes`): engines, DMS refresher, reconciliation, heartbeat. | live |
-| `bot-guardian` | Separate process watching the LIVE heartbeat (`state/heartbeat.live`). If it is silent for 60 s, or the drawdown limit is hit, it cancels all orders and alerts. | yes (read + cancel) |
+| `bot-guardian` | Separate process watching the LIVE heartbeat (`state/heartbeat.live`). If it is silent for 60 s, or the drawdown limit is hit, it cancels all orders and alerts. A bot stopped on purpose (Telegram `/stop`, close, `bot down --all`) leaves a last heartbeat saying so, and the guardian then exits without alarming. | yes (read + cancel) |
 | `bot-telegram` | Telegram control bot (§9): status, pause/stop/run, cancel-all/flatten and live alerts on your phone. | yes, for cancel-all / flatten / doctor |
 
 Without systemd (e.g. a Mac as the server): `bot up` starts the scout, the Telegram bot and, while a live bot runs,
 the guardian in the background; `bot status` shows everything on one screen; `bot down [--all]` stops them.
 
 ```bash
-sudo systemctl status bot-recorder bot bot-guardian
+sudo systemctl status bot-scout bot bot-guardian
 journalctl -u bot -f -o cat | jq -c 'select(.level!="DEBUG")'     # JSON logs; secrets are redacted
 ```
 
@@ -26,12 +25,12 @@ journalctl -u bot -f -o cat | jq -c 'select(.level!="DEBUG")'     # JSON logs; s
 1. `$A status` shows, per mode, whether the bot is running, open orders, positions, and any pending resume flag.
    `$A doctor arcus_btc_mm` should still say READY (key expiry, funds, clock).
 2. `$A report --date $(date -u -d yesterday +%F)` (live by default; `--mode paper`) shows the PnL split:
-   `Net = SpreadCapture + InventoryMTM + Funding − Fees − HedgeCost − LiquidationLoss`.
+   `Net = SpreadCapture + InventoryMTM + Funding − Fees − LiquidationLoss`.
    It also shows volume, OI-hours and budget.
-3. `reports/dq/<yesterday>.md` should show 0 issues. Silence over 60 s, sequence gaps or missing funding hours mean
-   the recorder needs a look.
+3. `data/scout/recorder.json`: `last_msg_age_s` a few seconds and `paused_for_disk` false; `data/scout/report.txt`
+   under 40 minutes old.
 4. `$A keys` should show every Arcus key ACTIVE with more than 7 days left.
-5. `df -h /opt` should show more than 30% free. Raw recording is about 1.5 GB/day; compaction shrinks closed days.
+5. `df -h /opt` should show more than 30% free. The scout records about 0.1-0.5 GB/day.
 
 ## 3. Start, stop, change a session
 
@@ -54,8 +53,8 @@ live in `/opt/bot/.env`. `/etc/bot.env` only carries the run arguments.
 | Anything looks wrong | `sudo systemctl stop bot`. The guardian stays up. |
 | Orders must go NOW | `$A cancel-all --venue arcus` (your key's subaccount, mainnet; `--yes` skips the prompt) |
 | Close positions | `$A flatten --venue arcus` (maker, reduce-only). Add `--taker` for IOC. |
-| VPS unreachable | The Arcus DMS (`scheduleCancel`) and the Lighter scheduled cancel-all fire by themselves within their deadlines (Arcus 60 s). Then use the venues' web apps: cancel all, then close positions. |
-| Suspected key leak | Revoke the key in the Arcus web app (API Keys), create a new one, and replace `ARCUS_API_PRIVATE_KEY` in `.env`. For Lighter, re-run `scripts/lighter_register_key.py` (same slot). |
+| VPS unreachable | The Arcus DMS (`scheduleCancel`) fires by itself within its 60 s deadline. Then use the Arcus web app: cancel all, then close positions. |
+| Suspected key leak | Revoke the key in the Arcus web app (API Keys), create a new one, and replace `ARCUS_API_PRIVATE_KEY` in `.env`. |
 
 ## 5. Safe mode and kill switches
 
@@ -66,14 +65,15 @@ The bot never resumes after a serious stop by itself. Investigate first, then ru
 |---|---|---|
 | Session loss ≥ SL% of margin (10%) | Cancel quotes; flatten maker-first, then IOC | next scheduled session |
 | Daily loss > 3% of capital | That venue stops for the UTC day | next day or manual |
-| Drawdown > 10% of capital (8% for DN) | Everything stops and flattens; CRIT alert | manual only |
+| Drawdown > 10% of capital | Everything stops and flattens; CRIT alert | manual only |
 | Liquidation distance < 4σ (1 h) | Halve the position | back above 6σ |
 | Safety pause (6σ 1-s move, spread > 3× median, depth < 30%) | Cancel quotes, keep position | after 30 s normal |
 | Event window (CPI, FOMC, NFP ±30 min; earnings ±24 h; ex-div) | No new quotes | window end |
 | Arcus band in expansion zone, or OI cap reached | Stop quoting that market | cleared |
-| Hedge leg missing > 5 s (DN) | Cancel maker quotes; taker-flatten the unhedged leg | both venues healthy 5 min |
 | Heartbeat silent 60 s | DMS plus guardian cancel-all | manual after reconcile |
-| Arcus pool < 5%, or Lighter 429/405 | Cancels only, no requotes | budget recovered |
+| Arcus order pool < 20% left (polled every 15 s) | Requote tolerance doubles | pool recovered |
+| Arcus order pool < 5% left | Cancels only, no requotes | pool recovered |
+| Arcus 429 (rate limited) | Wait the `retryAfterMs` Arcus gives on that pool | after the wait |
 | DMS refresh fails twice | Safe mode | manual |
 | `SELF_TRADE` / `GEO_RESTRICTED` reject | Stop venue; CRIT alert | manual |
 | Unexpected exception in trading loop | Safe mode (cancel quotes, keep positions) | manual |
@@ -90,11 +90,12 @@ Every automatic action goes to the decision log (JSON logs, `component=decision`
 - **Calendars:** keep `config/calendars/events.csv` at least 30 days ahead for FOMC and 14 days for CPI. The bot
   warns hourly while coverage is short. Add NVDA/TSLA earnings and SPY/QQQ ex-dividend dates.
 - **Venue changes:** LiveParams refreshes hourly. Any change to tick, step, minimum, fees or margins is logged to
-  `data/param_changes_jsonl/`, and quoting uses the new values immediately. Read the Arcus changelog and the Lighter
-  apidocs monthly (prompt pack maintenance prompt).
-- **Weekly points:** `$A points add --venue lighter_rh --week <YYYY-WW> --points <n>`.
-- **Backups:** `.env` (kept offline, never in git) and `state/live.sqlite`. The Parquet data
-  can be rebuilt only by re-recording, so back up `data/` if disk allows.
+  `data/param_changes_jsonl/`, and quoting uses the new values immediately. Read the Arcus changelog monthly.
+- **Modify:** requotes go out as cancel + place. To use modifyOrder instead (one request per requote), run
+  `$A selftest --allow-funded` first: it rests a tiny post-only order 3% below the market, modifies it and checks the
+  book. Only if that passes, set `use_modify: true` in `config/venues/arcus.yaml` and restart.
+- **Backups:** `.env` (kept offline, never in git) and `state/live.sqlite`. The scout's recordings can be rebuilt only
+  by re-recording, so back up `data/scout/tape/` if disk allows.
 
 ## 7. After a crash or reboot
 
@@ -102,8 +103,7 @@ Every automatic action goes to the decision log (JSON logs, `component=decision`
    - venue orders unknown to local state are cancelled (`reconcile_unknown`);
    - positions are taken from the venue.
 2. Check `$A status` and the `reconcile` alerts.
-3. If the bot died without a clean stop, the DMS has already cancelled Arcus quotes. Lighter's scheduled cancel-all
-   covers Lighter.
+3. If the bot died without a clean stop, the DMS has already cancelled Arcus quotes.
 
 ## 8. Incidents
 
@@ -194,5 +194,4 @@ Don't paste trailing `# comments` into zsh: by default it passes them to the com
   the container reports unhealthy when the recorder has not written for 15 minutes.
 - Bring results back with `rsync -a server:PATH/data/scout/ data/scout/` (tape, scans, reports).
 - Running the laptop scout at the same time is fine: each writes its own part files and the store de-duplicates.
-- `docker compose --profile research up -d` adds the full-book research recorder (`bot record`, about 1.5-2.5 GB/day;
-  `docker compose run --rm recorder compact` shrinks closed days). What runs and why: the repository README, section 11.
+- What runs and why: the repository README, section 11.

@@ -4,21 +4,19 @@ Grid points j in [-N, N] at C(1+delta)^j. Start: buys at j = -1..-N, sells at j 
 at j re-lists as a sell at j+1 (one step up); a filled sell at j re-lists as a buy at j-1. Each point holds at most one
 order, tagged `g{j}` so the order manager keeps queue priority across ticks.
 No new buys once inventory x P >= I_cap (symmetric for sells). Re-centre when |m - C| / C > R for longer than
-T_recentre; inventory then follows `recentre_inventory`: skew_exit (keep, skew the new grid against it),
-maker_unwind (reduce-only maker order at the touch, grid side that adds is paused), hedge_other_venue (hedge intent).
-Lighter: N <= 5 per side; the grid only changes on fills or re-centre, so it barely touches the order budget.
+T_recentre; inventory then follows `recentre_inventory`: skew_exit (keep, skew the new grid against it) or
+maker_unwind (reduce-only maker order at the touch, grid side that adds is paused). The grid only changes on fills or
+re-centre, so it barely touches the order budget.
 """
 
 from __future__ import annotations
-
-from decimal import Decimal
 
 from bot.common.config import MMSession
 from bot.core.order_manager import DesiredOrder
 from bot.strategies import quoting as qt
 from bot.strategies.base import StrategyContext, StrategyOutput
 from bot.strategies.mm_base import MMBase
-from bot.venues.base import TIF, Fill, OrderRequest, Side, Venue
+from bot.venues.base import Fill, Side
 
 
 class GridStrategy(MMBase):
@@ -40,21 +38,11 @@ class GridStrategy(MMBase):
     # ---------------------------------------------------------------- parameters
     def spacing(self, ctx: StrategyContext, mid: float) -> float:
         if self.delta_override is not None:
-            d = self.delta_override
-        elif isinstance(self.p.spacing_bps, int | float):
-            d = float(self.p.spacing_bps) * qt.BP
-        else:
-            a = self.p.autopilot
-            d = qt.dgrid_delta(ctx.view.sigma_1h(), a.target_fills_per_hour, k_delta=a.k_delta,
-                               delta_min=a.delta_min_bps * qt.BP, delta_max=a.delta_max_bps * qt.BP,
-                               maker_fee=float(ctx.market.maker_fee), tick_frac=self.tick_frac(ctx, mid),
-                               venue=ctx.venue, sigma_1s=ctx.view.vol_1s.sigma())
-        if ctx.off_hours:
-            d *= self.p.off_hours.spacing_mult
-        return d
+            return self.delta_override * (self.p.off_hours.spacing_mult if ctx.off_hours else 1.0)
+        return self.grid_spacing(ctx, mid)
 
     def level_count(self, ctx: StrategyContext, mid: float, q_usd: float) -> int:
-        cap = 5 if ctx.venue is Venue.LIGHTER_RH else 12
+        cap = 12
         if self.levels_override is not None:
             return max(1, min(cap, self.levels_override))
         if self.p.levels_per_side != "auto":
@@ -154,19 +142,7 @@ class GridStrategy(MMBase):
             orders += ex.desired.get((ctx.venue, ctx.market.base), [])
             if ctx.inventory == 0:
                 self.unwind_active = False
-        if note and self.p.recentre_inventory == "hedge_other_venue" and ctx.inventory != 0 and ctx.other_market:
-            out.hedge_intents.append(self.hedge_intent(ctx, mid))
         out.set(ctx.venue, ctx.market.base, orders)
         out.metrics = {"delta_bps": self.delta / qt.BP, "levels": float(self.n), "inv_usd": inv_usd, "u": u}
         return out
 
-    def hedge_intent(self, ctx: StrategyContext, mid: float) -> OrderRequest:
-        assert ctx.other_market is not None and ctx.other_view is not None
-        om = ctx.other_market
-        omid = ctx.other_view.mid_f() or mid
-        side = Side.SELL if ctx.inventory > 0 else Side.BUY
-        slip = 10 * qt.BP
-        px = omid * (1 - slip) if side is Side.SELL else omid * (1 + slip)
-        size = Decimal(str(qt.base_for_usd(abs(float(ctx.inventory)) * mid, omid, om)))
-        return OrderRequest(om.venue, om.base, side, om.round_price(Decimal(str(px)), is_bid=side is Side.BUY), size,
-                            TIF.IOC, tag="hedge", reason="grid re-centre: hedge inventory on the other venue")

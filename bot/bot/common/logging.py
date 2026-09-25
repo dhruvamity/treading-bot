@@ -18,13 +18,11 @@ import orjson
 
 from bot.common.time import now_us
 
-# Long hex strings (keys, signatures), Lighter auth tokens, Telegram bot tokens, JWT-ish strings, "0x" + 64 hex.
+# Long hex strings (keys, signatures), Telegram bot tokens, JWT-ish strings, "0x" + 64 hex.
 _REDACT_PATTERNS = [
     re.compile(r"0x[0-9a-fA-F]{64}"),
     re.compile(r"\b[0-9a-fA-F]{64,}\b"),
     re.compile(r"\b\d{6,}:[A-Za-z0-9_-]{30,}\b"),  # telegram bot token
-    re.compile(r"\b\d{9,11}:\d+:\d+:[0-9a-fA-F]{16,}\b"),  # lighter auth token expiry:acct:key:hex
-    re.compile(r"\bro:\d+:(single|all):\d+:[0-9a-fA-F]+\b"),  # lighter read-only token
     re.compile(r"eyJ[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{10,}"),
 ]
 _SECRET_KEYS = re.compile(r"(private|secret|password|token|signature|seed|mnemonic|auth)", re.I)

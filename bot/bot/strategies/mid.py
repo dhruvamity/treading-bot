@@ -1,7 +1,7 @@
 """Mid: 1-3 levels per side at r +/- (anchor + i x level step), skewed around the reservation price.
 
-Tread "Mid-1 / Mid-2" = offset_bps -1 / -2 (quotes inside the spread). Arcus only: Lighter standard's 200-300 ms
-cancels make tight quotes easy to pick off. Off-hours on Arcus RWA: Mid is not allowed (spec).
+Tread "Mid-1 / Mid-2" = offset_bps -1 / -2 (quotes inside the spread). Off-hours on an Arcus RWA perp Mid only quotes
+with off_hours.allow_mid (pilot sessions set it: the backtests quote at all hours).
 """
 
 from __future__ import annotations
@@ -9,7 +9,6 @@ from __future__ import annotations
 from bot.strategies import quoting as qt
 from bot.strategies.base import StrategyContext, StrategyOutput
 from bot.strategies.mm_base import MMBase
-from bot.venues.base import Venue
 
 
 class MidStrategy(MMBase):
@@ -21,8 +20,6 @@ class MidStrategy(MMBase):
         return max(2 * self.tick_frac(ctx, mid), ctx.view.vol_1m.sigma())
 
     def on_tick(self, ctx: StrategyContext) -> StrategyOutput:
-        if ctx.venue is Venue.LIGHTER_RH:
-            return self.exit_book(ctx, "Mid is blocked on Lighter standard (stale-quote risk)")
         if ctx.off_hours and not self.p.off_hours.allow_mid:
             return self.exit_book(ctx, "Mid disabled off-hours on Arcus RWA")
         why = self.blocked(ctx)

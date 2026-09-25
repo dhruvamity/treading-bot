@@ -1,16 +1,15 @@
 """PnL ledger (P2 task 8, A6.1).
 
-    NetPnL = SpreadCapture + InventoryMTM + Funding - Fees - HedgeCost - LiquidationLoss
+    NetPnL = SpreadCapture + InventoryMTM + Funding - Fees - LiquidationLoss
 
 Decomposition used (exact identity by construction, tested in C5/D2):
 - every fill's edge vs the mid at fill time, e = (mid - p) x size for buys and (p - mid) x size for sells,
-  goes to SpreadCapture (maker/strategy fills), to -HedgeCost (fills tagged hedge) or to
-  -LiquidationLoss (liquidation fills);
+  goes to SpreadCapture, or to -LiquidationLoss for liquidation fills;
 - InventoryMTM = trading PnL - sum(edges), where trading PnL = -sum(signed notional) + position x mark;
 - Fees: venue-reported fees on non-liquidation fills (+ = paid); a liquidation fill's fee goes to LiquidationLoss;
-- Funding: venue-reported payments (+ = received; Arcus pays on oracle, Lighter on index).
+- Funding: venue-reported payments (+ = received; Arcus pays on oracle).
 Also: volume, OI-hours (integral of |position| x mark dt), CPM = -NetPnL / Volume x 1e6, FIFO realised PnL
-(reported, not part of the identity), and weekly points entered by the owner.
+(reported, not part of the identity).
 """
 
 from __future__ import annotations
@@ -31,7 +30,6 @@ class Book:
     position: Decimal = Z
     cash: Decimal = Z  # -sum(signed notional)
     edges_spread: Decimal = Z
-    edges_hedge: Decimal = Z
     edges_liq: Decimal = Z
     fees: Decimal = Z
     liq_fees: Decimal = Z
@@ -52,7 +50,6 @@ class PnLBreakdown:
     inventory_mtm: Decimal
     funding: Decimal
     fees: Decimal
-    hedge_cost: Decimal
     liquidation_loss: Decimal
     volume: Decimal
     maker_volume: Decimal
@@ -63,8 +60,7 @@ class PnLBreakdown:
 
     @property
     def net(self) -> Decimal:
-        return (self.spread_capture + self.inventory_mtm + self.funding - self.fees - self.hedge_cost
-                - self.liquidation_loss)
+        return self.spread_capture + self.inventory_mtm + self.funding - self.fees - self.liquidation_loss
 
     @property
     def cpm(self) -> Decimal | None:
@@ -85,9 +81,8 @@ def _edge(f: Fill, mid: Decimal) -> Decimal:
 class Ledger:
     def __init__(self) -> None:
         self.books: dict[Key, Book] = defaultdict(Book)
-        self.points: dict[tuple[str, str], float] = {}
 
-    def on_fill(self, f: Fill, mid_at_fill: Decimal, *, kind: str = "strategy") -> None:
+    def on_fill(self, f: Fill, mid_at_fill: Decimal) -> None:
         b = self.books[(f.venue, f.base)]
         signed = f.size * f.side.sign
         b.cash -= signed * f.price
@@ -95,9 +90,6 @@ class Ledger:
         if f.liquidation:
             b.edges_liq += e
             b.liq_fees += f.fee
-        elif kind == "hedge":
-            b.edges_hedge += e
-            b.fees += f.fee
         else:
             b.edges_spread += e
             b.fees += f.fee
@@ -141,35 +133,32 @@ class Ledger:
         b = self.books[(venue, base)]
         m = mark if mark is not None else (b.last_mark or Z)
         trading = b.cash + b.position * m
-        edges = b.edges_spread + b.edges_hedge + b.edges_liq
+        edges = b.edges_spread + b.edges_liq
         return PnLBreakdown(
             spread_capture=b.edges_spread, inventory_mtm=trading - edges, funding=b.funding, fees=b.fees,
-            hedge_cost=-b.edges_hedge, liquidation_loss=-b.edges_liq + b.liq_fees, volume=b.volume,
+            liquidation_loss=-b.edges_liq + b.liq_fees, volume=b.volume,
             maker_volume=b.maker_volume, oi_hours_usd=b.oi_hours_usd, fills=b.fills, fifo_realized=b.fifo_realized,
             position=b.position)
 
     def total(self, marks: dict[Key, Decimal] | None = None) -> PnLBreakdown:
         parts = [self.breakdown(v, b, (marks or {}).get((v, b))) for (v, b) in list(self.books)]
         if not parts:
-            return PnLBreakdown(Z, Z, Z, Z, Z, Z, Z, Z, Z, 0, Z, Z)
+            return PnLBreakdown(Z, Z, Z, Z, Z, Z, Z, Z, 0, Z, Z)
         def s(k: str) -> Decimal:
             return sum((getattr(p, k) for p in parts), Z)
 
-        return PnLBreakdown(s("spread_capture"), s("inventory_mtm"), s("funding"), s("fees"), s("hedge_cost"),
+        return PnLBreakdown(s("spread_capture"), s("inventory_mtm"), s("funding"), s("fees"),
                             s("liquidation_loss"), s("volume"), s("maker_volume"), s("oi_hours_usd"),
                             sum(p.fills for p in parts), s("fifo_realized"), s("position"))
 
-    def add_points(self, venue: str, week: str, points: float) -> None:
-        self.points[(venue, week)] = points
-
 
 def daily_report_md(date: str, ledger: Ledger, marks: dict[Key, Decimal], extra: dict[str, object] | None = None) -> str:
-    lines = [f"# Daily report {date}", "", "| Venue | Market | Net | Spread | InvMTM | Funding | Fees | Hedge | Liq | "
-             "Volume | Maker vol | OI-h $ | CPM | Pos |", "|" + "---|" * 14]
+    lines = [f"# Daily report {date}", "", "| Venue | Market | Net | Spread | InvMTM | Funding | Fees | Liq | "
+             "Volume | Maker vol | OI-h $ | CPM | Pos |", "|" + "---|" * 13]
     for (v, b) in sorted(ledger.books, key=lambda k: (k[0].value, k[1])):
         p = ledger.breakdown(v, b, marks.get((v, b)))
         lines.append(f"| {v.value} | {b} | {p.net:.4f} | {p.spread_capture:.4f} | {p.inventory_mtm:.4f} | "
-                     f"{p.funding:.4f} | {p.fees:.4f} | {p.hedge_cost:.4f} | {p.liquidation_loss:.4f} | "
+                     f"{p.funding:.4f} | {p.fees:.4f} | {p.liquidation_loss:.4f} | "
                      f"{p.volume:.2f} | {p.maker_volume:.2f} | {p.oi_hours_usd:.2f} | "
                      f"{'' if p.cpm is None else f'{p.cpm:.1f}'} | {p.position} |")
     t = ledger.total(marks)

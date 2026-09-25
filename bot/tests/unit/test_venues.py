@@ -1,5 +1,5 @@
-"""Market parsing from live fixtures, symbol mapping, LiveParams change detection (A5), triple lock (B4),
-Lighter signer offline, nonces, key expiry (B5)."""
+"""Market parsing from live fixtures, symbol mapping, LiveParams change detection (A5), triple lock (B4), key
+expiry (B5)."""
 
 from __future__ import annotations
 
@@ -18,10 +18,6 @@ from bot.venues.arcus.models import base_fee_tier, fee_tier_for_volume
 from bot.venues.arcus.models import parse_market as parse_arcus
 from bot.venues.arcus.rest import ArcusRest
 from bot.venues.base import Venue
-from bot.venues.lighter_rh.models import parse_market as parse_lighter
-from bot.venues.lighter_rh.models import price_to_int, size_to_int
-from bot.venues.lighter_rh.nonce import NonceManager
-from bot.venues.lighter_rh.rest import LighterRest, per_endpoint_cap
 from bot.venues.symbols import SymbolMap
 
 FIX = Path(__file__).parents[1] / "fixtures" / "live"
@@ -32,12 +28,6 @@ def arcus_markets() -> dict:
     mk, tk = base_fee_tier(fees)
     return {m.base: m for m in (parse_arcus(x, maker_fee=mk, taker_fee=tk)
                                 for x in json.loads((FIX / "arcus_markets.json").read_text())["markets"])}
-
-
-def lighter_markets() -> dict:
-    obs = json.loads((FIX / "lighter_orderbooks.json").read_text())["order_books"]
-    det = {d["market_id"]: d for d in json.loads((FIX / "lighter_obd_btc.json").read_text())["order_book_details"]}
-    return {m.base: m for m in (parse_lighter(o, det.get(o["market_id"])) for o in obs if o["market_type"] == "perp")}
 
 
 def test_arcus_market_parse() -> None:
@@ -57,25 +47,16 @@ def test_fee_tiers() -> None:
     assert name == "VIP" and maker == D("-0.00002") and taker == D("0.0001")
 
 
-def test_lighter_market_parse_and_encoding() -> None:
-    m = lighter_markets()
-    btc = m["BTC"]
-    assert btc.venue_market_id == 1 and btc.tick_size == D("0.1") and btc.step_size == D("0.00001")
-    assert btc.imf == D("0.02") and btc.mmf == D("0.012") and btc.close_out_mf == D("0.008")
-    assert btc.min_notional == D("10") and btc.liquidation_fee == D("0.01")
-    assert price_to_int(D("86522.7"), btc) == 865227
-    assert size_to_int(D("0.00020"), btc) == 20
-    with pytest.raises(ValueError):
-        price_to_int(D("86522.75"), btc)
-
-
-def test_symbol_map_and_ratio_pairs() -> None:
-    sm = SymbolMap.build(list(arcus_markets().values()) + list(lighter_markets().values()))
-    both = sm.both()
+def test_symbol_map() -> None:
+    ms = list(arcus_markets().values())
+    sm = SymbolMap.build(ms)
     for b in ("BTC", "ETH", "SPY", "QQQ", "NVDA", "TSLA"):
-        assert b in both
-    assert ("GLD", "XAU") in sm.ratio_pairs_present()
-    assert sm.get("btc", Venue.ARCUS).venue_symbol == "BTC-USD"
+        assert sm.has(b, Venue.ARCUS)
+    assert sm.get("btc", Venue.ARCUS).venue_symbol == "BTC-USD" and not sm.ambiguous
+    dup = replace(ms[0], venue_market_id=999)
+    assert SymbolMap.build([*ms, dup]).ambiguous      # the same base under two ids is reported, not guessed
+    with pytest.raises(KeyError):
+        sm.get("NOPE", Venue.ARCUS)
 
 
 def test_liveparams_detects_change() -> None:
@@ -120,53 +101,6 @@ async def test_rest_clients_refuse_writes_without_lock() -> None:
         with pytest.raises(LiveLockError):
             await coro
     await rest.close()
-    lr = LighterRest("https://api.rh.lighter.xyz", writes_allowed=False)
-    with pytest.raises(LiveLockError):
-        await lr.send_tx(14, "{}")
-    with pytest.raises(LiveLockError):
-        await lr.send_tx_batch([14], ["{}"])
-    await lr.close()
-
-
-def test_lighter_endpoint_caps() -> None:
-    assert per_endpoint_cap("/api/v1/trades") == 40
-    assert per_endpoint_cap("/api/v1/changeAccountTier") == 8
-    assert per_endpoint_cap("/api/v1/orderBooks") == 60
-
-
-def test_nonce_manager_monotonic_and_persistent(tmp_path) -> None:
-    p = tmp_path / "nonce"
-    n = NonceManager(p)
-    a = n.next(now_ms=1000)
-    b = n.next(now_ms=1000)
-    c = n.next(now_ms=900)
-    assert a == 1000 and b == 1001 and c == 1002
-    assert NonceManager(p).next(now_ms=500) == 1003  # restart never reuses
-    assert len(set(n.reserve(10, now_ms=0))) == 10
-
-
-def test_lighter_signer_offline() -> None:
-    lib = pytest.importorskip("lighter")
-    from bot.venues.lighter_rh import signer as ls
-
-    priv, _pub = ls.generate_api_key()
-    from bot.common.errors import AuthError
-
-    with pytest.raises(AuthError):
-        ls.LighterSigner(url="https://api.rh-testnet.lighter.xyz", chain_id=300, account_index=1, api_key_index=3,
-                         private_key_hex=priv)  # reserved slot
-    s = ls.LighterSigner(url="https://api.rh-testnet.lighter.xyz", chain_id=300, account_index=1, api_key_index=4,
-                         private_key_hex=priv)
-    tx = s.create_order(market_index=1, client_order_index=7, base_amount=20, price=800000, is_ask=False,
-                        order_type=ls.ORDER_TYPE_LIMIT, time_in_force=ls.TIF_POST_ONLY, reduce_only=False,
-                        order_expiry=ls.DEFAULT_28_DAY_ORDER_EXPIRY, nonce=1_790_000_000_000)
-    info = tx.info()
-    assert tx.tx_type == 14 and info["TimeInForce"] == 2 and info["Nonce"] == 1_790_000_000_000
-    assert info["L2TxAttributes"]["4"] == 1  # SkipNonce on
-    dms = s.cancel_all(time_in_force=ls.CANCEL_ALL_SCHEDULED, time_ms=1_790_000_060_000, nonce=1_790_000_000_001)
-    assert dms.tx_type == 16 and dms.info()["TimeInForce"] == 1
-    assert ls.leverage_to_imf_fraction(3) == 3334
-    del lib
 
 
 def test_key_expiry_monitor() -> None:

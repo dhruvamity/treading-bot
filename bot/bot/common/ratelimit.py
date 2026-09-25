@@ -1,12 +1,9 @@
 """Client-side rate accounting.
 
 `TokenBucket`: continuous refill; `acquire(w)` waits until `w` tokens are available. Used for:
-- Arcus per-IP weight bucket (1,500 capacity, 25/s refill; the recorder is capped at 50% via a smaller bucket).
-- Lighter standard REST (60 requests / rolling minute) and sendTx (60 / minute).
+- Arcus per-IP weight bucket (1,500 capacity, 25/s refill; the bot and the scout run below it).
 
-`AdaptiveThrottle`: for Lighter REST whose effective semantics were uncertain (A4.4). Starts slow, speeds up
-after clean streaks, halves the rate on 429/405 and holds a 60 s firewall cooldown. Learned rates can be
-persisted by the caller.
+`RollingWindow`: events per rolling window (the WebSocket client's own message cap).
 """
 
 from __future__ import annotations
@@ -15,7 +12,6 @@ import asyncio
 import time
 from collections import deque
 from collections.abc import Callable
-from dataclasses import dataclass, field
 
 
 class TokenBucket:
@@ -28,7 +24,6 @@ class TokenBucket:
         self._clock = clock
         self._t = clock()
         self._lock = asyncio.Lock()
-        self.debt = 0.0  # post-flight charges (Arcus list endpoints) can drive the bucket negative
 
     def _refill(self) -> None:
         now = self._clock()
@@ -76,7 +71,7 @@ class TokenBucket:
 
 
 class RollingWindow:
-    """Counts events in a rolling window (e.g. Lighter '60 requests per rolling minute')."""
+    """Counts events in a rolling window (e.g. '1000 subscribe messages per minute')."""
 
     def __init__(self, limit: int, window_s: float = 60.0, clock: Callable[[], float] = time.monotonic) -> None:
         self.limit = limit
@@ -115,36 +110,3 @@ class RollingWindow:
         while not self.try_take(n):
             await asyncio.sleep(max(0.05, self.wait_time(n)))
 
-
-@dataclass
-class AdaptiveThrottle:
-    """Per-host interval controller. `min_interval_s` starts conservative (1 call / 10 s per A4.4)."""
-
-    interval_s: float = 10.0
-    floor_s: float = 1.0
-    ceiling_s: float = 60.0
-    speedup_after: int = 30
-    cooldown_s: float = 60.0
-    _last: float = 0.0
-    _ok_streak: int = 0
-    _blocked_until: float = 0.0
-    limit_events: list[tuple[float, int]] = field(default_factory=list)
-
-    async def wait(self) -> None:
-        now = time.monotonic()
-        t = max(self._last + self.interval_s, self._blocked_until)
-        if t > now:
-            await asyncio.sleep(t - now)
-        self._last = time.monotonic()
-
-    def on_ok(self) -> None:
-        self._ok_streak += 1
-        if self._ok_streak >= self.speedup_after and self.interval_s > self.floor_s:
-            self.interval_s = max(self.floor_s, self.interval_s * 0.8)
-            self._ok_streak = 0
-
-    def on_limited(self, status: int) -> None:
-        self._ok_streak = 0
-        self.interval_s = min(self.ceiling_s, self.interval_s * 2)
-        self._blocked_until = time.monotonic() + self.cooldown_s
-        self.limit_events.append((time.time(), status))

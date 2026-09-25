@@ -376,35 +376,6 @@ def pick_keyboard(top: list[dict[str, Any]]) -> Keyboard:
     return [row, [("Deployed", "openpositions"), ("☰ Menu", "menu")]] if row else [[("☰ Menu", "menu")]]
 
 
-def scout_text(scan: dict[str, Any] | None, now: float) -> str:
-    if not scan:
-        return "No scan yet. Start the scout on the server: <code>bot scout run</code> (it scans every 30 min)."
-    age = now - scan["ts_us"] / 1e6
-    r = scan.get("risk", {})
-    lev = scan.get("leverage")
-    cap = scan.get("capital") or {"usd": r.get("capital_usd", 100), "source": "fixed",
-                                  "pct": {"position_stop": 1, "daily_stop": 2, "kill": 10}}
-    p = cap["pct"]
-    sizing = (f"sizes from each market's leverage ({escape(lev['policy'])}; BTC/ETH at most 20x)" if lev else
-              f"${r.get('order_usd', 25):g} orders, ${r.get('cap_usd', 50):g} max position")
-    head = (f"<b>Best setups right now</b> (scan {ago(age)} ago, {scan.get('markets')} markets × "
-            f"{scan.get('configs')} settings)\n"
-            f"Backtested at ${cap['usd']:,.2f} of capital ({escape(str(cap['source']))}): {sizing}; stops "
-            f"{p['position_stop']:g}% position, {p['daily_stop']:g}% day, {p['kill']:g}% kill.\n\n")
-    body = candidate_lines(scan.get("top") or [])
-    near = [c for c in scan.get("ranked", []) if not c["go"] and c.get("days")][:3]
-    if near:
-        body += "\n\n<i>Closest that failed:</i>\n" + "\n".join(
-            f"· {escape(c['market'])} {escape(c['config'])}: {escape('; '.join(c['reasons'])[:120])}" for c in near)
-    at_max = [c for c in scan.get("at_max", []) if c.get("days")][:3]
-    if at_max:
-        body += "\n\n<i>At maximum leverage:</i>\n" + "\n".join(
-            f"· {escape(c['market'])} {escape(c['config'])}: {usd(c['volume_day'], sign=False)}/day, "
-            f"PnL {usd(c['pnl_day'])}/day · {'GO' if c['go'] else escape('; '.join(c['reasons'])[:90])}"
-            for c in at_max)
-    return head + body
-
-
 def pilot_text(pilot: Any) -> str:
     st = pilot.state()
     a = st.get("active")

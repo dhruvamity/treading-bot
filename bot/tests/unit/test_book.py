@@ -1,4 +1,4 @@
-"""Book rebuild: boundary gap, mid-stream gap, duplicate prices, Lighter nonce chain, and replay of LIVE frames."""
+"""Book rebuild: boundary gap, mid-stream gap, duplicate prices, and replay of LIVE frames."""
 
 from __future__ import annotations
 
@@ -6,7 +6,7 @@ import json
 from decimal import Decimal as D
 from pathlib import Path
 
-from bot.core.book import ArcusBookSync, L2Book, LighterBookSync, SyncResult
+from bot.core.book import ArcusBookSync, L2Book, SyncResult
 
 FIX = Path(__file__).parents[1] / "fixtures" / "live"
 
@@ -33,15 +33,6 @@ def test_duplicate_prices_last_write_wins() -> None:
     s.on_snapshot(snap(1))
     s.on_delta({"bids": [["99.8", "1"], ["99.8", "0"], ["99.8", "7"]], "asks": [], "lastSequenceId": 2})
     assert s.book.size_at(True, D("99.8")) == D("7")
-
-
-def test_lighter_nonce_chain() -> None:
-    s = LighterBookSync()
-    assert s.on_delta({"bids": [], "asks": [], "nonce": 5, "begin_nonce": 4}) is SyncResult.NOT_READY
-    s.on_snapshot({"bids": [{"price": "10", "size": "1"}], "asks": [{"price": "11", "size": "1"}], "nonce": 50})
-    assert s.on_delta({"bids": [{"price": "10", "size": "0"}], "asks": [], "nonce": 60, "begin_nonce": 50}) is SyncResult.APPLIED
-    assert s.book.best_bid() is None
-    assert s.on_delta({"bids": [], "asks": [], "nonce": 70, "begin_nonce": 61}) is SyncResult.GAP
 
 
 def test_book_reads() -> None:
@@ -76,18 +67,3 @@ def test_replay_live_arcus_frames_no_midstream_gap() -> None:
     for s in syncs.values():
         assert not s.book.crossed()
 
-
-def test_replay_live_lighter_frames_no_gap() -> None:
-    frames = json.loads((FIX / "lighter_ws_frames.json").read_text())
-    syncs: dict[str, LighterBookSync] = {}
-    for f in frames:
-        r = f["raw"]
-        ch = str(r.get("channel", ""))
-        if not ch.startswith("order_book:"):
-            continue
-        s = syncs.setdefault(ch, LighterBookSync())
-        if str(r["type"]).startswith("subscribed"):
-            s.on_snapshot(r["order_book"])
-        else:
-            assert s.on_delta(r["order_book"]) is SyncResult.APPLIED
-    assert syncs and all(not s.book.crossed() for s in syncs.values())

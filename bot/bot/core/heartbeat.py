@@ -17,6 +17,14 @@ def write_heartbeat(path: Path | str, **extra: object) -> None:
     os.replace(tmp, p)
 
 
+def read_heartbeat(path: Path | str) -> dict[str, object] | None:
+    try:
+        hb = orjson.loads(Path(path).read_bytes())
+    except (OSError, orjson.JSONDecodeError):
+        return None
+    return hb if isinstance(hb, dict) else None
+
+
 def read_heartbeat_age_s(path: Path | str, now_us: int | None = None) -> float:
     p = Path(path)
     if not p.exists():

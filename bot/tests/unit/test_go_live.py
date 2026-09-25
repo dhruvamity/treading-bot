@@ -21,7 +21,6 @@ from bot.core.creds import (
     ed25519_public_hex,
     key_for_account,
     normalize_ed25519_key,
-    resolve_lighter,
 )
 from bot.core.doctor import run_doctor, sizing_lines
 from bot.core.heartbeat import write_heartbeat
@@ -95,7 +94,7 @@ def cal() -> TradingCalendar:
 def doctor(sessions: list[Any], rest: FakeArcus, env: Env, *, mode: RunMode = RunMode.LIVE, tmp: Path, **kw: Any) -> Any:
     app = AppConfig(state_dir=str(tmp))
     return asyncio.run(run_doctor(sessions, mode=mode, app=app, secrets=env, calendar=cal(),  # type: ignore[arg-type]
-                                  arcus_rest=rest, lighter_rest=None, markets=MK, **kw))
+                                  arcus_rest=rest, markets=MK, **kw))
 
 
 def levels(rep: Any, area: str) -> set[str]:
@@ -119,18 +118,6 @@ def test_key_discovery_and_binding() -> None:
         normalize_ed25519_key("abc", "X")
     with pytest.raises(SecretsError, match="not set"):
         arcus_private_keys(Env(ARCUS_ADDRESS=ADDR))  # type: ignore[arg-type]
-
-
-def test_lighter_creds_defaults_and_reserved_slot() -> None:
-    class FL:
-        async def accounts_by_l1(self, a: str) -> dict[str, Any]:
-            return {"sub_accounts": [{"index": 777}]}
-
-    lc = asyncio.run(resolve_lighter(FL(), Env(LIGHTER_ADDRESS=ADDR, LIGHTER_API_PRIVATE_KEY="ab" * 40)))  # type: ignore[arg-type]
-    assert (lc.account_index, lc.api_key_index) == (777, 4) and "ab" * 40 not in repr(lc)
-    with pytest.raises(SecretsError, match="reserved"):
-        asyncio.run(resolve_lighter(FL(), Env(LIGHTER_ADDRESS=ADDR, LIGHTER_API_PRIVATE_KEY="ab",  # type: ignore[arg-type]
-                                              LIGHTER_API_KEY_INDEX="157")))
 
 
 def test_upsert_dotenv(tmp_path: Path) -> None:
@@ -233,7 +220,7 @@ def test_sizing_lines() -> None:
 
 
 def test_session_files_pass_sizing_at_todays_prices() -> None:
-    for name in ("arcus_btc_mm", "arcus_spy_blend"):
+    for name in ("arcus_btc_mm",):
         s = load_session(ROOT / "config/sessions" / f"{name}.yaml")
         m = MK[Venue.ARCUS][s.market.upper()]
         assert sizing_lines(s, m, D("86000") if s.market == "BTC" else D("770"))[0] == "PASS", name  # type: ignore[arg-type]

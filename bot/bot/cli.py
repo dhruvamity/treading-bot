@@ -26,13 +26,7 @@ from pathlib import Path
 from typing import Any
 
 from bot.common import sizing
-from bot.common.config import (
-    load_app,
-    load_arcus_config,
-    load_lighter_config,
-    load_session,
-    load_universe,
-)
+from bot.common.config import load_app, load_arcus_config, load_session
 from bot.common.logging import setup_logging
 from bot.common.secrets import KNOWN_SECRETS, SecretStore, load_dotenv, mask
 
@@ -52,59 +46,6 @@ def _confirm(what: str) -> None:
     if input("Type CONFIRM to proceed: ").strip() != "CONFIRM":
         print("aborted")
         sys.exit(1)
-
-
-# ---------------------------------------------------------------------------------------------- data
-def cmd_record(a: argparse.Namespace) -> None:
-    from bot.core.alerts import alerter_from_secrets
-    from bot.research.recorder.recorder import Recorder
-
-    app = load_app()
-    setup_logging(app.logs_dir)
-    uni = load_universe()
-    rec = Recorder(a.markets or uni.record, load_arcus_config(), load_lighter_config(), data_dir=Path(a.data or app.data_dir),
-                   alerter=alerter_from_secrets(SecretStore()), n_levels=uni.book_levels)
-
-    async def go() -> None:
-        if a.seconds:
-            await rec.run_for(a.seconds)
-        else:
-            await rec.start()
-            stop = asyncio.Event()
-            import signal
-
-            loop = asyncio.get_running_loop()
-            for s in (signal.SIGINT, signal.SIGTERM):
-                loop.add_signal_handler(s, stop.set)
-            await stop.wait()
-            await rec.stop()
-        print(json.dumps({"rows": dict(rec.writer.rows_written), "bytes": dict(rec.writer.bytes_written)}, indent=1))
-
-    _run(go())
-
-
-def cmd_load_history(a: argparse.Namespace) -> None:
-    from bot.research.loaders.history import load_all_funding
-
-    app = load_app()
-    setup_logging(app.logs_dir, to_stdout=False)
-    print(json.dumps(_run(load_all_funding(a.markets or load_universe().record, Path(a.data or app.data_dir))), indent=1))
-
-
-def cmd_dq_report(a: argparse.Namespace) -> None:
-    from bot.research.eval.dq import dq_report
-
-    app = load_app()
-    p = dq_report(Path(a.data or app.data_dir), a.date, Path(app.reports_dir))
-    print(f"wrote {p}")
-
-
-def cmd_compact(a: argparse.Namespace) -> None:
-    from bot.research.recorder.writer import compact_closed_days
-
-    app = load_app()
-    today = time.strftime("%Y-%m-%d", time.gmtime())
-    print(compact_closed_days(Path(a.data or app.data_dir), today))
 
 
 # ---------------------------------------------------------------------------------------------- sessions
@@ -128,11 +69,8 @@ def _load_sessions(a: argparse.Namespace) -> list[Any]:
         sys.exit(2)
     out = [load_session(resolve_session(n)) for n in names]
     if getattr(a, "mode", None):
-        from bot.common.config import MMSession
-
         for s in out:
-            if isinstance(s, MMSession):
-                s.mode = a.mode
+            s.mode = a.mode
     return out
 
 
@@ -143,15 +81,9 @@ def _run_mode(a: argparse.Namespace) -> Any:
 
 
 def _describe(s: Any) -> str:
-    from bot.common.config import MMSession
-
-    if isinstance(s, MMSession):
-        acct = f"sub {s.account_index}" if s.venue == "arcus" else "acct *"
-        return (f"{s.session_id:<20} {s.venue:<10} {acct:<6} {s.market:<6} mode={s.mode:<6} "
-                f"capital ${s.capital_usd:g}  lev {s.leverage_max:g}x  inv cap ${s.inventory_cap_usd:g}  "
-                f"live_enabled={s.live_enabled}")
-    return (f"{s.session_id:<20} DN {s.strategy:<12} {s.market:<6} ${s.collateral_per_leg_usd:g}/leg  "
-            f"lev {s.leverage_per_leg:g}x  live_enabled={s.live_enabled}")
+    return (f"{s.session_id:<20} {s.venue:<6} sub {s.account_index:<2} {s.market:<6} mode={s.mode:<6} "
+            f"capital ${s.capital_usd:g}  lev {s.leverage_max:g}x  inv cap ${s.inventory_cap_usd:g}  "
+            f"live_enabled={s.live_enabled}")
 
 
 def cmd_sessions(a: argparse.Namespace) -> None:
@@ -168,20 +100,18 @@ async def _doctor(sessions: list[Any], mode: Any, *, adopt: bool = False, accoun
     from bot.core.livelock import RunMode
     from bot.core.liveparams import LiveParams
     from bot.venues.arcus.rest import ArcusRest
-    from bot.venues.lighter_rh.rest import LighterRest
 
-    acfg, lcfg = load_arcus_config(), load_lighter_config()
-    acfg.env = lcfg.env = "testnet" if mode is RunMode.TESTNET else "mainnet"
-    ar, lr = ArcusRest(acfg.rest_url()), LighterRest(lcfg.rest_url())
+    acfg = load_arcus_config()
+    acfg.env = "testnet" if mode is RunMode.TESTNET else "mainnet"
+    ar = ArcusRest(acfg.rest_url())
     try:
-        lp = LiveParams(arcus=ar, lighter=lr)
+        lp = LiveParams(arcus=ar)
         await lp.refresh()
         return await run_doctor(sessions, mode=mode, app=load_app(), secrets=SecretStore(),
-                                calendar=TradingCalendar.load(), arcus_rest=ar, lighter_rest=lr, markets=lp.markets,
+                                calendar=TradingCalendar.load(), arcus_rest=ar, markets=lp.markets,
                                 adopt_positions=adopt, account_index=account_index)
     finally:
         await ar.close()
-        await lr.close()
 
 
 def cmd_doctor(a: argparse.Namespace) -> None:
@@ -229,7 +159,7 @@ def cmd_run(a: argparse.Namespace) -> None:
     setup_logging(app.logs_dir)
     try:
         runner = BotRunner(sessions, mode=mode, cli_live=mode is RunMode.LIVE, app=app, arcus_cfg=load_arcus_config(),
-                           lighter_cfg=load_lighter_config(), secrets=SecretStore(), calendar=TradingCalendar.load(),
+                           secrets=SecretStore(), calendar=TradingCalendar.load(),
                            state_db=a.state_db, typed_confirmation=typed)
         _run(runner.run(a.seconds))
     except BotError as e:
@@ -338,25 +268,22 @@ def cmd_status(a: argparse.Namespace) -> None:
 
 
 async def _venue_adapter(venue: str, account_index: int | None, mainnet: bool) -> Any:
-    from bot.core.creds import (
-        arcus_address,
-        arcus_private_keys,
-        discover_arcus_keys,
-        key_for_account,
-        resolve_lighter,
-    )
+    """A signing Arcus adapter for one-off commands (cancel-all, flatten, selftest, guardian). `venue` is kept for the
+    command-line and Telegram interfaces; Arcus is the only venue."""
+    from bot.core.creds import arcus_address, arcus_private_keys, discover_arcus_keys, key_for_account
     from bot.core.liveparams import LiveParams
+    from bot.venues.arcus.adapter import ArcusAdapter
+    from bot.venues.arcus.rest import ArcusRest
+    from bot.venues.arcus.signing import ArcusSigner
     from bot.venues.base import Venue
 
+    if venue != "arcus":
+        raise ValueError(f"unknown venue {venue!r} (Arcus is the only one)")
     s = SecretStore()
-    acfg, lcfg = load_arcus_config(), load_lighter_config()
-    acfg.env = lcfg.env = "mainnet" if mainnet else "testnet"
-    if venue == "arcus":
-        from bot.venues.arcus.adapter import ArcusAdapter
-        from bot.venues.arcus.rest import ArcusRest
-        from bot.venues.arcus.signing import ArcusSigner
-
-        pub = ArcusRest(acfg.rest_url())
+    acfg = load_arcus_config()
+    acfg.env = "mainnet" if mainnet else "testnet"
+    pub = ArcusRest(acfg.rest_url())
+    try:
         address = arcus_address(s, not mainnet)
         keys = await discover_arcus_keys(pub, address, arcus_private_keys(s, not mainnet))
         if account_index is None:
@@ -365,29 +292,12 @@ async def _venue_adapter(venue: str, account_index: int | None, mainnet: bool) -
         key = key_for_account(keys, int(account_index or 0))
         lp = LiveParams(arcus=pub)
         await lp.refresh()
-        rest = ArcusRest(acfg.rest_url(), signer=ArcusSigner(key.private_key), address=address, writes_allowed=True,
-                         is_mainnet=mainnet)
+    finally:
         await pub.close()
-        return ArcusAdapter(rest, None, address=address, account_index=int(account_index or 0),
-                            markets=lp.markets[Venue.ARCUS])
-    from bot.venues.lighter_rh.adapter import LighterAdapter
-    from bot.venues.lighter_rh.auth import AuthTokenManager
-    from bot.venues.lighter_rh.nonce import NonceManager
-    from bot.venues.lighter_rh.rest import LighterRest
-    from bot.venues.lighter_rh.signer import LighterSigner
-
-    lr = LighterRest(lcfg.rest_url())
-    lc = await resolve_lighter(lr, s, not mainnet)
-    signer = LighterSigner(url=lcfg.rest_url(), chain_id=lcfg.chain(), account_index=lc.account_index,
-                           api_key_index=lc.api_key_index, private_key_hex=lc.private_key)
-    lp = LiveParams(lighter=lr)
-    await lp.refresh()
-    return LighterAdapter(LighterRest(lcfg.rest_url(), writes_allowed=True), None, signer=signer,
-                          nonces=NonceManager(Path("state") / f"lighter_nonce_manual_{lc.account_index}_{lc.api_key_index}"),
-                          auth=AuthTokenManager(signer), account_index=lc.account_index,
-                          markets=lp.markets[Venue.LIGHTER_RH])
-
-
+    rest = ArcusRest(acfg.rest_url(), signer=ArcusSigner(key.private_key), address=address, writes_allowed=True,
+                     is_mainnet=mainnet)
+    return ArcusAdapter(rest, None, address=address, account_index=int(account_index or 0),
+                        markets=lp.markets[Venue.ARCUS], use_modify=acfg.use_modify)
 async def venue_cancel_all(venue: str, account: int | None, mainnet: bool, market: str | None = None) -> str:
     """Cancel every open order on a venue account (shared by the CLI and the Telegram bot)."""
     ad = await _venue_adapter(venue, account, mainnet)
@@ -691,83 +601,38 @@ def cmd_secrets(a: argparse.Namespace) -> None:
             print(f"{n:34s} {src:8s} {mask(s.get(n)) if src != 'missing' else ''}  # {KNOWN_SECRETS[n]}")
 
 
-def cmd_points(a: argparse.Namespace) -> None:
-    from bot.core.state import StateStore
-
-    app = load_app()
-    st = StateStore(a.state_db or app.state_db_for("live"))
-    if a.action == "add":
-        st.add_points(a.venue, a.week, a.points)
-    for v, w, p in st.points():
-        print(v, w, p)
-
-
 def cmd_probe(a: argparse.Namespace) -> None:
     from bot.core.liveparams import LiveParams
     from bot.venues.arcus.rest import ArcusRest
     from bot.venues.base import Venue
-    from bot.venues.lighter_rh.rest import LighterRest
 
     async def go() -> None:
-        acfg, lcfg = load_arcus_config(), load_lighter_config()
-        acfg.env = lcfg.env = "testnet" if a.testnet else "mainnet"
-        lp = LiveParams(arcus=ArcusRest(acfg.rest_url()), lighter=LighterRest(lcfg.rest_url()))
-        await lp.refresh()
-        v = Venue(a.venue)
-        for b in a.markets or sorted(lp.markets[v])[:10]:
-            m = lp.markets[v].get(b)
-            if m:
-                print(f"{v.value} {b:8s} id={m.venue_market_id:<4} tick={m.tick_size} step={m.step_size} "
-                      f"min=${m.min_notional}/{m.min_size} imf={m.imf} mmf={m.mmf} maxlev={m.max_leverage} "
-                      f"fees={m.maker_fee}/{m.taker_fee} status={m.status}")
-        if a.venue == "arcus" and a.testnet is False:
-            print("compliance:", await ArcusRest(acfg.rest_url()).compliance())
-        s = SecretStore()
-        addr = s.get("ARCUS_ADDRESS" if not a.testnet else "ARCUS_TESTNET_ADDRESS")
-        if a.venue == "arcus" and addr:
-            r = ArcusRest(acfg.rest_url())
-            for idx in (0, 1, 2):
-                try:
-                    print(f"sub{idx}", await r.rate_limit(addr, idx))
-                except Exception as e:
-                    print(f"sub{idx} rateLimit: {e}")
+        acfg = load_arcus_config()
+        acfg.env = "testnet" if a.testnet else "mainnet"
+        r = ArcusRest(acfg.rest_url())
+        try:
+            lp = LiveParams(arcus=r)
+            await lp.refresh()
+            mk = lp.markets[Venue.ARCUS]
+            for b in a.markets or sorted(mk)[:10]:
+                m = mk.get(b.upper())
+                if m:
+                    print(f"arcus {b:8s} id={m.venue_market_id:<4} tick={m.tick_size} step={m.step_size} "
+                          f"min=${m.min_notional}/{m.min_size} imf={m.imf} mmf={m.mmf} maxlev={m.max_leverage} "
+                          f"fees={m.maker_fee}/{m.taker_fee} status={m.status}")
+            if not a.testnet:
+                print("compliance:", await r.compliance())
+            addr = SecretStore().get("ARCUS_ADDRESS" if not a.testnet else "ARCUS_TESTNET_ADDRESS")
+            if addr:
+                for idx in (0, 1, 2):
+                    try:
+                        print(f"sub{idx}", await r.rate_limit(addr, idx))
+                    except Exception as e:
+                        print(f"sub{idx} rateLimit: {e}")
+        finally:
+            await r.close()
 
     _run(go())
-
-
-def cmd_backtest(a: argparse.Namespace) -> None:
-    from bot.research.eval.backtest import run_backtest
-
-    app = load_app()
-    setup_logging(app.logs_dir, to_stdout=False)
-    res = run_backtest([load_session(p) for p in a.session], Path(a.data or app.data_dir), start=a.start, end=a.end,
-                       fill_mode=a.fill_mode, lighter_maker_ms=a.lighter_maker_ms)
-    print(json.dumps(res, indent=1, default=str))
-
-
-def cmd_carry_study(a: argparse.Namespace) -> None:
-    from bot.research.diagnostics.carry import carry_study
-
-    app = load_app()
-    p = carry_study(Path(a.data or app.data_dir), a.markets or load_universe().record, Path(app.reports_dir))
-    print(f"wrote {p}")
-
-
-def cmd_diagnostics(a: argparse.Namespace) -> None:
-    from bot.research.diagnostics.microstructure import diagnostics_report
-
-    app = load_app()
-    p = diagnostics_report(Path(a.data or app.data_dir), a.markets or load_universe().record, Path(app.reports_dir))
-    print(f"wrote {p}")
-
-
-def cmd_gonogo(a: argparse.Namespace) -> None:
-    from bot.research.eval.gonogo import gonogo_report
-
-    app = load_app()
-    p = gonogo_report(Path(a.data or app.data_dir), Path(app.reports_dir), sessions=[load_session(s) for s in a.session],
-                      seed=a.seed)
-    print(f"wrote {p}")
 
 
 def cmd_region_check(a: argparse.Namespace) -> None:
@@ -786,19 +651,7 @@ def build_parser() -> argparse.ArgumentParser:
         sp.set_defaults(fn=fn)
         return sp
 
-    sp = add("record", cmd_record, "run the market-data recorder (public data only)")
-    sp.add_argument("--markets", nargs="*")
-    sp.add_argument("--data")
-    sp.add_argument("--seconds", type=float)
-    sp = add("load-history", cmd_load_history, "load historical funding for both venues")
-    sp.add_argument("--markets", nargs="*")
-    sp.add_argument("--data")
-    sp = add("dq-report", cmd_dq_report, "data-quality report for a UTC date")
-    sp.add_argument("--date", default=time.strftime("%Y-%m-%d", time.gmtime()))
-    sp.add_argument("--data")
-    sp = add("compact", cmd_compact, "merge closed days' Parquet part files")
-    sp.add_argument("--data")
-    modes = ("mid", "grid", "rgrid", "dgrid", "blend", "signal", "auto")
+    modes = ("mid", "grid", "rgrid", "signal")
     add("sessions", cmd_sessions, "list the session files: venue, subaccount, market, mode, capital, live_enabled")
     sp = add("doctor", cmd_doctor, "check everything a live run needs (credentials, account, sizing, clock); no orders")
     sp.add_argument("sessions", nargs="*", help="session names (default: credentials and account only)")
@@ -836,7 +689,7 @@ def build_parser() -> argparse.ArgumentParser:
     for name, fn, h in (("cancel-all", cmd_cancel_all, "cancel all open orders (mainnet unless --testnet)"),
                         ("flatten", cmd_flatten, "close all positions with reduce-only orders (mainnet unless --testnet)")):
         sp = add(name, fn, h)
-        sp.add_argument("--venue", choices=["arcus", "lighter_rh"], required=True)
+        sp.add_argument("--venue", choices=["arcus"], default="arcus")
         sp.add_argument("--account", type=int, help="subaccount (default: the one your key is bound to)")
         sp.add_argument("--testnet", action="store_true")
         if name == "cancel-all":
@@ -891,34 +744,10 @@ def build_parser() -> argparse.ArgumentParser:
     sp = add("secrets", cmd_secrets, "encrypted secrets store")
     sp.add_argument("action", choices=["init", "set", "list-redacted", "status", "import-env"])
     sp.add_argument("name", nargs="?")
-    sp = add("points", cmd_points, "record weekly Lighter points for the S4 study")
-    sp.add_argument("action", choices=["add", "list"])
-    sp.add_argument("--venue", default="lighter_rh")
-    sp.add_argument("--week")
-    sp.add_argument("--points", type=float)
-    sp.add_argument("--state-db")
     sp = add("probe", cmd_probe, "print live market params, compliance and rate budgets")
-    sp.add_argument("--venue", choices=["arcus", "lighter_rh"], default="arcus")
     sp.add_argument("--markets", nargs="*")
     sp.add_argument("--testnet", action="store_true")
-    sp = add("backtest", cmd_backtest, "replay recorded data through the simulator")
-    sp.add_argument("--session", action="append", required=True)
-    sp.add_argument("--start")
-    sp.add_argument("--end")
-    sp.add_argument("--data")
-    sp.add_argument("--fill-mode", choices=["pessimistic", "optimistic"], default="pessimistic")
-    sp.add_argument("--lighter-maker-ms", type=float, default=200)
-    sp = add("carry-study", cmd_carry_study, "DN funding/basis carry study on funding history")
-    sp.add_argument("--markets", nargs="*")
-    sp.add_argument("--data")
-    sp = add("diagnostics", cmd_diagnostics, "microstructure diagnostics on recorded data")
-    sp.add_argument("--markets", nargs="*")
-    sp.add_argument("--data")
-    sp = add("gonogo", cmd_gonogo, "write reports/GO_NO_GO.md")
-    sp.add_argument("--session", action="append", default=[])
-    sp.add_argument("--data")
-    sp.add_argument("--seed", type=int, default=7)
-    add("region-check", cmd_region_check, "print this server's IP, country and venue access")
+    add("region-check", cmd_region_check, "may this server's IP trade Arcus perps? (reads only)")
     return p
 
 

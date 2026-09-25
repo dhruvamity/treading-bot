@@ -2,8 +2,6 @@
 
 Arcus: POST /v1/scheduleCancel every 20 s with a 60 s absolute deadline (lead 5 s-5 min); auto-fires are capped
 at 10 per UTC day per subaccount, so the guardian must also be able to cancel directly.
-Lighter RH: a SCHEDULED cancel-all transaction (tx 16, time-in-force 1) serves the same purpose; each refresh
-costs one sendTx, so it defaults to 30 s refresh / 90 s deadline (5% of the standard 60/min budget).
 Two consecutive refresh failures -> safe mode (callback).
 """
 

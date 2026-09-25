@@ -14,7 +14,6 @@ from decimal import ROUND_CEILING, ROUND_FLOOR, Decimal, InvalidOperation, getco
 getcontext().prec = 40
 
 ZERO = Decimal(0)
-ONE = Decimal(1)
 
 
 class InexactConversion(ValueError):
@@ -44,21 +43,9 @@ def to_units_exact(value: Decimal | str, unit: Decimal | str) -> int:
     return int(n)
 
 
-def from_units(n: int, unit: Decimal | str) -> Decimal:
-    return (D(n) * D(unit)).normalize()
-
-
 def round_to_step(value: Decimal, step: Decimal, *, up: bool) -> Decimal:
     q = (value / step).to_integral_value(rounding=ROUND_CEILING if up else ROUND_FLOOR)
     return q * step
-
-
-def floor_to_step(value: Decimal, step: Decimal) -> Decimal:
-    return round_to_step(value, step, up=False)
-
-
-def ceil_to_step(value: Decimal, step: Decimal) -> Decimal:
-    return round_to_step(value, step, up=True)
 
 
 def tick_for_price(price: Decimal, tiers: Sequence[tuple[Decimal, Decimal | None]], default_tick: Decimal) -> Decimal:
@@ -92,18 +79,5 @@ def round_price(
     return out
 
 
-def bps(x: Decimal | float) -> Decimal:
-    """Fraction -> basis points."""
-    return D(x) * Decimal(10_000)
-
-
-def from_bps(b: Decimal | float | int) -> Decimal:
-    return D(b) / Decimal(10_000)
-
-
 def clamp(x: float, lo: float, hi: float) -> float:
-    return lo if x < lo else hi if x > hi else x
-
-
-def dclamp(x: Decimal, lo: Decimal, hi: Decimal) -> Decimal:
     return lo if x < lo else hi if x > hi else x

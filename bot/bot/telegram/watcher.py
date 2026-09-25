@@ -18,9 +18,8 @@ from collections.abc import Awaitable, Callable
 from dataclasses import asdict, dataclass, field
 from html import escape
 from pathlib import Path
-from typing import Any
 
-from bot.telegram.control import Control, ModeView
+from bot.telegram.control import Control
 from bot.telegram.views import _risk, ago, day_pnl, fill_line, usd
 
 Notify = Callable[[str, bool], Awaitable[None]]  # (html text, critical)
@@ -170,8 +169,3 @@ class Watcher:
 def _trim(md: str, n: int = 2500) -> str:
 
     return escape(md[:n] + ("\n…" if len(md) > n else ""))
-
-
-def status_digest(views: list[ModeView]) -> dict[str, Any]:
-    """Small machine-readable summary (used by tests and /ping)."""
-    return {v.mode: {"running": v.running, "day_pnl": day_pnl(v)} for v in views}

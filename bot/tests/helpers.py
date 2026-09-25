@@ -9,7 +9,6 @@ from bot.common.config import MMSession
 from bot.venues.arcus.models import base_fee_tier
 from bot.venues.arcus.models import parse_market as parse_arcus
 from bot.venues.base import Market, Venue
-from bot.venues.lighter_rh.models import parse_market as parse_lighter
 
 FIX = Path(__file__).parent / "fixtures" / "live"
 
@@ -19,10 +18,7 @@ def fixture_markets() -> dict[Venue, dict[str, Market]]:
     mk, tk = base_fee_tier(fees)
     a = {m.base: m for m in (parse_arcus(x, maker_fee=mk, taker_fee=tk)
                              for x in json.loads((FIX / "arcus_markets.json").read_text())["markets"])}
-    obs = json.loads((FIX / "lighter_orderbooks.json").read_text())["order_books"]
-    det = {d["market_id"]: d for d in json.loads((FIX / "lighter_obd_btc.json").read_text())["order_book_details"]}
-    lt = {m.base: m for m in (parse_lighter(o, det.get(o["market_id"])) for o in obs if o["market_type"] == "perp")}
-    return {Venue.ARCUS: a, Venue.LIGHTER_RH: lt}
+    return {Venue.ARCUS: a}
 
 
 def mm_session(**kw: object) -> MMSession:

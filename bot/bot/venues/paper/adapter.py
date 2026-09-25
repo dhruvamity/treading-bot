@@ -1,12 +1,10 @@
-"""Paper venue: implements VenueAdapter with NO real writes (P2 task 11, P5 task 1).
+"""Paper venue: the Arcus adapter's interface with NO real writes.
 
-The same class backs the simulator (venues/sim/adapter.py) with a simulated clock, so paper and sim share the
-queue-aware fill model, latency model, fees, margin and funding. Books are the live (or replayed) L2Book objects;
-the adapter attaches a level-change listener to tell cancels from trades.
+Orders rest against the live L2 books under the queue-aware fill model (venues/paper/fills.py), with latency, fees,
+margin and funding. The adapter attaches a level-change listener to tell cancels from trades.
 
-Latency (defaults from the spec; calibrate in P5): Arcus ALO place = RTT; Arcus taker +50 ms speed bump; Arcus
-cancel = RTT (priority lane); Lighter standard maker/cancel = RTT + 200 ms (docs) - run 0 ms as the optimistic
-variant; Lighter taker = RTT + 300 ms. A cancel takes effect only after its latency.
+Latency: Arcus ALO place = RTT; taker +50 ms speed bump; cancel = RTT (priority lane). A cancel takes effect only
+after its latency.
 """
 
 from __future__ import annotations
@@ -17,7 +15,6 @@ from dataclasses import dataclass, field
 from decimal import Decimal
 
 from bot.core.book import L2Book
-from bot.research.sim.fills import FillMode, QueueFillModel, SimOrder
 from bot.venues.base import (
     TIF,
     Fill,
@@ -31,6 +28,7 @@ from bot.venues.base import (
     Side,
     Venue,
 )
+from bot.venues.paper.fills import FillMode, QueueFillModel, SimOrder
 
 Z = Decimal(0)
 
@@ -45,10 +43,6 @@ class LatencyModel:
     @staticmethod
     def arcus(rtt_ms: float = 40) -> LatencyModel:
         return LatencyModel(int(rtt_ms * 1000), 0, 50_000, 0)
-
-    @staticmethod
-    def lighter(rtt_ms: float = 150, maker_ms: float = 200) -> LatencyModel:
-        return LatencyModel(int(rtt_ms * 1000), int(maker_ms * 1000), 300_000, 200_000)
 
     def place(self, taker: bool) -> int:
         return self.rtt_us + (self.taker_extra_us if taker else self.maker_extra_us)
@@ -73,7 +67,7 @@ class PaperVenue:
         self._markets = markets
         self.books = books
         self.now_us = now_us
-        self.latency = latency or (LatencyModel.arcus() if venue is Venue.ARCUS else LatencyModel.lighter())
+        self.latency = latency or LatencyModel.arcus()
         self.models: dict[str, QueueFillModel] = {}
         for b, m in markets.items():
             self.models[b] = QueueFillModel(mode=fill_mode, step=m.step_size, tick=m.tick_size,

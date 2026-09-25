@@ -1,4 +1,4 @@
-.PHONY: install lint type test test-network run-recorder dq-report compact carry-study diagnostics gonogo region-check paper doctor selftest telegram scout scan
+.PHONY: install lint type test test-network region-check paper doctor selftest telegram scout scan
 
 PY := .venv/bin/python
 UV ?= uv
@@ -18,24 +18,6 @@ test:
 
 test-network:
 	.venv/bin/pytest -m network
-
-run-recorder:
-	.venv/bin/bot record
-
-dq-report:
-	.venv/bin/bot dq-report --date $(or $(DATE),$(shell date -u +%F))
-
-compact:
-	.venv/bin/bot compact
-
-carry-study:
-	.venv/bin/bot carry-study
-
-diagnostics:
-	.venv/bin/bot diagnostics
-
-gonogo:
-	.venv/bin/bot gonogo --session config/sessions/arcus_btc_mm.yaml --session config/sessions/dn_spy.yaml
 
 region-check:
 	$(PY) deploy/scripts/region_check.py
