@@ -2,6 +2,7 @@
 
     bot up                        start everything this machine should run (scout, Telegram, guardian)
     bot status                    one screen: services, trading bot, what is deployed, last scan, balance
+    bot dashboard                 live screen, every 10 s: today's volume and PnL, the capital's profit or loss
     bot pilot approve 1 [--live]  trade the scout's #1 setup (paper, or real money)
     bot pilot close               close the position and stop trading
     bot down [--all]              stop the services (--all: the trading bot too, positions kept)
@@ -270,6 +271,38 @@ def cmd_down(a: argparse.Namespace) -> None:
         print(ops.stop(app, name)[1])
     if "guardian" not in names:
         print("guardian: left running, it watches the live bot (bot down --all stops both)")
+
+
+def cmd_dashboard(a: argparse.Namespace) -> None:
+    """Redraw the live dashboard every 10 s until Ctrl-C (--once: print it once). Same numbers as Telegram's
+    /dashboard; with no fresh reading from a running bot it reads the account itself at most once a minute."""
+    from bot.scout.capital import account_snapshot
+    from bot.telegram import dashboard
+    from bot.telegram.control import Control
+
+    app = load_app()
+    ctl = Control(app)
+    url = load_arcus_config().rest.mainnet
+    own: dict[str, Any] | None = None
+    try:
+        while True:
+            now = time.time()
+            d = dashboard.collect(ctl, now=now, extra=own)
+            stale = d.account_age_s is None or d.account_age_s > dashboard.FRESH_S
+            if d.mode != "paper" and stale and (own is None or now - own["ts"] > dashboard.FRESH_S):
+                with contextlib.suppress(Exception):   # show the last reading instead
+                    snap = asyncio.run(account_snapshot(url))
+                    if snap and snap["equity"] > 0:
+                        own = {**snap, "ts": now, "from": "this screen"}
+                        d = dashboard.collect(ctl, now=now, extra=own)
+            text = dashboard.render(d, html=False, frame="once" if a.once else "live")
+            if a.once:
+                print(text)
+                return
+            print("\033[H\033[2J" + text + "\n\n(Ctrl-C to leave)", flush=True)
+            time.sleep(max(0.5, dashboard.REFRESH_S - time.time() % dashboard.REFRESH_S))
+    except KeyboardInterrupt:
+        print()
 
 
 def cmd_status(a: argparse.Namespace) -> None:
@@ -785,6 +818,8 @@ def build_parser() -> argparse.ArgumentParser:
     sp = add("status", cmd_status, "one screen: services, trading bot, what is deployed, last scan, balance")
     sp.add_argument("--mode", choices=["live", "testnet", "paper"])
     sp.add_argument("--json", action="store_true", help="the per-mode details as JSON (heartbeat, orders, positions)")
+    sp = add("dashboard", cmd_dashboard, "live screen, every 10 s: today's volume and PnL, the capital's profit or loss")
+    sp.add_argument("--once", action="store_true", help="print it once and exit")
     sp = add("selftest", cmd_selftest, "prove Arcus accepts every signed request the bot sends (no trading)")
     sp.add_argument("--account", type=int, help="subaccount (default: the one your key is bound to)")
     sp.add_argument("--market", default="BTC")

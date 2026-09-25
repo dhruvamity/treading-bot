@@ -26,14 +26,15 @@ From `treading-bot/bot` on the machine that runs the bot (after the one-time ins
 |---|---|
 | `bot up` | Starts everything in the background: the scout (records and ranks), the Telegram bot, and the guardian while a live bot runs |
 | `bot status` | One screen: what runs, what is deployed, the last scan and its top 3, the balance |
+| `bot dashboard` | Live screen, redrawn every 10 s: today's volume and PnL, your capital's profit or loss (Ctrl-C leaves) |
 | `bot pilot approve 1` | Trades the scout's #1 setup in paper (add `--live` for real money) |
 | `bot pilot close` | Closes the position and stops trading |
 | `bot down` | Stops the scout and the Telegram bot (`bot down --all`: the trading bot too, position kept) |
 
 (`bot` is `.venv/bin/bot`; activate the venv with `source .venv/bin/activate`, or type the full path.)
 
-On your phone, send `/menu` for buttons, or: `/top3` (best setups, Run), `/openpositions` (what runs), `/status`,
-`/balance`, `/pauseneworders`, `/closeall`, `/settings` and `/set` (change capital, share of the balance, stops, scan
+On your phone, send `/menu` for buttons, or: `/dashboard` (a live screen that updates itself every 10 s), `/top3`
+(best setups, Run), `/openpositions` (what runs), `/status`, `/balance`, `/pauseneworders`, `/closeall`, `/settings` and `/set` (change capital, share of the balance, stops, scan
 interval without editing files). [Section 9](#9-the-telegram-bot) has them all.
 
 ---
@@ -419,6 +420,18 @@ the free collateral and Arcus's **net deposits** (deposits minus withdrawals), s
 deposits) is never confused with money you moved in or out. `/balance` shows the latest reading with its 1-, 7- and
 30-day change; `bot status` shows the last one.
 
+<a id="dashboard"></a>**The live dashboard** (`/dashboard` in Telegram, `bot dashboard` in a terminal) refreshes
+every 10 s:
+- **Volume today:** the bot's own fills since 00:00 UTC, exact to the last fill.
+- **Pace:** today's volume scaled to a full day. It shows after 30 minutes of trading, next to the backtest's volume
+  per day.
+- **PnL today:** trading PnL now minus trading PnL at 00:00 UTC, taken from the balance history. It counts fees,
+  funding and the open position's mark-to-market. Deposits never count, and restarting the bot during the day does
+  not reset it.
+- **Capital P/L:** equity minus net deposits, since your first deposit.
+- **Where equity comes from:** the running bot reads it every 15 s. With no bot running, the dashboard reads the
+  account itself, at most once a minute.
+
 **The floor: least capital.** The smallest order the bot places, the off-hours one on RWA perps, must stay at least
 1.2× the Arcus minimum order (max($5, minimum size × price)). So the least capital is 3 × minimum order ÷ off-hours
 leverage: $0.90 for QQQ or GLD at their maximum (25x, 16.7x off-hours), $7.50 for most markets at 2x, $8.11 for
@@ -728,6 +741,7 @@ Send `/menu` for buttons. Telegram's `/` list shows the everyday commands; the r
 |---|---|
 | `/top3` | The 3 best setups right now, with sizes and backtest numbers and **Run** buttons (Paper / LIVE) |
 | `/openpositions` | What is deployed: state, today's PnL vs the backtest, the last check, **Close & stop** |
+| `/dashboard` | A live screen that updates itself every 10 s, pinned at the top of the chat: today's volume (and its pace vs the backtest), today's PnL, the position, and your capital's profit or loss (equity minus deposits). ⏹ stops it, ▶️ starts it again; a newer `/dashboard` replaces the old one |
 | `/status` | Is it running, today's PnL, fills, volume |
 | `/balance` | The account now (read live and logged): equity, free collateral, deposits vs trading PnL, the 1/7/30-day change, and the capital the scout and the bot size for |
 | `/positions`, `/orders` | What you hold; what is waiting on the book |
@@ -803,6 +817,7 @@ within 2 minutes. If a bot is already running it first closes its position and s
 | Command | What |
 |---|---|
 | `bot up` / `bot down [--all]` / `bot status [--json]` | Start or stop the background services (scout, Telegram, guardian); one status screen |
+| `bot dashboard [--once]` | The live dashboard in the terminal, redrawn every 10 s (same numbers as Telegram's `/dashboard`) |
 | `bot scout run [--workers auto\|N] [--every-min M] [--depth] [--max-only] [--capital auto\|USD]` | Record everything and scan every M minutes (the daemon; `bot up` runs it), at the account's equity or a fixed capital |
 | `bot scout scan [--markets …] [--max-only] [--capital auto\|USD] [--full]` | One scan now, printed as a table (`--full`: re-run the last 24 h for every setting) |
 | `bot scout limits [--markets …]` | Per market: the least capital it can run on, the order ceiling, and the capital it can fully use |

@@ -222,7 +222,8 @@ class PaperVenue:
         for b, sz in self.acct.positions.items():
             mk = self._mark(b) or Z
             im += abs(sz) * mk * self._markets[b].imf
-        return {"equity": eq, "free_collateral": eq - im}
+        # net_deposits = the paper account's starting money, so PnL reads the same as live (equity - net deposits)
+        return {"equity": eq, "free_collateral": eq - im, "net_deposits": self.starting_equity}
 
     def _mark(self, base: str) -> Decimal | None:
         if self._marks is not None:
