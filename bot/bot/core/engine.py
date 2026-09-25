@@ -216,6 +216,9 @@ class SessionEngine:
         if view is None or view.mid() is None:
             return None
         ok, why = self.risk.quoting_allowed(self.venue, self.base, now_us)
+        window = self.calendar.in_skip_window(now_us, self.session.session.skip_et)
+        if ok and window:
+            ok, why = False, f"skip window {window} New York time: no new quotes"
         skip = set(self.session.session.skip_events or [])
         ev = self.calendar.in_event_window(now_us, self.base, skip) if skip else False
         off_hours = self.venue is Venue.ARCUS and bool(view.is_outside_rth) and m.rth is not None

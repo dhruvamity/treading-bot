@@ -103,8 +103,12 @@ def order_size_usd(explicit: float | str, *, venue_min_usd: float, inventory_cap
 
 def to_desired(m: Market, side: Side, price: float | Decimal, size_base: float | Decimal, tag: str, *,
                post_only: bool = True, reduce_only: bool = False) -> DesiredOrder | None:
-    """Round (bids down, asks up, band tick) and convert to engine integers. None if size rounds to 0."""
-    p = m.round_price(Decimal(str(price)), is_bid=side is Side.BUY)
+    """Round (bids down, asks up, band tick) and convert to engine integers. None if size rounds to 0.
+    A price within 1e-9 of a tick is on it, as in the scout's backtest (sim.round_bid / round_ask): float noise
+    (620.2 + 0.2 = 620.4000000000001) must not push a quote at the touch one tick behind it."""
+    raw = Decimal(str(price))
+    eps = m.tick_size * Decimal("1e-9")
+    p = m.round_price(raw + eps if side is Side.BUY else raw - eps, is_bid=side is Side.BUY)
     if p <= 0:
         return None
     q = int(Decimal(str(size_base)) / m.step_size)

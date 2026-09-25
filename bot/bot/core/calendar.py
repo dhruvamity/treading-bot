@@ -86,6 +86,22 @@ class TradingCalendar:
     def is_trading_day(self, d: date) -> bool:
         return d.weekday() < 5 and (d not in self.holidays or self.holidays[d] is not None)
 
+    def in_skip_window(self, ts_us: int, windows: list[str]) -> str | None:
+        """The "HH:MM-HH:MM" New York window ts falls in on an NYSE trading day (a session's skip_et), else None.
+        The scout's backtest applies the same rule (bot/scout/sim.py Window.skip)."""
+        if not windows:
+            return None
+        et = us_to_dt(ts_us).astimezone(NEW_YORK)
+        if not self.is_trading_day(et.date()):
+            return None
+        t = et.time()
+        for w in windows:
+            a, _, b = w.partition("-")
+            (ah, am), (bh, bm) = ((int(x) for x in a.split(":")), (int(x) for x in b.split(":")))
+            if time(ah, am) <= t < time(bh, bm):
+                return w
+        return None
+
     def session_label(self, ts_us: int) -> str:
         """rth (09:30-16:00 ET), pre (04:00-09:30), post (16:00-20:00), overnight (20:00-04:00 on weekdays),
         weekend (Sat, Sun, and holidays)."""

@@ -110,6 +110,9 @@ class SessionWindowCfg(_Model):
     duration: str = "8h"
     repeat: int = 1
     windows_ist: list[str] = []
+    # New York time windows on NYSE trading days with no new quotes (the position is worked off with a reduce-only
+    # maker order at the touch), e.g. ["09:00-16:30"]: the scout's "skip US session" settings
+    skip_et: list[str] = []
     skip_events: list[str] = ["cpi", "fomc", "nfp", "earnings"]
 
     @field_validator("windows_ist")
@@ -121,6 +124,21 @@ class SessionWindowCfg(_Model):
                 hh, _, mm = t.partition(":")
                 if not (hh.isdigit() and mm.isdigit() and 0 <= int(hh) < 24 and 0 <= int(mm) < 60):
                     raise ValueError(f"bad IST window {w!r}; use HH:MM-HH:MM")
+        return v
+
+    @field_validator("skip_et")
+    @classmethod
+    def _skip(cls, v: list[str]) -> list[str]:
+        for w in v:
+            a, _, b = w.partition("-")
+            hm = []
+            for t in (a, b):
+                hh, _, mm = t.partition(":")
+                if not (hh.isdigit() and mm.isdigit() and 0 <= int(hh) < 24 and 0 <= int(mm) < 60):
+                    raise ValueError(f"bad New York window {w!r}; use HH:MM-HH:MM")
+                hm.append((int(hh), int(mm)))
+            if hm[0] >= hm[1]:
+                raise ValueError(f"New York window {w!r} must end after it starts on the same day")
         return v
 
     def duration_s(self) -> int:
@@ -184,7 +202,7 @@ class MMSession(_Model):
     venue: Literal["arcus"] = "arcus"
     account_index: int = 1
     market: str
-    mode: Literal["mid", "grid", "rgrid", "signal"] = "mid"
+    mode: Literal["mid", "grid", "rgrid", "signal", "anchor"] = "mid"
     live_enabled: bool = False
     capital_usd: float = 35
     leverage_max: float = 5

@@ -5,8 +5,8 @@
 - volume:     any setting whose losses cost at most `volume_cost` dollars per $1,000 of volume (/set volume_cost),
               with every check that is not about money still passing (fills, kill, liquidation, fresh data, trend,
               volatility, new listing). Most volume first: paying a known price for volume.
-- aggressive: the same budget, but only Mid quoting at or inside the best bid/ask ("improve touch", "touch 1bp"):
-              the fastest flipping, the most fills.
+- aggressive: the same budget, but only Mid quoting at or inside the best bid/ask ("improve touch", "touch 1bp",
+              and both with the US session skipped): the fastest flipping, the most fills.
 
 The daily stop still applies to every run: a setting whose backtest hit it has that already in its numbers, since
 the scout backtests with the owner's own stops. The lists are ranked from the scan's `all` rows at view time, so a
@@ -19,7 +19,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Any
 
-AGGRESSIVE = ("improve touch", "touch 1bp")
+AGGRESSIVE = ("improve touch", "touch 1bp", "improve touch, skip US session", "touch 1bp, skip US session")
 RECENT_X = 2.0     # the last 24 h may cost up to this multiple of the budget (one day is noisy)
 MONEY_PREFIXES = ("loses $", "hit the daily stop", "only ", "last 24 h lost", "last 6 h lost")   # older scans
 

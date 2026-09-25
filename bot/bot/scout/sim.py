@@ -19,6 +19,8 @@ Risk rules (the live bot enforces the same ones, from the same session fields):
 - kill: equity more than `kill_usd` below its peak -> taker flatten, stop for good (live needs a manual resume);
 - safety pause: spread > 3x its 1-h median (and > 1 bp above it), or a 1-s move > 6 sigma -> no quotes for 30 s;
 - a gap in the data over 10 minutes pulls all quotes (the live bot would see a stale feed);
+- skip windows (Config.skip_et, the session's `skip_et`): no new quotes inside those New York hours on NYSE trading
+  days; a position is worked off with a reduce-only maker order at the touch, as during a safety pause;
 - liquidation distance: (equity - notional x MMF) / notional under 4 sigma of 1-h returns -> cut half the position
   with a taker order (the live risk engine's REDUCE_HALF); re-armed above 6 sigma;
 - liquidation: equity at or below notional x MMF -> the venue closes everything (counted as a kill).
@@ -31,6 +33,7 @@ The capital and the stops (as % of it) come from bot/common/sizing.py, the same 
 
 from __future__ import annotations
 
+import datetime as dt
 import math
 from collections import deque
 from dataclasses import asdict, dataclass, field
@@ -40,6 +43,7 @@ import numpy as np
 
 from bot.common.indicators import ema, rsi
 from bot.common.sizing import Pct, sizes
+from bot.common.time import NEW_YORK
 from bot.scout.tape import DayTape
 
 S = 1_000_000
@@ -102,13 +106,13 @@ class Config:
     """One strategy setting. `mode` and the fields map 1:1 onto a session file (see scout/pilot.py)."""
 
     name: str
-    mode: str                   # mid | grid | rgrid | signal
+    mode: str                   # mid | grid | rgrid | signal | anchor
     style: str = "passive"      # mid: passive (fixed distance from mid) | normal | aggressive
     spacing_bps: float = 3.0
     levels: int = 1
     level_step_bps: float = 2.0
     kappa: float = 0.0
-    reset_pct: float = 0.5      # grid / rgrid
+    reset_pct: float = 0.5      # grid / rgrid; anchor: the soft reset distance
     recentre_after_s: float = 120.0
     rgrid_ema_s: float = 300.0
     rgrid_cut_after_s: float = 20.0
@@ -119,6 +123,7 @@ class Config:
     max_hold_min: float = 120.0
     cooldown_min: float = 5.0
     safety: bool = True         # the live safety pause (session safety_pause); off = thresholds out of reach
+    skip_et: tuple[str, ...] = ()   # "HH:MM-HH:MM" New York windows on NYSE trading days with no new quotes
 
 
 @dataclass(frozen=True)
@@ -475,8 +480,49 @@ class SignalPolicy(Policy):
             self.cool_until = t + int(self.c.cooldown_min * 60 * S)
 
 
+class AnchorPolicy(Policy):
+    """Quotes around the last fill (the Grid mode of Tread users): flat, mid +/- max(d, half the spread); holding a
+    position, last fill x (1 -/+ d), so a sell never goes below the last buy + d. When the mid runs more than
+    reset_pct against the position from the last fill, it stops adding and closes at the touch; flat again, it
+    starts over around the mid."""
+
+    def __init__(self, cfg: Config, risk: Risk, mi: MarketInfo) -> None:
+        super().__init__(cfg, risk, mi)
+        self.ref: float | None = None
+        self.resetting = False
+
+    def quotes(self, b: Book) -> tuple[list[tuple[int, float, float, str]], float]:
+        c, tick = self.c, self.m.tick
+        d = c.spacing_bps * BP
+        if b.pos == 0 or self.ref is None:
+            self.ref, self.resetting = None, False
+            half = max(d * b.mid, (b.ask - b.bid) / 2)
+            bid, ask = b.mid - half, b.mid + half
+        else:
+            adverse = (self.ref - b.mid) / self.ref if b.pos > 0 else (b.mid - self.ref) / self.ref
+            if c.reset_pct > 0 and adverse > c.reset_pct / 100:
+                self.resetting = True
+            if self.resetting:
+                side = SELL if b.pos > 0 else BUY
+                return [(side, b.ask if side == SELL else b.bid, abs(b.pos), "exit")], 0.0
+            bid, ask = self.ref * (1 - d), self.ref * (1 + d)
+        if bid >= b.ask:
+            bid = b.ask - tick
+        if ask <= b.bid:
+            ask = b.bid + tick
+        q = self.q_base(b.mid)
+        nb, ns = self.caps(b, q)
+        return self.two_sided(b, [(round_bid(bid, tick), round_ask(ask, tick), "0")], q, 0.0, nb, ns), 0.0
+
+    def on_fill(self, side: int, px: float, qty: float, tag: str, t: int, pos_after: float) -> None:
+        if abs(pos_after) < self.m.step / 2:
+            self.ref, self.resetting = None, False
+        elif tag != "exit":
+            self.ref = px
+
+
 POLICIES: dict[str, type[Policy]] = {"mid": MidPolicy, "grid": GridPolicy, "rgrid": RGridPolicy,
-                                     "signal": SignalPolicy}
+                                     "signal": SignalPolicy, "anchor": AnchorPolicy}
 
 
 # ------------------------------------------------------------------------------------------------ simulator
@@ -488,13 +534,16 @@ class Window:
     second, data age, and the safety-pause flags the live bot computes at 1 Hz (bot/core/marketdata.py, risk.py)."""
 
     def __init__(self, tape: DayTape, start_us: int, end_us: int, warmup_s: int = 2 * 3600,
-                 alive_ts: np.ndarray | None = None, rth: Any = None) -> None:
+                 alive_ts: np.ndarray | None = None, rth: Any = None, holidays: list[str] | None = None) -> None:
         """alive_ts: timestamps that prove the recorder was up (the busiest market's rows). A quiet book can go
         many minutes without a change; that is not missing data, a recorder outage is.
         rth: callable(seconds array) -> bool array, True while the underlying's session is open (RWA perps);
-        None = always in session (crypto)."""
+        None = always in session (crypto).
+        holidays: NYSE full-day holidays (ISO dates), for the skip windows (Config.skip_et)."""
         b, tr = tape.bbo, tape.trades
         self._cols: tuple[list[Any], ...] | None = None
+        self._skip: dict[tuple[str, ...], list[bool]] = {}
+        self.holidays = set(holidays or ())
         self.market, self.start_us, self.end_us = tape.market, start_us, end_us
         first = int(b["ts"][0]) if len(b["ts"]) else start_us
         w0 = max(start_us - warmup_s * S, first)
@@ -565,6 +614,25 @@ class Window:
                           self.asz.tolist(), self.trade_idx.tolist())
         return self._cols
 
+    def skip(self, windows: tuple[str, ...]) -> list[bool]:
+        """Per second: True inside any "HH:MM-HH:MM" New York window on an NYSE trading day (weekdays that are not
+        full holidays; the live bot's TradingCalendar.in_skip_window). Built once per set of windows."""
+        if windows not in self._skip:
+            out = np.zeros(self.n, bool)
+            if self.n:
+                d = dt.datetime.fromtimestamp(int(self.t[0]) / S, NEW_YORK).date() - dt.timedelta(days=1)
+                last = dt.datetime.fromtimestamp(int(self.t[-1]) / S, NEW_YORK).date()
+                while d <= last:
+                    if d.weekday() < 5 and d.isoformat() not in self.holidays:
+                        for w in windows:
+                            (ah, am), (bh, bm) = ((int(x) for x in hm.split(":")) for hm in w.split("-"))
+                            t0 = int(dt.datetime.combine(d, dt.time(ah, am), NEW_YORK).timestamp()) * S
+                            t1 = int(dt.datetime.combine(d, dt.time(bh, bm), NEW_YORK).timestamp()) * S
+                            out |= (self.t >= t0) & (self.t < t1)
+                    d += dt.timedelta(days=1)
+            self._skip[windows] = out.tolist()
+        return self._skip[windows]
+
     def bbo_at(self, ts: int) -> tuple[float, float]:
         k = int(np.searchsorted(self.bbo["ts"], ts, side="right")) - 1
         if k < 0:
@@ -585,6 +653,7 @@ class Sim:
             return res
         policy = POLICIES[cfg.mode](cfg, risk, mi)
         T, OK, MID, BID, ASK, AGE, PAUSED, RTH, BSZ, ASZ, TIDX = w.columns()
+        SKIP = w.skip(cfg.skip_et) if cfg.skip_et else None
         lat = int(sp.latency_ms * 1000)
         tick = mi.tick
         tts, tpx, tsz, tbuy, tseq = w.tts, w.tpx, w.tsz, w.tbuy, w.tseq
@@ -823,7 +892,7 @@ class Sim:
                         desired = [(side, ASK[i] if side == SELL else BID[i], abs(st["pos"]), "exit",
                                     True)]
                 elif state == "normal":
-                    if AGE[i] <= sp.gap_s and not (cfg.safety and PAUSED[i]):
+                    if AGE[i] <= sp.gap_s and not (cfg.safety and PAUSED[i]) and not (SKIP and SKIP[i]):
                         key = (BID[i], ASK[i], st["pos"], policy.scale)
                         if cfg.mode == "mid" and key == cache_key:
                             q, tq = cache_q, 0.0
@@ -838,7 +907,7 @@ class Sim:
                         res.quoting_s += 1
                         if tq:
                             taker(tq, i, t)
-                    elif st["pos"] != 0:  # paused or stale: the strategy's exit book
+                    elif st["pos"] != 0:  # paused, stale or a skip window: the strategy's exit book
                         side = SELL if st["pos"] > 0 else BUY
                         desired = [(side, ASK[i] if side == SELL else BID[i], abs(st["pos"]), "exit",
                                     True)]

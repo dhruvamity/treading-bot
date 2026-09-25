@@ -74,7 +74,7 @@ def session_for(market: str, cfg: Config, risk: Risk, *, live: bool, account_ind
         "stop_loss_pct": round(100 * risk.kill_usd / used, 4),
         "participation_cap_pct": 100,   # not in the backtest: never widen for our share of volume
         "spacing_bps": cfg.spacing_bps, "levels_per_side": cfg.levels,
-        "session": {"duration": "24h", "repeat": 3650, "windows_ist": []},
+        "session": {"duration": "24h", "repeat": 3650, "windows_ist": [], "skip_et": list(cfg.skip_et)},
         "off_hours": {"spacing_mult": 1, "size_mult": round(off, 4), "allow_mid": True},
         "sizing": {
             "follow_equity": True, "backtest_capital_usd": risk.capital_usd, "capital_frac": z.capital_frac,
@@ -98,11 +98,16 @@ def session_for(market: str, cfg: Config, risk: Risk, *, live: bool, account_ind
     elif cfg.mode == "rgrid":
         s.update(reset_threshold_pct=cfg.reset_pct, rgrid_ema_s=cfg.rgrid_ema_s, rgrid_cut_after_s=cfg.rgrid_cut_after_s,
                  skew_kappa=0.0)
+    elif cfg.mode == "anchor":
+        s.update(reset_threshold_pct=cfg.reset_pct, skew_kappa=0.0)
     elif cfg.mode == "signal":
         s["signal"] = {"rsi_low": cfg.rsi_low, "rsi_high": cfg.rsi_high, "tp_bps": cfg.tp_bps, "sl_bps": cfg.sl_bps,
                        "max_hold_min": cfg.max_hold_min, "cooldown_s": cfg.cooldown_min * 60}
+    # the backtest's safety pause has the move and spread rules only (recorded books carry no depth), so the live
+    # thin-depth rule stays off too: it paused live runs several times as often as the backtest did
+    s["safety_pause"] = {"depth_frac_min": 0.0}
     if not cfg.safety:
-        s["safety_pause"] = {"move_sigma_1s": 1e9, "spread_x_median": 1e9, "depth_frac_min": 0.0}
+        s["safety_pause"].update(move_sigma_1s=1e9, spread_x_median=1e9)
     return s
 
 
@@ -278,6 +283,9 @@ class Pilot:
             if m is None:
                 raise ValueError(f"{c['market']} has no maximum-leverage backtest for {c.get('setting') or c['config']}")
             c = m
+        name = c.get("setting") or c["config"]
+        if name not in BY_NAME:   # a scan made before the menu changed
+            raise ValueError(f"{name!r} is no longer in the scout's menu; wait for the next scan and pick again")
         return {**c, "profile": prof.key, "lev": lev}
 
     def write_session(self, c: dict[str, Any], *, live: bool) -> Path:

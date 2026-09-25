@@ -651,7 +651,7 @@ def build_parser() -> argparse.ArgumentParser:
         sp.set_defaults(fn=fn)
         return sp
 
-    modes = ("mid", "grid", "rgrid", "signal")
+    modes = ("mid", "grid", "rgrid", "signal", "anchor")
     add("sessions", cmd_sessions, "list the session files: venue, subaccount, market, mode, capital, live_enabled")
     sp = add("doctor", cmd_doctor, "check everything a live run needs (credentials, account, sizing, clock); no orders")
     sp.add_argument("sessions", nargs="*", help="session names (default: credentials and account only)")

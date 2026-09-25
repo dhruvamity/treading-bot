@@ -154,6 +154,14 @@ def test_pilot_picks_from_a_list_at_either_leverage(tmp_path: Path) -> None:
         pilot.pick(1, "aggressive")
 
 
+def test_a_setting_dropped_from_the_menu_is_refused_before_anything_stops(tmp_path: Path) -> None:
+    # a scan made before the menu changed can still list "grid 10bp"; picking it must fail up front, not after the
+    # running bot was closed to make room for it
+    _, _, pilot = _pilot(tmp_path, [row("QQQ-USD", "grid 10bp", 10, vol=9000, pnl=0.1)])
+    with pytest.raises(ValueError, match="no longer in the scout's menu"):
+        pilot.pick(1, "volume")
+
+
 def test_review_judges_a_deployment_by_its_own_list(tmp_path: Path) -> None:
     _, _, pilot = _pilot(tmp_path, ROWS)
     _running_paper(tmp_path, pilot.control.app)
