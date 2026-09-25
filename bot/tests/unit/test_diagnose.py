@@ -69,3 +69,26 @@ def test_diagnose_reports_acks_rejects_placement_blocks_and_missed_flow(tmp_path
     assert "Fills     1 · $223" in text
     assert "4 taker trades" in text and "2 went through a price you rested at" in text
     assert "(sell side" not in text and "2 ($745) traded while you had no order on that side" in text
+
+
+def test_diagnose_counts_orders_refused_by_the_bots_own_checks(tmp_path: Path) -> None:
+    """2026-09-25 QQQ: ~4,900 sells refused by the pre-trade margin check never reached the state database, so
+    diagnose showed nothing for the two hours the bot sat without quotes."""
+    db = _run(tmp_path)
+    lines = [{"ts": T0 + (100 + i) * S, "event": "reject_pretrade", "market": "QQQ",       # older logs: tag only
+              "reason": "free_collateral: needs $20.00, free $12.00", "data": {"tag": "a0"}} for i in range(120)]
+    lines += [{"ts": T0 + (300 + i) * S, "event": "reject_pretrade", "market": "QQQ",
+               "reason": "free_collateral: needs $20.50, free $12.00", "data": {"tag": "a0", "side": "sell"}}
+              for i in range(60)]
+    lines += [{"ts": T0 + 500 * S, "event": "reject_pretrade", "market": "QQQ",
+               "reason": "oi_cap: market OI $9000 + order would exceed cap $9000", "data": {"tag": "b0"}},
+              {"ts": T0 + 510 * S, "event": "reject_pretrade", "market": "SPY",                 # another market
+               "reason": "free_collateral: needs $1.00, free $0.00", "data": {"tag": "b0"}}]
+    with (tmp_path / "logs" / "decisions.jsonl").open("a") as f:
+        f.write("".join(json.dumps(d) + "\n" for d in lines))
+    text = diagnose(db=db, logs=tmp_path / "logs", tape_root=tmp_path / "tape", markets_json=tmp_path / "markets.json",
+                    start_us=T0, end_us=T0 + 600 * S, base="QQQ")
+    assert "Refused   181 orders by the bot's own checks (never sent to the venue)" in text
+    assert "free_collateral ×180 (sell 180) · 09-25 20:01:40 → 09-25 20:05:59, refusing for 3m08s" in text
+    assert "last: needs $20.50, free $12.00" in text and "SPY" not in text   # a 10 s break counts as 10 s
+    assert "oi_cap ×1 (buy 1)" in text
