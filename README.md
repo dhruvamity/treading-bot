@@ -27,7 +27,7 @@ From `treading-bot/bot` on the machine that runs the bot (after the one-time ins
 | `bot up` | Starts everything in the background: the scout (records and ranks), the Telegram bot, and the guardian while a live bot runs |
 | `bot status` | One screen: what runs, what is deployed, the last scan and its top 3, the balance |
 | `bot dashboard` | Live screen, redrawn every 10 s: today's volume and PnL, your capital's profit or loss (Ctrl-C leaves) |
-| `bot pilot approve 1` | Trades the scout's #1 setup in paper (add `--live` for real money) |
+| `bot pilot approve 1` | Trades the scout's #1 setup in paper (add `--live` for real money; `--list volume` or `--list aggressive` picks from those top 3, `--max-lev` runs it at the market's maximum leverage) |
 | `bot pilot close` | Closes the position and stops trading |
 | `bot down` | Stops the scout and the Telegram bot (`bot down --all`: the trading bot too, position kept) |
 
@@ -739,7 +739,10 @@ Send `/menu` for buttons. Telegram's `/` list shows the everyday commands; the r
 
 | Command | What it does |
 |---|---|
-| `/top3` | The 3 best setups right now, with sizes and backtest numbers and **Run** buttons (Paper / LIVE) |
+| `/top3` | The 3 best setups that are about breakeven or better, with sizes and backtest numbers and **Run** buttons |
+| `/volume` | The 3 with the most volume for at most your cost per $1,000 traded (`/set volume_cost`), any strategy setting. Also starts a fresh scan and posts its top 3 when done |
+| `/aggressive` | Aggressive Mid: quotes at or inside the best bid/ask and flips fast ("improve touch", "touch 1bp"), the most volume within the same cost. Also starts a fresh scan |
+| **Run #k** | Asks **Recommended** leverage (what the list picked) or **Max** (the same setting at the market's maximum, with its own backtest and a warning if it falls out of the list), then **Paper** or **LIVE** |
 | `/openpositions` | What is deployed: state, today's PnL vs the backtest, the last check, **Close & stop** |
 | `/dashboard` | A live screen that updates itself every 10 s, pinned at the top of the chat: today's volume (and its pace vs the backtest), today's PnL, the position, and your capital's profit or loss (equity minus deposits). ⏹ stops it, ▶️ starts it again; a newer `/dashboard` replaces the old one |
 | `/status` | Is it running, today's PnL, fills, volume |
@@ -773,6 +776,7 @@ Send `/menu` for buttons. Telegram's `/` list shows the everyday commands; the r
 | `position_stop`, `daily_stop`, `kill` | % of the capital | The stops ([6.1](#61-the-stops-backtest-and-live)); must stay position ≤ daily ≤ kill. Changing them means a full re-backtest (slow, low priority) |
 | `scan_every` | 10–240 (minutes) | Time between scans |
 | `scan_workers` | `auto` or 1–32 | CPU cores a scan may use (always one while a bot runs on the machine) |
+| `volume_cost` | $0.01–$5 per $1,000 | The most the Volume and Aggressive Mid lists may cost: dollars lost per $1,000 traded (default $0.15, about 1.5 bp). The lists re-rank at once; the next scan also re-checks the last 24 h of the setups it lets in |
 
 The scout picks up a change at its next scan (a sizing change triggers one at once); the running bot at its next
 re-size (00:00 UTC, or when it restarts). Stored in `state/settings.json`. Switching live trading on stays a

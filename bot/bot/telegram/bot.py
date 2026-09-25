@@ -37,6 +37,7 @@ from bot.telegram.views import (
     candidate_lines,
     confirm_keyboard,
     dashboard_keyboard,
+    leverage_keyboard,
     menu_keyboard,
     orders_text,
     pick_keyboard,
@@ -44,8 +45,10 @@ from bot.telegram.views import (
     pilot_text,
     pnl_text,
     positions_text,
+    profile_keyboard,
+    profile_text,
     refresh_keyboard,
-    scout_text,
+    run_keyboard,
     sessions_text,
     settings_text,
     status_text,
@@ -59,6 +62,7 @@ ALIASES = {"scout": "top3", "pilot": "openpositions", "report": "yesterdayreport
            "resume": "resumeaftersl", "flatten": "closeall"}
 CONFIRM_TTL_S = 120
 DASH_FILE = "telegram_dashboard.json"   # the live /dashboard message: {chat_id, message_id, since}
+SCAN_WAIT_S = 30 * 60                   # a requested scan that has not finished by then is reported as late
 
 
 @dataclass
@@ -100,6 +104,7 @@ class TelegramBot:
         self.username = ""
         self._tasks: set[asyncio.Task[Any]] = set()
         self._dash_account: dict[str, Any] | None = None   # the dashboard's own account read (when the bot has none)
+        self.scan_waiters: list[dict[str, Any]] = []        # {chat, profile, since}: post that list after the scan
 
     # ------------------------------------------------------------------ plumbing
     def authorized(self, chat_id: int, user_id: int | None) -> bool:
@@ -169,6 +174,7 @@ class TelegramBot:
             try:
                 await self.watcher.tick()
                 await self.pilot_events()
+                await self.scan_waiters_tick()
             except Exception as e:
                 log.error("watch_failed", reason=type(e).__name__, data={"err": str(e)[:300]}, exc_info=True)
             await asyncio.sleep(self.watch_every_s)
@@ -237,12 +243,13 @@ class TelegramBot:
                 "sessions": self.c_sessions, "logs": self.c_logs, "yesterdayreport": self.c_report,
                 "ping": self.c_ping, "alerts": self.c_alerts, "mute": self.c_mute, "unmute": self.c_unmute,
                 "ok": self.c_ok, "no": self.c_no, "balance": self.c_balance, "settings": self.c_settings,
-                "dashboard": self.c_dashboard, "dashstop": self.c_dashstop, "dashresume": self.c_dashresume}
+                "dashboard": self.c_dashboard, "dashstop": self.c_dashstop, "dashresume": self.c_dashresume,
+                "volume": self.c_volume, "aggressive": self.c_aggressive}
         write = {"pauseneworders": self.c_pause, "unpause": self.c_unpause, "stop": self.c_stop,
                  "resumeaftersl": self.c_resume, "run": self.c_run, "doctor": self.c_doctor,
                  "cancelall": self.c_cancelall, "closeall": self.c_flatten, "pick": self.c_pick,
                  "deploy": self.c_deploy, "pilotclose": self.c_pilotclose, "set": self.c_set,
-                 "scannow": self.c_scannow}
+                 "scannow": self.c_scannow, "rescan": self.c_rescan, "lev": self.c_lev}
         if cmd in read:
             await read[cmd](ctx, args)
         elif cmd in write:
@@ -255,11 +262,20 @@ class TelegramBot:
 
     # ------------------------------------------------------------------ scout / pilot
     async def c_scout(self, ctx: Ctx, args: list[str]) -> None:
+        """/top3 [breakeven|volume|aggressive]: that list's top 3 from the last scan, with Run buttons."""
+        from bot.scout.profiles import profile_of
+
         if self.pilot is None:
             await self.reply(ctx, "The pilot is not set up on this server.")
             return
-        scan = self.pilot.latest_scan()
-        await self.reply(ctx, scout_text(scan, time.time()), pick_keyboard((scan or {}).get("top") or []))
+        try:
+            prof = profile_of(args[0] if args else None)
+        except ValueError as e:
+            await self.reply(ctx, escape(str(e)))
+            return
+        budget = self.pilot.budget()
+        await self.reply(ctx, profile_text(self.pilot.latest_scan(), prof.key, budget, time.time()),
+                         profile_keyboard(prof.key, self.pilot.top(prof.key)))
 
     async def c_pilot(self, ctx: Ctx, args: list[str]) -> None:
         if self.pilot is None:
@@ -267,38 +283,130 @@ class TelegramBot:
             return
         await self.reply(ctx, pilot_text(self.pilot), pilot_keyboard())
 
-    async def c_pick(self, ctx: Ctx, args: list[str]) -> None:
-        if self.pilot is None or not args or not args[0].isdigit():
-            return
-        k = int(args[0])
+    async def c_volume(self, ctx: Ctx, args: list[str]) -> None:
+        await self._list_then_scan(ctx, "volume")
+
+    async def c_aggressive(self, ctx: Ctx, args: list[str]) -> None:
+        await self._list_then_scan(ctx, "aggressive")
+
+    async def _list_then_scan(self, ctx: Ctx, profile: str) -> None:
+        """The list from the last scan now, and a fresh scan whose top 3 is posted when it is done."""
+        await self.c_scout(ctx, [profile])
+        if self.pilot is not None and not self.read_only:
+            await self._request_scan(ctx.chat_id, profile)
+
+    async def c_rescan(self, ctx: Ctx, args: list[str]) -> None:
+        from bot.scout.profiles import profile_of
+
         try:
-            c = self.pilot.pick(k)
+            prof = profile_of(args[0] if args else None)
         except ValueError as e:
             await self.reply(ctx, escape(str(e)))
             return
+        await self._request_scan(ctx.chat_id, prof.key)
+
+    async def _request_scan(self, chat_id: int, profile: str) -> None:
+        from bot.scout.profiles import profile_of
+        from bot.scout.service import SCAN_NOW
+
+        p = self._state_dir() / SCAN_NOW
+        p.parent.mkdir(parents=True, exist_ok=True)
+        p.touch()
+        self.scan_waiters = [w for w in self.scan_waiters if (w["chat"], w["profile"]) != (chat_id, profile)]
+        self.scan_waiters.append({"chat": chat_id, "profile": profile, "since": time.time()})
+        prof = profile_of(profile)
+        await self.api.send(chat_id, f"🔎 Scanning every market for the best {prof.icon} <b>{prof.title}</b> setups. "
+                            "I'll post the fresh top 3 here when the scan is done (usually a few minutes).", silent=True)
+
+    async def scan_waiters_tick(self) -> None:
+        """Post each requested list once a scan that started after the request has finished."""
+        if not self.scan_waiters or self.pilot is None:
+            return
+        scan = self.pilot.latest_scan() or {}
+        done = scan.get("ts_us", 0) / 1e6
+        keep = []
+        for w in self.scan_waiters:
+            if done > w["since"]:
+                await self.api.send(w["chat"], profile_text(scan, w["profile"], self.pilot.budget(), time.time()),
+                                    keyboard=profile_keyboard(w["profile"], self.pilot.top(w["profile"])))
+            elif time.time() - w["since"] > SCAN_WAIT_S:
+                await self.api.send(w["chat"], "⌛ The scan I asked for has not finished in 30 minutes. Is the scout "
+                                    "running on the server? (<code>bot status</code>, then <code>bot up</code>)")
+            else:
+                keep.append(w)
+        self.scan_waiters = keep
+
+    def _pick_args(self, args: list[str]) -> tuple[str, int, list[str]] | None:
+        """[profile] k ...: button data from before the lists (plain "pick 1") means the breakeven list."""
+        if args and args[0].isdigit():
+            return "breakeven", int(args[0]), args[1:]
+        if len(args) >= 2 and args[1].isdigit():
+            return args[0], int(args[1]), args[2:]
+        return None
+
+    async def c_pick(self, ctx: Ctx, args: list[str]) -> None:
+        """Run #k: the setup, then the leverage choice (recommended, or the market's maximum)."""
+        from bot.scout import profiles
+
+        parsed = self._pick_args(args)
+        if self.pilot is None or parsed is None:
+            return
+        profile, k, _ = parsed
+        try:
+            c = self.pilot.pick(k, profile, "rec")
+        except ValueError as e:
+            await self.reply(ctx, escape(str(e)))
+            return
+        mx = profiles.at_max(self.pilot.latest_scan(), c)
+        text = f"<b>{escape(c['market'])} — {escape(c['config'])}</b> (recommended)\n{candidate_lines([c], cost=True)}"
+        if c.get("at_max") or mx is None:
+            await self._run_choice(ctx, profile, k, "rec", c, text + "\n\nThis already is the maximum leverage.")
+            return
+        why = profiles.verdict(mx, profile, self.pilot.budget())
+        text += (f"\n\n<b>At the maximum, {mx['leverage']:g}x:</b>\n{candidate_lines([mx], cost=True)}"
+                 + (f"\n⚠️ At {mx['leverage']:g}x it is not in this list: {escape('; '.join(why)[:300])}" if why else
+                    f"\n✅ Also in this list at {mx['leverage']:g}x."))
+        await self.reply(ctx, text + "\n\nWhich leverage?", leverage_keyboard(profile, k, c, mx))
+
+    async def c_lev(self, ctx: Ctx, args: list[str]) -> None:
+        parsed = self._pick_args(args)
+        if self.pilot is None or parsed is None or not parsed[2]:
+            return
+        profile, k, rest = parsed
+        lev = "max" if rest[0] == "max" else "rec"
+        try:
+            c = self.pilot.pick(k, profile, lev)
+        except ValueError as e:
+            await self.reply(ctx, escape(str(e)))
+            return
+        await self._run_choice(ctx, profile, k, lev, c, f"<b>{escape(c['market'])} — {escape(c['config'])}</b>"
+                               f"{' (maximum leverage)' if lev == 'max' else ''}\n{candidate_lines([c], cost=True)}")
+
+    async def _run_choice(self, ctx: Ctx, profile: str, k: int, lev: str, c: dict[str, Any], text: str) -> None:
         live_ok = os.environ.get("BOT_PILOT_LIVE") == "1"
         running = [m for m in ("paper", "live") if self.control.is_running(m)]
         note = (f"\n\nThe running {' and '.join(running)} bot will first close its position and stop."
                 if running else "")
-        kb: Keyboard = [[("Paper", f"deploy {k} paper")] + ([("LIVE", f"deploy {k} live")] if live_ok else []),
-                        [("✖️ Cancel", "no")]]
-        await self.reply(ctx, f"<b>{escape(c['market'])} — {escape(c['config'])}</b>\n{candidate_lines([c])}{note}"
-                         + ("" if live_ok else "\n\nLive is off on this server (set BOT_PILOT_LIVE=1 in .env to "
-                            "allow it). Paper uses live market data and simulated orders."), kb)
+        await self.reply(ctx, text + note + ("" if live_ok else "\n\nLive is off on this server (set BOT_PILOT_LIVE=1 "
+                                             "in .env to allow it). Paper uses live market data and simulated orders."),
+                         run_keyboard(profile, k, lev, live_ok))
 
     async def c_deploy(self, ctx: Ctx, args: list[str]) -> None:
-        if self.pilot is None or len(args) < 2 or not args[0].isdigit():
+        parsed = self._pick_args(args)
+        if self.pilot is None or parsed is None or not parsed[2]:
             return
-        k, live = int(args[0]), args[1] == "live"
+        profile, k, rest = parsed
+        lev = rest[0] if len(rest) > 1 and rest[0] in ("rec", "max") else "rec"
+        live = rest[-1] == "live"
         try:
-            c = self.pilot.pick(k)
+            c = self.pilot.pick(k, profile, lev)
         except ValueError as e:
             await self.reply(ctx, escape(str(e)))
             return
         what = f"{escape(c['market'])} — {escape(c['config'])}"
+        args_ = {"k": k, "live": live, "key": f"{c['market']}|{c['config']}", "profile": profile, "lev": lev}
         if not live:
-            await self._ask(ctx, "deploy", {"k": k, "live": False, "key": f"{c['market']}|{c['config']}"},
-                            f"Run {what} in PAPER mode?")
+            await self._ask(ctx, "deploy", args_, f"Run {what} in PAPER mode?")
             return
         if os.environ.get("BOT_PILOT_LIVE") != "1":
             await self.reply(ctx, "Live is off on this server: set BOT_PILOT_LIVE=1 in .env and restart the bot.")
@@ -315,8 +423,7 @@ class TelegramBot:
             if not ok:
                 await self.api.send(ctx.chat_id, f"❌ Not starting:\n<pre>{escape(rep[:3500])}</pre>")
                 return
-            await self._ask(Ctx(ctx.chat_id, ctx.user_id, ctx.user), "deploy",
-                            {"k": k, "live": True, "key": f"{c['market']}|{c['config']}"},
+            await self._ask(Ctx(ctx.chat_id, ctx.user_id, ctx.user), "deploy", args_,
                             f"Run {what} with REAL MONEY (LIVE)?", code=True)
         self._spawn(go())
 
@@ -755,19 +862,21 @@ class TelegramBot:
             await self.reply(ctx, f"🛑 Stop sent to the <b>{a['mode'].upper()}</b> bot; it shuts down on its next tick.")
             self._spawn(self._ensure_stopped(ctx, a["mode"]))
         elif p.action == "deploy":
+            profile, lev = a.get("profile", "breakeven"), a.get("lev", "rec")
             try:
-                c = self.pilot.pick(int(a["k"]))
+                c = self.pilot.pick(int(a["k"]), profile, lev)
             except ValueError as e:
                 await self.reply(ctx, escape(str(e)))
                 return
             if f"{c['market']}|{c['config']}" != a["key"]:
-                await self.reply(ctx, "The top 3 changed since you picked. Open /top3 again.")
+                await self.reply(ctx, f"The list changed since you picked. Open /top3 {profile} again.")
                 return
             await self.reply(ctx, f"🚀 Deploying {escape(c['market'])} ({'LIVE' if a['live'] else 'paper'})…")
 
             async def deploy() -> None:
                 try:
-                    await self.pilot.approve(int(a["k"]), live=bool(a["live"]), by=f"Telegram ({ctx.user})")
+                    await self.pilot.approve(int(a["k"]), live=bool(a["live"]), by=f"Telegram ({ctx.user})",
+                                             profile=profile, lev=lev)
                 except Exception as e:
                     await self.api.send(ctx.chat_id, f"⚠️ {escape(redact_str(str(e))[:400])}")
             self._spawn(deploy())
@@ -803,6 +912,8 @@ class TelegramBot:
                 return
             if settings.SETTINGS[name].field:   # a sizing setting: rescan at the new numbers now
                 forget(self._state_dir())
+                (self._state_dir() / SCAN_NOW).touch()
+            elif name == "volume_cost":         # the lists re-rank at once; the scan re-checks the new entrants' 24 h
                 (self._state_dir() / SCAN_NOW).touch()
             over = settings.load(self._state_dir())
             shown = settings.show(name, over[name]) if name in over else "its default"

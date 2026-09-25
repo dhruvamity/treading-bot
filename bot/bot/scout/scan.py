@@ -273,6 +273,7 @@ class Scanner:
     htf_days: int = 7
     ladder: bool = True               # False: each market at its maximum leverage only
     shortlist: bool = True            # re-run the last 24 h only for settings that pass the multi-day checks
+    volume_cost: float | None = None  # ... or that cost at most this per $1,000 of volume (the volume lists)
     _alive_h: dict[str, float] = field(default_factory=dict)
 
     @property
@@ -390,7 +391,7 @@ class Scanner:
                     e = out[m][risk_key(r)]
                     e["checked"] = [n for n in names if not self.shortlist
                                     or (m, label(n, r["leverage"])) in (always or set())
-                                    or passes_long(e, n, self.pct, (listed or {}).get(m))]
+                                    or passes_long(e, n, self.pct, (listed or {}).get(m), self.volume_cost)]
                     if e["checked"]:
                         only[risk_key(r)] = e["checked"]
                 if only:
@@ -477,6 +478,8 @@ class Candidate:
     too_small: bool = False     # the capital is under min_capital_usd at this leverage: not backtested
     recent_checked: bool = True  # False: fails on its full days, so its last 24 h was not re-run (Scanner.shortlist)
     risk: dict[str, Any] = field(default_factory=dict)
+    money_reasons: list[str] = field(default_factory=list)   # the reasons that are only about losing money
+    cost_1k: float | None = None   # dollars lost per $1,000 of maker volume on the full days (0: it made money)
 
     def as_dict(self) -> dict[str, Any]:
         return asdict(self)
@@ -514,12 +517,14 @@ def score_market(market: str, bt: dict[str, Any], now: dict[str, float], pct: Pc
     return out
 
 
-def long_reasons(days: list[dict[str, Any]], used: float, pct: Pct, listed_days: float | None = None) -> list[str]:
-    """Why a setting fails on its full days (empty: it passes). The one definition both the scoring and the
-    shortlist of settings whose last 24 h is re-run use."""
+def long_checks(days: list[dict[str, Any]], used: float, pct: Pct, listed_days: float | None = None
+                ) -> list[tuple[bool, str]]:
+    """Why a setting fails on its full days, as (about money?, reason). "About money" reasons (it loses, it hits the
+    daily stop, too few days are positive) are what a volume budget may accept (bot/scout/profiles.py); the others
+    (liquidation, the kill, too few fills, a new listing) always count."""
     if not days:
-        return ["no full day of data yet"]
-    out = []
+        return [(False, "no full day of data yet")]
+    out: list[tuple[bool, str]] = []
     pnl = [d["pnl"] for d in days]
     pnl_day = sum(pnl) / len(days)
     fills_day = sum(d["maker_fills"] for d in days) / len(days)
@@ -527,29 +532,50 @@ def long_reasons(days: list[dict[str, Any]], used: float, pct: Pct, listed_days:
     pos_days = sum(1 for p in pnl if p >= 0)
     lost = -pnl_day
     if pnl_day < -used * pct.go_pnl_day / 100:
-        out.append(f"loses ${lost:.2f} ({100 * lost / used:.2f}% of ${used:,.0f})/day over {len(days)} days")
+        out.append((True, f"loses ${lost:.2f} ({100 * lost / used:.2f}% of ${used:,.0f})/day over {len(days)} days"))
     if day_stops > MAX_DAY_STOPS:
-        out.append(f"hit the daily stop {day_stops} times")
+        out.append((True, f"hit the daily stop {day_stops} times"))
     if any(d.get("liquidated") for d in days):
-        out.append("liquidated")
+        out.append((False, "liquidated"))
     elif any(d["killed"] for d in days):
-        out.append(f"hit the {pct.kill:g}% kill")
+        out.append((False, f"hit the {pct.kill:g}% kill"))
     if pos_days < len(days) / 2:
-        out.append(f"only {pos_days}/{len(days)} days not negative")
+        out.append((True, f"only {pos_days}/{len(days)} days not negative"))
     if fills_day < MIN_FILLS_DAY:
-        out.append(f"too few fills ({fills_day:.1f}/day)")
+        out.append((False, f"too few fills ({fills_day:.1f}/day)"))
     if listed_days is not None and listed_days < NEW_LISTING_DAYS and len(days) < NEW_LISTING_MIN_DAYS:
-        out.append(f"new market (trading {listed_days:.0f} days): {len(days)} of {NEW_LISTING_MIN_DAYS} full days")
+        out.append((False, f"new market (trading {listed_days:.0f} days): {len(days)} of {NEW_LISTING_MIN_DAYS} "
+                    "full days"))
     return out
 
 
-def passes_long(entry: dict[str, Any], name: str, pct: Pct, listed_days: float | None = None) -> bool:
-    """Does setting `name` pass the multi-day checks in this backtest entry (Scanner.backtest)?"""
+def long_reasons(days: list[dict[str, Any]], used: float, pct: Pct, listed_days: float | None = None) -> list[str]:
+    """Why a setting fails on its full days (empty: it passes). The one definition both the scoring and the
+    shortlist of settings whose last 24 h is re-run use."""
+    return [r for _money, r in long_checks(days, used, pct, listed_days)]
+
+
+def cost_per_1k(pnl: float, volume: float) -> float | None:
+    """Dollars lost per $1,000 of maker volume (0 when it made money; None with no volume)."""
+    return max(0.0, -pnl) / volume * 1000 if volume > 0 else None
+
+
+def passes_long(entry: dict[str, Any], name: str, pct: Pct, listed_days: float | None = None,
+                volume_cost: float | None = None) -> bool:
+    """Does setting `name` pass the multi-day checks in this backtest entry (Scanner.backtest)? With volume_cost
+    (dollars per $1,000 of volume), a setting that loses money also passes when it costs at most that and every
+    other check passes: the volume and aggressive lists (bot/scout/profiles.py) need its last 24 h too."""
     if entry.get("skip"):
         return False
     days = [r for _d, rs in sorted(entry["days"].items()) for r in rs if r["config"] == name]
     used = float(entry["risk"].get("used_usd") or entry["risk"].get("capital_usd") or 100.0)
-    return not long_reasons(days, used, pct, listed_days)
+    checks = long_checks(days, used, pct, listed_days)
+    if not checks:
+        return True
+    if volume_cost is None or any(not money for money, _r in checks):
+        return False
+    cost = cost_per_1k(sum(d["pnl"] for d in days), sum(d["maker_usd"] for d in days))
+    return cost is not None and cost <= volume_cost
 
 
 def _score(market: str, bt: dict[str, Any], now: dict[str, float], risk: dict[str, Any], at_max: bool,
@@ -571,7 +597,9 @@ def _score(market: str, bt: dict[str, Any], now: dict[str, float], risk: dict[st
     for name in [c.name for c in MENU]:
         days = by_cfg.get(name, [])
         rec = recent.get(name)
-        reasons = [bt["skip"]] if bt.get("skip") else long_reasons(days, used, pct, listed_days)
+        checks = [(False, bt["skip"])] if bt.get("skip") else long_checks(days, used, pct, listed_days)
+        reasons = [r for _m, r in checks]
+        money = [r for m, r in checks if m]
         pnl = [d["pnl"] for d in days]
         n = max(1, len(days))
         fills_day = sum(d["maker_fills"] for d in days) / n
@@ -586,8 +614,10 @@ def _score(market: str, bt: dict[str, Any], now: dict[str, float], risk: dict[st
         else:
             if rec["pnl"] < min_day:
                 reasons.append(f"last 24 h lost {of_cap(-rec['pnl'])}")
+                money.append(reasons[-1])
             if rec["tail_pnl"] < min_tail:
                 reasons.append(f"last 6 h lost {of_cap(-rec['tail_pnl'])}")
+                money.append(reasons[-1])
             if rec.get("liquidated") or rec.get("killed"):
                 reasons.append("last 24 h hit the kill")
             if days and rec["maker_fills"] < MIN_FLOW_FRAC * fills_day:
@@ -616,7 +646,8 @@ def _score(market: str, bt: dict[str, Any], now: dict[str, float], risk: dict[st
             max_pos_usd=max((d.get("max_pos_usd", 0.0) for d in days), default=0.0),
             liq_reduces=sum(d.get("liq_reduces", 0) for d in days), capital_usd=float(risk.get("capital_usd", 0.0)),
             used_usd=used, min_capital_usd=float(risk.get("min_capital_usd", 0.0)), too_small=bool(bt.get("skip")),
-            recent_checked=was_checked and rec is not None, risk=risk))
+            recent_checked=was_checked and rec is not None, risk=risk, money_reasons=money,
+            cost_1k=cost_per_1k(pnl_day, vol_day)))
     return out
 
 
@@ -644,16 +675,18 @@ def best_at_max(cands: list[Candidate]) -> list[Candidate]:
 def scan(root: Path, *, now_us: int | None = None, markets: list[str] | None = None, workers: int = 6,
          capital: float = 100.0, pct: Pct | None = None, capital_source: str = "fixed", risk: Risk | None = None,
          ladder: bool = True, shortlist: bool = True, always: set[tuple[str, str]] | None = None,
-         stop: threading.Event | None = None) -> dict[str, Any]:
+         stop: threading.Event | None = None, volume_cost: float | None = None) -> dict[str, Any]:
     """capital: what the sizes and stops are taken on (bucketed here, as the live bot does).
     shortlist: re-run the last 24 h only for settings that pass on their full days (and `always`: the deployed
-    (market, "setting @ Nx")); False re-runs every setting, as before."""
+    (market, "setting @ Nx")); False re-runs every setting, as before.
+    volume_cost: the owner's budget for the volume lists (dollars per $1,000 of volume): settings within it are
+    shortlisted too, so bot/scout/profiles.py can judge their last 24 h."""
     now_us = now_us or time.time_ns() // 1000
     mis = load_markets(root / "markets.json")
     meta = market_meta(root / "markets.json")
     pct = pct or Pct()
     sc = Scanner(root, capital=bucket(capital), pct=pct, risk=risk or Risk(), workers=workers, ladder=ladder,
-                 shortlist=shortlist)
+                 shortlist=shortlist, volume_cost=volume_cost)
     have = [m for m in sc.store.markets() if m in mis and (not markets or m in markets) and sc.store.days(m)]
     t0 = time.time()
     rec_first = next(iter(sc.store.days(ALIVE_MARKET)), None)
@@ -663,7 +696,7 @@ def scan(root: Path, *, now_us: int | None = None, markets: list[str] | None = N
     for m in have:
         cands += score_market(m, bt[m], market_now(sc.store, m, now_us), pct, listed[m])
     ranked = rank(cands)
-    return {"ts_us": now_us, "took_s": round(time.time() - t0, 1), "risk": asdict(sc.risk),
+    return {"ts_us": now_us, "took_s": round(time.time() - t0, 1), "risk": asdict(sc.risk), "volume_cost": volume_cost,
             "capital": {"usd": sc.capital, "source": capital_source, "pct": asdict(pct)},
             "leverage": {"policy": "max, then " + ", ".join(f"{x:g}x" for x in LADDER) if ladder else "max",
                          "caps": LEV_CAPS},
@@ -757,6 +790,15 @@ def table(res: dict[str, Any], limit: int = 25) -> str:
     if res.get("at_max"):
         lines += ["", "each market at its MAXIMUM leverage:", head]
         lines += rows(res["at_max"][:limit])
+    from bot.scout import profiles
+
+    budget = float(res.get("volume_cost") or 0.15)
+    for key in ("volume", "aggressive"):
+        p = profiles.PROFILES[key]
+        top = profiles.top(res, p, budget)
+        lines += ["", f"{p.title.upper()} top 3 (most volume for at most ${budget:.2f} lost per $1,000; "
+                  "/set volume_cost):", head]
+        lines += rows(top) if top else ["   nothing fits the budget right now"]
     small = [f"{r['market']} (${r.get('min_capital_usd', 0):,.2f})" for r in res["ranked"]
              if r.get("too_small") and not r["days"]]
     if small:
