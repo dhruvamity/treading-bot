@@ -19,7 +19,7 @@ the orders). From `treading-bot/bot` after `make install`:
 .venv/bin/bot farm run --hours 15
 ```
 
-- It records every Arcus perp and, every hour, paper-trades the whole menu (29 settings × 5x/10x/20x) on the 20
+- It records every Arcus perp and, every hour, paper-trades the whole menu (30 settings × 5x, 10x, 20x and the market maximum) on the 20
   busiest markets plus BTC, ETH, SOL, HYPE, QQQ, SPY, GLD, SLV, NVDA, USO, TSLA and XRP, since the start. Each
   paper account starts with $100 (`--capital`), with stops of 5% (position), 10% (day) and 20% (kill) of it.
 - Results land in `research/runs/<UTC start>/`; `LEADERBOARD.md` is rewritten every hour. With git set up it also

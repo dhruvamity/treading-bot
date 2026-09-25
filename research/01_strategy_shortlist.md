@@ -100,7 +100,7 @@ next to the wider settings the data favours.
 
 ## 1.5 How each kept setup maps onto the paper farm
 
-The farm runs on one venue with maker (post-only) orders only, as the user asked. Its menu is in
+The farm runs on one venue with maker (post-only) orders only, as the user asked. Its menu (30 settings) is in
 `bot/bot/farm/menu.py`. Tread's modes map as follows:
 
 | Tread mode | Farm setting(s) | Faithfulness |
@@ -114,6 +114,8 @@ The farm runs on one venue with maker (post-only) orders only, as the user asked
 | DGrid (S02, S04, S12, S33) | `dgrid`: picks Grid (chop) or RGrid (trend) from a 30-minute efficiency ratio, spacing from 1-minute volatility | **Approximation.** Tread's model is unpublished. |
 | Signal RSI +3…+10 (S05, S13) | `rsi+3`, `rsi+5`, `rsi+8`: quotes skewed by RSI(14) on 1-minute prices (sell closer when RSI is high) | Close to the official description (S13) |
 | "Avoid NYC hours" (S02, S21, S27) | `… skipUS` variants: no new quotes 09:00–16:30 New York time on NYSE days | Exact |
+| (research addition) Mid 0 only when calm (S02 "stable market", S07 "Mid 4–5 bps when volatile") | `mid0 vgate`: Mid 0 while 0.25 × the 1-minute volatility is under 0.5 bp and there is no trend, else up to 3 bps | New |
+| (research addition) spread scaled to volatility (S11 "scale spread with ATR") | `mid vadapt`: mid ± 0.5 × the 1-minute volatility, 0–5 bps, 5 bps in a trend | New |
 
 Sizing follows the posts: capital $100, leverage 5x, 10x and 20x (capped at the market's maximum), a position stop
 of 5% of capital, a daily stop of 10% and a kill at 20%. Tread users run SL 5–25% of margin (S06, S11, S14, S26, S27).

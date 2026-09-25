@@ -22,9 +22,10 @@ Four kinds of evidence, strongest first:
 | C | The paper farm on synthetic model markets: mechanics only | [5](#5-tier-c-synthetic-mechanics-study) |
 | D | The paper farm on live Arcus data (12–15 h) | [7](#7-live-paper-run-on-arcus) |
 
-**The paper farm** (`bot farm`, `bot/bot/farm/`) runs every setting on the same data at once: 29 Tread-style
-settings (Mid 0, join / improve the touch, Mid +1…+5, Grid +1…+10 with soft resets, a trailing RGrid, a Dynamic Grid
-approximation, RSI-skewed Signal, and skip-US-session variants) at 5x, 10x, 20x and the market's maximum. Each
+**The paper farm** (`bot farm`, `bot/bot/farm/`) runs every setting on the same data at once: 30 Tread-style
+settings (Mid 0, join / improve the touch, Mid +1…+5, Grid +1…+10 with soft resets, a trailing RGrid, a Dynamic
+Grid approximation, RSI-skewed Signal, skip-US-session variants, and two additions of this research: a
+volatility-gated Mid 0 and a volatility-adaptive Mid) at 5x, 10x, 20x and the market's maximum. Each
 paper account has $100 and stops of 5% (position), 10% (day) and 20% (kill) of it, like the posts' 5–25% stops.
 Fills use the scout's simulator: orders go live 150 ms after they are sent, and a resting order fills only when a
 taker trades through its price, which is a lower bound on fills. The stops, order budget and liquidation rules are
@@ -71,11 +72,88 @@ data available to this session.
 
 ## 5. Tier C: synthetic mechanics study
 
-_Filled in from `research/synthetic/`._
+**Synthetic: the numbers come from a model market (`bot/bot/farm/synth.py`), not a real one.** The model has a
+random-walk price with calm, volatile and trending regimes and jumps; makers who follow it with a 3-second lag;
+noise takers whose sweeps push the book and then bounce back; and informed takers who trade stale quotes when the
+move beats their cost. It shows how each setting behaves under those forces with the farm's own fill model. It
+cannot say how large the forces are on Arcus today.
+
+The books copy the Arcus snapshots in the repository's fixture (`tests/fixtures/live/arcus_ws_frames.json`): BTC
+and SPY are **one tick wide** with only $6–500 at the touch and sparse levels behind it. Each scenario is 12 hours;
+18 scenarios per book (chop, trend, mixed × informed-trader cost of 2.5, 1.0 and 0.5 bp × 2 seeds). Full tables:
+[synthetic/arcus-like/SUMMARY.md](synthetic/arcus-like/SUMMARY.md).
+
+![SPY-like book: volume vs cost](synthetic/arcus-like/frontier-spy1t.png)
+
+SPY-like book, $100 at 10x, all 18 scenarios pooled:
+
+| Setting | Turnover / h | Cost per $1M | Profitable scenarios | Worst drawdown | Risk (2nd-worst label) |
+|---|---|---|---|---|---|
+| `mid0` (the hypothesis) | 155× | $28 | 2 / 18 | 11.6% | R3 |
+| `join` (at the touch) | 153× | $27 | 2 / 18 | 12.0% | R3 |
+| `improve1` | 144× | $38 | 1 / 18 | 11.8% | R3 |
+| `mid+1 skew` | 106× | −$23 | 15 / 18 | 8.5% | R2 |
+| `mid0 vgate` (new) | 96× | $4 | 11 / 18 | 12.6% | R3 |
+| `mid+1` | 93× | −$50 | 15 / 18 | 9.6% | R3 |
+| `mid+2` | 43× | −$107 | 15 / 18 | 11.6% | R3 |
+| `mid+3` | 23× | −$163 | 16 / 18 | 11.9% | R3 |
+| `grid+1 r0.125` (best grid) | 65× | $68 | 3 / 18 | 13.3% | R3 |
+| `dgrid` | 57× | $116 | 4 / 18 | 11.7% | R3 |
+
+What the model shows:
+
+1. **Distance from the mid trades volume for margin, smoothly.** Each extra bp away roughly halves the turnover and
+   adds $55–80 per $1M of profit (Mid 0 → +1 → +2 → +3: 155×, 93×, 43×, 23× an hour; $28, −$50, −$107, −$163).
+2. **Mid 0 and joining the touch are the same thing on a one-tick book,** and both sit just above breakeven at
+   the highest turnover. At 155× an hour even $28 per $1M costs ~10% of the capital a day: 7 of 18 scenarios hit
+   the 10% daily stop.
+3. **Mid 0 degrades with toxic flow; Mid +1 does not.** From the calmest to the most toxic setting, Mid 0 went from
+   $8 to $52 per $1M while Mid +1 stayed profitable at every level (−$61, −$79, −$26).
+4. **Gating Mid 0 by volatility is the only change that made it roughly breakeven.** `mid0 vgate` quotes Mid 0 only
+   while calm, and widens to up to 3 bps otherwise. It kept 60% of Mid 0's volume and was profitable in 11 of 18
+   scenarios instead of 2. In trends it still lost ($64 per $1M): that is where it needs the skip-US-session filter
+   or a stop.
+5. **Grids around the last fill (Tread's Grid, RGrid, DGrid) lose in this model** ($68–480 per $1M): after a sweep
+   the anchored side is left behind the move. That matches the owner's real-data finding (tier B) that grids need a
+   soft reset to break even, and the Tread posts' "grid stalls in a trend".
+6. **On the BTC-like book every setting lost.** Its touch holds far more flow, so the sweeps that pay wide quotes
+   rarely reach them, while quotes at the touch pay $55–100 per $1M. This matches the owner's measured −2.3 bp on BTC
+   (tier B) and the posts' warning that BTC is where the professional makers are (S45).
+7. **More leverage multiplies turnover and loss alike.** At 20x `mid0` turned 254× an hour and hit the daily stop
+   in 10 of 18 scenarios; at 5x it turned 93×, hit it in 2 and was near breakeven in 10 of 18.
+8. **The queue assumption hardly matters on books this thin.** Re-running the touch settings with "front of the
+   queue" fills (a print at our price fills us too: the upper bound) added 3–5% turnover and moved Mid 0 from $28 to
+   $25 per $1M (profitable in 4 of 18 instead of 2). The touch holds so little that most taker orders sweep
+   through it (`synthetic/arcus-like/results-front-of-queue.json`).
 
 ## 6. The Mid 0 hypothesis
 
-_Filled in after tiers C and D._
+The idea: limit orders on both sides at the mid, 0 bps, limit orders only.
+
+**Right about volume.** Mid 0 is the highest-turnover maker setting in every tier: the posts (S07: tight spreads have
+the highest completion), the model (155× the capital an hour at 10x on the SPY-like book) and the owner's volume
+lists (tier B). On a one-tick book it is the same as joining the touch.
+
+**Not breakeven on its own.** Every tight posted setting lost before fees: 1.37 bp (RiseX BTC Mid −1, 19 runs),
+3.25 bp (Perpl SOL), Nado Grid 0–1 bps "result in losses". The owner measured the Arcus equivalents at $30–130 per
+$1M. The model has Mid 0 just above breakeven on a quiet thin book ($28 per $1M, profitable in 2 of 18 scenarios),
+worse with toxic flow ($52), and losing on a busy book ($55). Because Mid 0 turns the capital over so fast, those
+small costs are large per day: **$30 per $1M at 150× an hour is 10.8% of the capital a day.**
+
+**What does better, in order of evidence:**
+
+1. **Move 1–3 bps off the mid.** On real Arcus books the owner's GO settings were `deep 1.5bp`–`deep 3bp` (Mid +1.5
+   to +3) on QQQ, SPY, GLD and NVDA, near breakeven at 100–230× the capital a day. In the model Mid +1 kept 60% of
+   Mid 0's volume and was profitable in 15 of 18 scenarios.
+2. **Skip the US cash session.** Real data: 339 of 455 combinations improved, cost 1.19 → 0.72 bp, 70% of the volume
+   kept. Tread's own timing data says the same.
+3. **Gate Mid 0 by volatility** (new here). In the model `mid0 vgate` was profitable in 11 of 18 scenarios instead
+   of 2 and kept 60% of the volume. Not yet tested on real data.
+4. **Use 5x, not 20x, for Mid 0.** Its loss per day scales with leverage: at 5x it hit its daily stop in 2 of 18
+   scenarios, at 20x in 10.
+
+Verdict: Mid 0 is the right tool when the goal is volume **and** something else pays for it (points, rewards,
+rebates) at more than its cost, about $30–130 per $1M on Arcus. For volume at breakeven, quote 1–3 bps off the mid.
 
 ## 7. Live paper run on Arcus
 
