@@ -210,69 +210,48 @@ def fill_line(f: dict[str, Any]) -> str:
             f"({usd(f['price'] * f['size'], sign=False)}{'' if f['maker'] else ', TAKER'})")
 
 
-HELP = """<b>What you can do</b> (or tap /menu)
+HELP = """<b>Pick and run</b>
+/top3 🟢 breakeven · /volume 🔥 · /aggressive ⚡ · /maxvolume 🚀
+/run — any market, setting and leverage
+<code>/run BTC touch 0bp max paper</code>
+/openpositions — what runs · go LIVE · close
 
-<b>Choose and start</b> (tap Run → recommended or max leverage → Paper or LIVE)
-/top3 — the 3 best setups that are about breakeven or better
-/volume — the 3 with the most volume for at most your cost per $1,000 (<code>/set volume_cost 0.15</code>)
-/aggressive — aggressive Mid: quotes at the best price and flips fast, within the same cost
-(/volume and /aggressive also start a fresh scan and post its top 3 when it is done)
-/openpositions — what is running, today vs its backtest; Close & stop
-
-<b>Check</b>
-/dashboard — live screen, updates itself every 10 s: today's volume and PnL, your capital's profit or loss
-/status — running? today's profit, fills, volume
-/balance — money in the account, deposits vs trading profit, change over time
-/positions · /orders — what you hold, what is waiting on the book
-/yesterdayreport — yesterday's full report
+<b>Watch</b>
+/dashboard · /status · /balance · /positions · /orders · /pnl · /logs · /yesterdayreport
 
 <b>Control</b>
-/pauseneworders — stop new orders (closing orders keep working) · /unpause
-/stop — shut the bot down (orders cancelled, position kept)
-/resumeaftersl — trade again after a safety stop, once you know why
-
-<b>Emergency</b> (asks you to confirm)
-/cancelall — cancel every order · /closeall — close every position (<code>/closeall taker</code>: at once)
+/pauseneworders · /unpause · /stop · /resumeaftersl
+/cancelall · /closeall (<code>taker</code> to cross now)
 
 <b>Settings</b>
-/settings — what you can change · /set &lt;name&gt; &lt;value&gt;, e.g. <code>/set trade_share 50</code>
-/scannow — look for setups now
-
-<b>More</b>
-/pnl (profit by market) · /logs (the bot's recent decisions) · /sessions · /run &lt;session&gt; · /doctor
-&lt;session&gt; · /alerts · /mute [minutes] · /unmute
-Add paper or live to pick a bot, e.g. <code>/status paper</code>. Old names (/scout, /pilot, /pause, /flatten…) still
-work."""
+/settings · <code>/set name value</code> · /scannow · /alerts · /mute · /unmute
+Add <code>paper</code> or <code>live</code> to pick a bot: <code>/status paper</code>"""
 
 # Telegram's "/" list: the everyday commands (everything in HELP still works)
 COMMANDS: list[tuple[str, str]] = [
-    ("dashboard", "Live screen: today's volume, PnL, capital (every 10 s)"),
-    ("top3", "Best 3 setups now, about breakeven, with Run buttons"),
-    ("volume", "Best 3 for the most volume within your cost"),
-    ("aggressive", "Best 3 for aggressive Mid (fast flipping)"),
-    ("openpositions", "What is running and how it is doing"),
-    ("status", "Running? today's profit, fills, volume"), ("balance", "Money in the account and its history"),
-    ("positions", "What you hold"), ("orders", "Orders waiting on the book"),
-    ("pauseneworders", "Stop new orders (closing orders keep working)"), ("unpause", "Place orders again"),
-    ("stop", "Shut the bot down (position kept)"), ("closeall", "Close every position (confirm)"),
-    ("cancelall", "Cancel every order (confirm)"), ("resumeaftersl", "Trade again after a safety stop"),
-    ("yesterdayreport", "Yesterday's report"), ("settings", "What you can change"),
-    ("set", "Change a setting: /set name value"), ("scannow", "Look for setups now"), ("menu", "Buttons"),
-    ("help", "All commands"),
+    ("dashboard", "Live screen, every 10 s"),
+    ("top3", "Breakeven top 3"), ("volume", "Most volume within your cost"),
+    ("aggressive", "Aggressive Mid top 3"), ("maxvolume", "Most volume, any cost"),
+    ("run", "Run any market, setting, leverage"), ("openpositions", "What runs · go LIVE · close"),
+    ("status", "Running? today's PnL and volume"), ("balance", "Account balance and history"),
+    ("positions", "What you hold"), ("orders", "Orders on the book"),
+    ("pauseneworders", "Stop new orders"), ("unpause", "Quote again"),
+    ("stop", "Shut the bot down (position kept)"), ("closeall", "Close every position"),
+    ("cancelall", "Cancel every order"), ("resumeaftersl", "Trade again after a safety stop"),
+    ("yesterdayreport", "Yesterday's report"), ("settings", "Settings"),
+    ("set", "/set name value"), ("scannow", "Scan now"), ("menu", "Buttons"), ("help", "All commands"),
 ]
 
 
 def menu_keyboard() -> Keyboard:
     return [
         [("📺 Live dashboard", "dashboard")],
-        [("🏆 Top 3 now", "top3"), ("▶️ Running now", "openpositions")],
-        [("🔥 Volume top 3", "volume"), ("⚡ Aggressive Mid", "aggressive")],
-        [("📊 Status", "status"), ("💰 Balance", "balance")],
-        [("📦 Positions", "positions"), ("📋 Orders", "orders")],
-        [("⏸ Pause new orders", "pauseneworders"), ("▶️ Unpause", "unpause")],
-        [("⚙️ Settings", "settings"), ("🔎 Scan now", "scannow")],
-        [("❌ Cancel all orders", "cancelall"), ("🧯 Close all positions", "closeall")],
-        [("🛑 Stop bot", "stop"), ("🔔 Alerts", "alerts")],
+        [("🟢 Top 3", "top3"), ("🔥 Volume", "volume"), ("⚡ Aggressive", "aggressive")],
+        [("🚀 Max volume", "maxvolume"), ("🎯 Any setup", "run")],
+        [("▶️ Running", "openpositions"), ("📊 Status", "status"), ("💰 Balance", "balance")],
+        [("📦 Positions", "positions"), ("📋 Orders", "orders"), ("⚙️ Settings", "settings")],
+        [("⏸ Pause", "pauseneworders"), ("▶️ Unpause", "unpause"), ("🛑 Stop", "stop")],
+        [("❌ Cancel all", "cancelall"), ("🧯 Close all", "closeall"), ("🔔 Alerts", "alerts")],
     ]
 
 
@@ -290,120 +269,235 @@ def confirm_keyboard(pid: str) -> Keyboard:
 
 
 # ------------------------------------------------------------------ scout / pilot
+def short(market: str) -> str:
+    return market.removesuffix("-USD")
+
+
+def kusd(x: float | None) -> str:
+    """Compact dollars for volumes: $9.3k, $780."""
+    if x is None:
+        return "—"
+    return f"${x / 1000:,.1f}k" if abs(x) >= 1000 else f"${x:,.0f}"
+
+
 def cost_text(c: dict[str, Any]) -> str:
     from bot.scout.profiles import cost_1k
 
     x = cost_1k(c)
-    return "" if x is None else "makes money" if x == 0 else f"costs ${x:.2f} per $1,000"
+    return "" if x is None else "profit" if x == 0 else f"${x:.2f}/1k"
+
+
+def _setting(c: dict[str, Any]) -> str:
+    from bot.scout.pilot import setting_of
+
+    return setting_of(c)
+
+
+def _sizes(c: dict[str, Any]) -> str:
+    """Order size and the largest position, and the smaller one outside US hours (RWA perps, 1.5x margin)."""
+    if not c.get("order_usd"):
+        return ""
+    out = f"{money(c['order_usd'])} orders · max position {money(1.25 * c['cap_usd'])}"
+    off = float(c.get("cap_off_usd") or c["cap_usd"])
+    if off < float(c["cap_usd"]) - 0.01:
+        out += f" ({money(1.25 * off)} at {float(c.get('leverage_off') or 0):g}x outside US hours)"
+    return out
+
+
+def card(c: dict[str, Any], i: int | None = None, *, cost: bool = False) -> str:
+    """One scan row: title, backtest, sizes; a warning when it rests on under 3 days of data."""
+    title = (f"<b>{f'{i} · ' if i else ''}{escape(short(c['market']))} · {escape(_setting(c))} · "
+             f"{float(c['leverage']):g}x</b>" + (" <i>max</i>" if c.get("at_max") else ""))
+    stats = (f"{kusd(c['volume_day'])}/day · {usd(c['pnl_day'])}/day · worst {usd(c['worst_day'])} · {c['days']}d"
+             + (f" · 24h {usd(c['recent_pnl'])}" if c.get("recent_checked", True) and c.get("days") else ""))
+    extra = [x for x in (cost_text(c) if cost else "", _sizes(c)) if x]
+    lines = [title, stats] + ([" · ".join(extra)] if extra else [])
+    if c.get("days", 0) < 3:
+        lines.append(f"⚠️ {c.get('days', 0)} day{'' if c.get('days') == 1 else 's'} of data")
+    return "<blockquote>" + "\n".join(lines) + "</blockquote>"
 
 
 def candidate_lines(top: list[dict[str, Any]], *, cost: bool = False) -> str:
-    if not top:
-        return "Nothing passes all checks right now."
-    rows = []
-    for i, c in enumerate(top, 1):
-        uses = (f" · uses {usd(c['used_usd'], sign=False)} of {usd(c['capital_usd'], sign=False)} (liquidity)"
-                if c.get("used_usd") and c.get("capital_usd") and c["used_usd"] < c["capital_usd"] - 0.01 else "")
-        size = (f"   {usd(c['order_usd'], sign=False)} orders · max position {usd(1.25 * c['cap_usd'], sign=False)}"
-                f"{' (max leverage)' if c.get('at_max') else ''}{uses}\n") if c.get("order_usd") else ""
-        rows.append(f"<b>{i}. {escape(c['market'])}</b> — {escape(c['config'])}\n{size}"
-                    f"   {c['fills_day']:.0f} fills/day · {usd(c['volume_day'], sign=False)} maker volume/day\n"
-                    f"   PnL {usd(c['pnl_day'])}/day (worst day {usd(c['worst_day'])}, {c['days']} days)"
-                    + (f" · {cost_text(c)}" if cost and cost_text(c) else "")
-                    + (f" · last 24 h {usd(c['recent_pnl'])}" if c.get("recent_checked", True) else ""))
-    return "\n".join(rows)
+    return "".join(card(c, i, cost=cost) for i, c in enumerate(top, 1)) if top else "Nothing passes right now."
 
 
-def profile_text(scan: dict[str, Any] | None, profile: str, budget: float, now: float) -> str:
-    """One list's top 3 (bot/scout/profiles.py): what it is for, the scan it comes from, the candidates."""
+def profile_text(scan: dict[str, Any] | None, profile: str, budget: float, now: float, note: str = "") -> str:
+    """One list's top 3 (bot/scout/profiles.py) from the last scan."""
     from bot.scout import profiles as P
 
     p = P.profile_of(profile)
     if not scan:
-        return "No scan yet. Start the scout on the server: <code>bot up</code> (it scans every 30 min)."
+        return "No scan yet. On the server: <code>bot up</code>."
     top = P.top(scan, p, budget) if p.budget else list(scan.get("top") or [])
     cap = (scan.get("capital") or {}).get("usd")
-    head = [f"{p.icon} <b>{p.title}</b> — top 3", f"<i>{escape(p.blurb)}</i>",
-            f"Scan {ago(now - scan['ts_us'] / 1e6)} ago · {scan.get('markets')} markets"
-            + (f" · {usd(float(cap), sign=False)} capital" if cap else "")
-            + (f" · budget ${budget:.2f} per $1,000 (/set volume_cost)" if p.budget else "")]
+    head = (f"{p.icon} <b>{p.title}</b> · scan {ago(now - scan['ts_us'] / 1e6)} ago"
+            + (f" · {money(float(cap))}" if cap else "")
+            + (f" · ≤${budget:.2f}/1k" if p.budget and not p.any_cost else ""))
     if top:
         body = candidate_lines(top, cost=p.budget)
-    elif p.budget:
+    elif p.budget and not p.any_cost:
         near = P.nearest(scan, p, budget)
-        body = "Nothing fits the budget right now."
+        body = f"Nothing within ${budget:.2f} per $1,000."
         if near:
-            body += ("\n\n<i>Cheapest that pass every other check:</i>\n" + "\n".join(
-                f"· {escape(c['market'])} {escape(c['config'])}: {money(c['volume_day'])}/day, {cost_text(c)}"
-                for c in near) + f"\n<code>/set volume_cost {max((P.cost_1k(c) or 0) for c in near) + 0.005:.2f}"
-                f"</code> lets them in.")
+            body += "\nClosest: " + " · ".join(f"{escape(short(c['market']))} {escape(_setting(c))} "
+                                               f"{c['leverage']:g}x {cost_text(c)}" for c in near)
+            body += f"\n<code>/set volume_cost {max((P.cost_1k(c) or 0) for c in near) + 0.005:.2f}</code>"
     else:
-        body = "Nothing passes all checks right now: no setup is about breakeven or better and still working now."
+        body = "Nothing passes right now."
         near = [c for c in scan.get("ranked", []) if not c["go"] and c.get("days")][:3]
         if near:
-            body += "\n\n<i>Closest that failed:</i>\n" + "\n".join(
-                f"· {escape(c['market'])} {escape(c['config'])}: {escape('; '.join(c['reasons'])[:120])}" for c in near)
-            body += "\n\n🔥 /volume and ⚡ /aggressive list setups that cost a little for more volume."
-    return "\n".join(head) + "\n\n" + body + "\n\n<i>Run → recommended or maximum leverage → Paper or LIVE.</i>"
+            body += "\nClosest: " + "\n".join(f"· {escape(short(c['market']))} {escape(c['config'])}: "
+                                              f"{escape(c['reasons'][0][:80])}" for c in near)
+    return head + "\n" + body + (f"\n{note}" if note else "")
 
 
 def profile_keyboard(profile: str, top: list[dict[str, Any]]) -> Keyboard:
-    from bot.scout.profiles import PROFILES
+    from bot.scout.profiles import LISTS
 
     rows: Keyboard = []
     if top:
-        rows.append([(f"Run #{i}", f"pick {profile} {i}") for i in range(1, len(top) + 1)])
-    rows.append([(f"{p.icon} {p.title.split()[0]}", f"top3 {p.key}") for p in PROFILES.values() if p.key != profile])
-    rows.append([("🔄 Fresh scan", f"rescan {profile}"), ("☰ Menu", "menu")])
+        rows.append([(f"▶️ {i}", f"pick {profile} {i}") for i in range(1, len(top) + 1)])
+    rows.append([(f"{p.icon} {p.title.split()[0]}", f"top3 {p.key}") for p in LISTS if p.key != profile])
+    rows.append([("🎯 Any setup", "run"), ("🔄 Scan", f"rescan {profile}"), ("☰ Menu", "menu")])
     return rows
 
 
-def leverage_keyboard(profile: str, k: int, rec: dict[str, Any], mx: dict[str, Any] | None) -> Keyboard:
-    rows: Keyboard = [[(f"✅ Recommended {rec['leverage']:g}x", f"lev {profile} {k} rec")]]
-    if mx is not None and not rec.get("at_max"):
-        rows[0].append((f"🚀 Max {mx['leverage']:g}x", f"lev {profile} {k} max"))
-    rows.append([("✖️ Cancel", "no")])
-    return rows
+def pick_keyboard(top: list[dict[str, Any]], profile: str = "breakeven") -> Keyboard:
+    row = [(f"▶️ {i}", f"pick {profile} {i}") for i in range(1, len(top) + 1)]
+    return ([row] if row else []) + [[("▶️ Running", "openpositions"), ("☰ Menu", "menu")]]
 
 
-def run_keyboard(profile: str, k: int, lev: str, live_ok: bool) -> Keyboard:
-    return [[("Paper", f"deploy {profile} {k} {lev} paper")]
-            + ([("LIVE", f"deploy {profile} {k} {lev} live")] if live_ok else []), [("✖️ Cancel", "no")]]
+# ------------------------------------------------------------------ run any setup: market -> setting -> leverage
+def markets_keyboard(scan: dict[str, Any] | None) -> Keyboard:
+    """Every scanned market, the most backtested volume first (its best setting at any leverage)."""
+    best: dict[str, float] = {}
+    for c in (scan or {}).get("all") or []:
+        vol = float(c["volume_day"]) if c.get("days") else 0.0
+        best[c["market"]] = max(best.get(c["market"], 0.0), vol)
+    order = sorted(best, key=lambda m: (-best[m], m))
+    buttons = [(f"{short(m)} {kusd(best[m]) if best[m] else '–'}", f"rm {m}") for m in order]
+    return [buttons[i:i + 3] for i in range(0, len(buttons), 3)] + [[("☰ Menu", "menu")]]
 
 
-def pick_keyboard(top: list[dict[str, Any]]) -> Keyboard:
-    row = [(f"Run #{i}", f"pick {i}") for i in range(1, len(top) + 1)]
-    return [row, [("Deployed", "openpositions"), ("☰ Menu", "menu")]] if row else [[("☰ Menu", "menu")]]
+def settings_keyboard(market: str, rows: list[dict[str, Any]]) -> Keyboard:
+    """The menu's settings on one market, each at its highest-volume leverage."""
+    from bot.scout.pilot import setting_id
+
+    best: dict[str, dict[str, Any]] = {}
+    for c in rows:
+        b = best.get(_setting(c))
+        if c.get("days") and (b is None or c["volume_day"] > b["volume_day"]):
+            best[_setting(c)] = c
+    order = sorted(best.values(), key=lambda c: -float(c["volume_day"]))
+    out: Keyboard = [[(f"{_setting(c)} · {kusd(c['volume_day'])} · {usd(c['pnl_day'])}",
+                       f"rs {market} {setting_id(_setting(c))}")] for c in order]
+    return [*out, [("◀️ Markets", "run"), ("☰ Menu", "menu")]]
+
+
+def lists_of(c: dict[str, Any], budget: float) -> list[Any]:
+    """The lists this scan row belongs to (bot/scout/profiles.py)."""
+    from bot.scout.profiles import LISTS, verdict
+
+    return [p for p in LISTS if not verdict(c, p, budget)]
+
+
+def ladder_text(market: str, setting: str, rows: list[dict[str, Any]], budget: float, star: float | None = None
+                ) -> str:
+    """One setting on one market at every leverage: volume, PnL, worst day, last 24 h, and the lists it is in."""
+    lines = []
+    for c in rows:
+        lev = f"{float(c['leverage']):g}x"
+        if c.get("too_small"):
+            lines.append(f"{lev:>5}  needs {usd(c.get('min_capital_usd'), sign=False)} of capital")
+            continue
+        recent = f"{c['recent_pnl']:+.2f}" if c.get("recent_checked", True) and c.get("days") else "–"
+        icons = "".join(p.icon for p in lists_of(c, budget))
+        mark = "⭐" if star is not None and abs(float(c["leverage"]) - star) < 0.01 else ""
+        lines.append(f"{lev:>5} {kusd(c['volume_day']):>7} {c['pnl_day']:>+6.2f} {c['worst_day']:>+6.2f} "
+                     f"{recent:>6} {icons}{mark}")
+    days = max((int(c.get("days") or 0) for c in rows), default=0)
+    head = f"🎯 <b>{escape(short(market))} · {escape(setting)}</b> · {days}d of data"
+    table = f"{'lev':>5} {'vol/d':>7} {'pnl/d':>6} {'worst':>6} {'24h':>6}\n" + "\n".join(lines)
+    legend = "🟢 breakeven 🔥 volume ⚡ aggressive 🚀 max" + (" · ⭐ list pick" if star is not None else "")
+    return f"{head}\n<pre>{escape(table)}</pre>\n<i>{legend}</i>"
+
+
+def ladder_keyboard(market: str, sid: str, rows: list[dict[str, Any]], profile: str) -> Keyboard:
+    buttons = [(f"{float(c['leverage']):g}x" + (" max" if c.get("at_max") else ""),
+                f"rl {market} {sid} {float(c['leverage']):g} {profile}") for c in rows if not c.get("too_small")]
+    return [buttons[i:i + 3] for i in range(0, len(buttons), 3)] + [[("◀️ Settings", f"rm {market}"),
+                                                                        ("☰ Menu", "menu")]]
+
+
+def run_text(c: dict[str, Any], budget: float, profile: str, running: list[str], live_ok: bool) -> str:
+    """The run screen: sizes (in and outside US hours), the backtest, the lists it is in, what it replaces."""
+    from bot.scout.profiles import profile_of
+
+    ins = lists_of(c, budget)
+    lines = [x for x in (_sizes(c),
+                         f"Backtest {kusd(c['volume_day'])}/day · {usd(c['pnl_day'])}/day · worst "
+                         f"{usd(c['worst_day'])} · {c['days']}d",
+                         (f"Last 24 h {usd(c['recent_pnl'])}" if c.get("recent_checked", True) else "Last 24 h not "
+                          "re-checked") + (f" · {cost_text(c)}" if cost_text(c) else "")) if x]
+    p = profile_of(profile)
+    notes = ["In " + ", ".join(f"{x.icon} {x.title}" for x in ins) if ins else "In no list"]
+    notes.append(f"Runs as {p.icon} {p.title}" + ("" if p.listed else ": the scout never pauses it for its numbers"))
+    if c.get("reasons"):
+        notes.append("⚠️ " + escape("; ".join(c["reasons"][:2])[:200]))
+    if running:
+        notes.append(f"Replaces the running {' and '.join(running)} bot (closes its position first).")
+    if not live_ok:
+        notes.append("LIVE is off on this server (BOT_PILOT_LIVE=1 in .env).")
+    title = (f"🎯 <b>{escape(short(c['market']))} · {escape(_setting(c))} · {float(c['leverage']):g}x</b>"
+             + (" <i>max</i>" if c.get("at_max") else ""))
+    return title + "\n<blockquote>" + "\n".join(lines) + "</blockquote>\n" + "\n".join(notes)
+
+
+def run_keyboard(market: str, sid: str, lev: float, profile: str, live_ok: bool) -> Keyboard:
+    base = f"rd {market} {sid} {lev:g} {profile}"
+    row = [("📝 Paper", f"{base} paper")] + ([("🔴 LIVE", f"{base} live")] if live_ok else [])
+    return [row, [("◀️ Leverage", f"rs {market} {sid}"), ("☰ Menu", "menu")]]
 
 
 def pilot_text(pilot: Any) -> str:
+    """/openpositions: what is deployed, how it does today against its backtest, the last check."""
+    from bot.scout.profiles import profile_of
+
     st = pilot.state()
     a = st.get("active")
     if not a:
-        return "<b>Deployed:</b> nothing. /top3 to pick one."
+        return "Nothing deployed · /top3 · /run"
     running = pilot.control.is_running(a["mode"])
-    rev = st.get("last_review") or {}
-    state = ("paused by the scout: " + escape(st["paused_by_scout"])) if st.get("paused_by_scout") else \
-        ("running" if running else "NOT running")
-    since = dt.datetime.fromtimestamp(a["since"], dt.UTC).strftime("%m-%d %H:%M")
-    bt = a.get("backtest") or {}
     view = pilot.control.view(a["mode"]) if running else None
-    today = day_pnl(view) if view is not None else None
-    checks = "passing" if rev.get("go") else "failing: " + escape("; ".join(rev.get("reasons") or [])[:200])
-    from bot.scout.profiles import profile_of
-
+    rev = st.get("last_review") or {}
+    bt = a.get("backtest") or {}
     prof = profile_of(a.get("profile"))
-    lst = f" · {prof.icon} {prof.title} list" + (" · max leverage" if a.get("lev") == "max" else "")
-    return (f"<b>Deployed:</b> {escape(a['market'])} — {escape(a['config'])} ({a['mode'].upper()}){lst}, "
-            f"since {since} UTC\n"
-            f"State: {state}\n"
-            f"Today: {usd(today)} · backtest expected {usd(bt.get('pnl_day'))}/day, "
-            f"{usd(bt.get('volume_day'), sign=False)} volume/day\n"
-            f"Last check ({ago(time.time() - rev['ts']) if rev else 'never'} ago): {checks}")
+    state = ("⏸ paused by the scout: " + escape(st["paused_by_scout"])) if st.get("paused_by_scout") else \
+        ("running" if running else "⚠️ NOT running")
+    since = dt.datetime.fromtimestamp(a["since"], dt.UTC).strftime("%m-%d %H:%M UTC")
+    vol = sum(d["maker_volume"] for d in view.today.values()) if view is not None else None
+    if not prof.listed:
+        check = "your pick: not judged"
+    elif rev.get("go"):
+        check = f"✅ still in the list ({ago(time.time() - rev['ts'])} ago)"
+    else:
+        check = "⚠️ " + escape("; ".join(rev.get("reasons") or [])[:160]) if rev else "not checked yet"
+    from bot.telegram.dashboard import quote_lines
+
+    q = next((x.get("quotes") for x in ((view.snapshot or {}).get("sessions") or []) if x.get("quotes")), None) \
+        if view is not None else None
+    lines = [f"{state} · {prof.icon} {prof.title}{' · max lev' if a.get('lev') == 'max' else ''} · since {since}",
+             f"Today {usd(day_pnl(view) if view is not None else None)} · {kusd(vol)} volume",
+             *[escape(x) for x in quote_lines(q)],
+             f"Backtest {kusd(bt.get('volume_day'))}/day ({bt.get('fills_day', 0) / 24:.1f} fills/hour) · "
+             f"{usd(bt.get('pnl_day'))}/day", check]
+    return (f"▶️ <b>{escape(short(a['market']))} · {escape(a['config'])}</b> · {a['mode'].upper()}\n<blockquote>"
+            + "\n".join(lines) + "</blockquote>")
 
 
-def pilot_keyboard() -> Keyboard:
-    return [[("Top 3 now", "top3"), ("Close & stop", "pilotclose")], [("🔄 Refresh", "openpositions"), ("☰ Menu", "menu")]]
+def pilot_keyboard(paper: bool = False) -> Keyboard:
+    rows: Keyboard = [[("🔴 Go LIVE with this setup", "golive")]] if paper else []
+    return [*rows, [("⏹ Close & stop", "pilotclose"), ("🔄", "openpositions"), ("☰ Menu", "menu")]]
 
 
 # ------------------------------------------------------------------ balance and settings
@@ -448,11 +542,9 @@ def balance_text(snap: dict[str, float] | None, summary: dict[str, Any], held: d
 def settings_text(over: dict[str, Any], defaults: dict[str, Any]) -> str:
     from bot.common.settings import SETTINGS, show
 
-    rows = ["<b>⚙️ Settings</b> — change with <code>/set name value</code>, undo with <code>/set name default</code>"]
+    rows = ["⚙️ <b>Settings</b> · <code>/set name value</code> · <code>/set name default</code>"]
     for name, s in SETTINGS.items():
         cur = over.get(name, defaults.get(name))
-        mark = " <i>(changed)</i>" if name in over else ""
-        rows.append(f"\n<b>{name}</b> = {escape(show(name, cur))}{mark}\n{escape(s.help)}. "
-                    f"<i>Applies: {escape(s.applies)}.</i>")
-    rows.append("\nLive trading itself stays switched on or off in .env on the server (BOT_PILOT_LIVE), not here.")
-    return "\n".join(rows)
+        rows.append(f"<b>{name}</b> {escape(show(name, cur))}{' ✏️' if name in over else ''} — "
+                    f"<i>{escape(s.help.split(':')[0].split(';')[0].split(' (')[0])}</i>")
+    return "\n".join(rows) + "\n✏️ changed · LIVE on/off stays in .env (BOT_PILOT_LIVE)"

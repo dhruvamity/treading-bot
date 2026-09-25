@@ -1,8 +1,8 @@
 """Compact market tape for the scout: best bid/offer changes and trades, per market per UTC day.
 
-Layout: <root>/<MARKET>/<YYYY-MM-DD>/{bbo,trades}-<part>.npz. The recorder appends a part every few minutes and the
-importers write one part per source, so writers never touch each other's files; `load_day` concatenates, sorts and
-de-duplicates. All times are the venue's own timestamps in int64 µs UTC.
+Layout: <root>/<MARKET>/<YYYY-MM-DD>/{bbo,trades}-<part>.npz. The recorder appends a part every few minutes (parts
+named `rec...`) and the importers write one part per source (`arcusmm-...`), so writers never touch each other's
+files; `load_day` concatenates, sorts and de-duplicates. All times are the venue's own timestamps in int64 µs UTC.
 
     bbo:    ts, bid, ask, bid_sz, ask_sz        a row when either price changes, or sizes change and >= 1 s passed
     trades: ts, px, sz, buy, seq, tid           buy = the TAKER bought; seq = Arcus sequenceNumber (one taker order)
@@ -26,6 +26,7 @@ import orjson
 US_DAY = 86_400_000_000
 BBO_FIELDS = ("ts", "bid", "ask", "bid_sz", "ask_sz")
 DEPTH_N = 10
+REC_PART = "rec"   # part-name prefix of everything the scout's own recorder writes (imports use other names)
 MIN_REAL_US = 1_750_000_000_000_000  # Arcus REST returns placeholder rows dated 2026-01-01 and earlier
 
 
@@ -145,6 +146,8 @@ class TapeStore:
         out = _concat(parts, empty_depth())
         o = np.argsort(out["ts"], kind="stable")
         sel = o[(out["ts"][o] >= start_us) & (out["ts"][o] < end_us)]
+        ts = out["ts"][sel]
+        sel = sel[np.concatenate([[True], np.diff(ts) != 0])] if len(sel) else sel   # two recorders, one snapshot
         return {k: v[sel] for k, v in out.items()}
 
     def load_range(self, market: str, start_us: int, end_us: int) -> DayTape:

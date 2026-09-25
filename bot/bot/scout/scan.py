@@ -13,9 +13,9 @@ the recorded days), past which the sizes stop growing and the stops apply to the
 
 A candidate is GO only when all three checks pass (percentages are of the capital the sizes use):
 - long window (up to the last 7 full days): average PnL/day >= -0.25% (close to breakeven or better), at most one
-  daily stop, never the kill, at least half the days not negative, and at least 5 fills a day; a market trading for
-  under 21 days (listed recently, or first seen after the recorder started) needs 3 full days, and a market's first
-  recorded day counts only if it covers 20 h;
+  daily stop, never the kill, at least half the days not negative, at least 5 fills a day, and at least 3 full
+  recorded days (one or two days of a market say little; it also covers new listings, whose first week trades
+  unusually); a market's first recorded day counts only if it covers 20 h;
 - short window (the last 24 h, re-run each scan): PnL >= -0.25%, and still at least 30% of its usual fills (the flow is
   still there), with the last 6 h not worse than -0.50%;
 - market now (last 60 minutes of 1-min mids): not trending (efficiency ratio < 0.5), volatility not above 2x its
@@ -61,6 +61,7 @@ MENU: list[Config] = [
     *(Config(f"deep {d:g}bp, no pause", "mid", spacing_bps=d, safety=False) for d in (1.5, 3)),
     Config("deep 3bp, skew", "mid", spacing_bps=3, kappa=1.0),
     *(Config(f"deep {d:g}bp x2", "mid", spacing_bps=d, levels=2, level_step_bps=3) for d in (2, 4)),
+    Config("touch 0bp", "mid", style="normal", spacing_bps=0),   # joins the best bid and ask
     Config("touch 1bp", "mid", style="normal", spacing_bps=1),
     Config("improve touch", "mid", style="aggressive"),
     # quotes around the last fill, soft reset after a 0.1% run against the position (the Grid of Tread users)
@@ -76,8 +77,7 @@ MENU: list[Config] = [
 BY_NAME = {c.name: c for c in MENU}
 
 # GO thresholds (see module docstring; the PnL ones are % of capital, in sizing.Pct)
-NEW_LISTING_DAYS = 21      # Arcus addedTimestamp this recent: a new listing ...
-NEW_LISTING_MIN_DAYS = 3   # ... needs this many full days before it can be GO (listing-week flow is unusual)
+MIN_FULL_DAYS = 3
 MAX_DAY_STOPS = 1
 MIN_FILLS_DAY = 5
 MIN_FLOW_FRAC = 0.30
@@ -285,6 +285,7 @@ class Scanner:
     ladder: bool = True               # False: each market at its maximum leverage only
     shortlist: bool = True            # re-run the last 24 h only for settings that pass the multi-day checks
     volume_cost: float | None = None  # ... or that cost at most this per $1,000 of volume (the volume lists)
+    day_jobs: int = 0                 # market-days backtested by the last backtest() (0: every day was cached)
     _alive_h: dict[str, float] = field(default_factory=dict)
 
     @property
@@ -344,12 +345,13 @@ class Scanner:
         return out[-self.htf_days:]
 
     def backtest(self, markets: list[str], now_us: int, mis: dict[str, MarketInfo], meta: dict[str, dict[str, Any]],
-                 *, always: set[tuple[str, str]] | None = None, listed: dict[str, float | None] | None = None,
+                 *, always: set[tuple[str, str]] | None = None,
                  stop: threading.Event | None = None) -> dict[str, dict[str, Any]]:
         """{market: {risk_key: {"risk", "days": {day: [results]}, "recent": [results], "checked": [names]}}}.
 
         1. Full days: from the cache; a day not cached yet (a new UTC day, a new capital) is backtested for every
-           setting. This is the once-a-day search over everything.
+           setting, and a cached day missing a setting (one added to the menu since) for that setting only. This is
+           the once-a-day search over everything.
         2. The last 24 h: re-run only for the settings that pass the multi-day checks (long_reasons), plus `always`
            ((market, "setting @ Nx") pairs: the deployed setup). A setting that already fails on its full days is
            NO-GO whatever its last 24 h did, so re-running it would change nothing. shortlist=False re-runs all.
@@ -373,23 +375,31 @@ class Scanner:
                 continue
             base[m] = (str(self.store.root), m, asdict(mis[m]), risks, meta[m].get("regularTradingHours"))
             for d in days:
-                todo = []
+                todo: list[dict[str, Any]] = []
+                fill: dict[str, list[str]] = {}
                 for r in risks:
-                    cp = self.cache_path(m, d, risk_key(r))
-                    if cp.exists():
-                        out[m][risk_key(r)]["days"][d] = json.loads(cp.read_text())
-                    else:
+                    rk = risk_key(r)
+                    cp = self.cache_path(m, d, rk)
+                    cached = json.loads(cp.read_text()) if cp.exists() else []
+                    if cached:
+                        out[m][rk]["days"][d] = cached
+                    done = {x["config"] for x in cached}
+                    missing = [n for n in names if n not in done]
+                    if missing:
                         todo.append(r)
+                        fill[rk] = missing
                 if todo:
                     s0 = day_start_us(d)
                     day_jobs.append((str(self.store.root), m, s0, s0 + US_DAY, asdict(mis[m]), names, todo, sp,
-                                     meta[m].get("regularTradingHours"), holidays))
+                                     meta[m].get("regularTradingHours"), holidays, fill))
                     day_where.append((m, d))
+        self.day_jobs = len(day_jobs)
         ex = ProcessPoolExecutor(max_workers=self.workers, initializer=lower_priority)
         try:
             for i, res in _gather(ex, day_jobs, stop):
                 m, d = day_where[i]
                 for rk, rs in res.items():
+                    rs = out[m][rk]["days"].get(d, []) + rs   # a cached day gets its missing settings added
                     out[m][rk]["days"][d] = rs
                     cp = self.cache_path(m, d, rk)
                     cp.parent.mkdir(parents=True, exist_ok=True)
@@ -402,7 +412,7 @@ class Scanner:
                     e = out[m][risk_key(r)]
                     e["checked"] = [n for n in names if not self.shortlist
                                     or (m, label(n, r["leverage"])) in (always or set())
-                                    or passes_long(e, n, self.pct, (listed or {}).get(m), self.volume_cost)]
+                                    or passes_long(e, n, self.pct, volume_cost=self.volume_cost)]
                     if e["checked"]:
                         only[risk_key(r)] = e["checked"]
                 if only:
@@ -496,43 +506,22 @@ class Candidate:
         return asdict(self)
 
 
-def listed_days_ago(meta: dict[str, Any], now_us: int, first_seen: str | None = None,
-                    recorder_first: str | None = None) -> float | None:
-    """How long the market has been trading, in days: since Arcus listed it (addedTimestamp), or since the recorder
-    first saw it when that came after the recorder started (a market pre-listed OFFLINE for months keeps its old
-    addedTimestamp when it finally turns ONLINE). None when neither says it is new."""
-    ages = []
-    try:
-        added = float(meta.get("addedTimestamp") or 0)
-    except (TypeError, ValueError):
-        added = 0.0
-    if added > 0:
-        ages.append((now_us / 1e6 - added) / 86400)
-    if first_seen and recorder_first and first_seen > recorder_first:
-        ages.append((now_us - day_start_us(first_seen)) / US_DAY)
-    return min(ages) if ages else None
-
-
-def score_market(market: str, bt: dict[str, Any], now: dict[str, float], pct: Pct | None = None,
-                 listed_days: float | None = None) -> list[Candidate]:
-    """bt: {risk_key: {"risk", "days", "recent"}} from Scanner.backtest (or one such entry for a single sizing).
-    listed_days: days since Arcus listed the market (new listings need NEW_LISTING_MIN_DAYS full days)."""
+def score_market(market: str, bt: dict[str, Any], now: dict[str, float], pct: Pct | None = None) -> list[Candidate]:
+    """bt: {risk_key: {"risk", "days", "recent"}} from Scanner.backtest (or one such entry for a single sizing)."""
     if "days" in bt:
         bt = {"": bt}
     out = []
     lev_max = max((e.get("risk", {}).get("leverage", 0.0) for e in bt.values()), default=0.0)
     for entry in bt.values():
         r = entry.get("risk") or {}
-        out += _score(market, entry, now, r, at_max=r.get("leverage", 0.0) >= lev_max, pct=pct or Pct(),
-                      listed_days=listed_days)
+        out += _score(market, entry, now, r, at_max=r.get("leverage", 0.0) >= lev_max, pct=pct or Pct())
     return out
 
 
-def long_checks(days: list[dict[str, Any]], used: float, pct: Pct, listed_days: float | None = None
-                ) -> list[tuple[bool, str]]:
+def long_checks(days: list[dict[str, Any]], used: float, pct: Pct) -> list[tuple[bool, str]]:
     """Why a setting fails on its full days, as (about money?, reason). "About money" reasons (it loses, it hits the
     daily stop, too few days are positive) are what a volume budget may accept (bot/scout/profiles.py); the others
-    (liquidation, the kill, too few fills, a new listing) always count."""
+    (liquidation, the kill, too few fills, too few days of data) always count."""
     if not days:
         return [(False, "no full day of data yet")]
     out: list[tuple[bool, str]] = []
@@ -554,16 +543,19 @@ def long_checks(days: list[dict[str, Any]], used: float, pct: Pct, listed_days: 
         out.append((True, f"only {pos_days}/{len(days)} days not negative"))
     if fills_day < MIN_FILLS_DAY:
         out.append((False, f"too few fills ({fills_day:.1f}/day)"))
-    if listed_days is not None and listed_days < NEW_LISTING_DAYS and len(days) < NEW_LISTING_MIN_DAYS:
-        out.append((False, f"new market (trading {listed_days:.0f} days): {len(days)} of {NEW_LISTING_MIN_DAYS} "
-                    "full days"))
+    if len(days) < MIN_FULL_DAYS:
+        out.append((False, f"{days_text(len(days))} of data (needs {MIN_FULL_DAYS})"))
     return out
 
 
-def long_reasons(days: list[dict[str, Any]], used: float, pct: Pct, listed_days: float | None = None) -> list[str]:
+def days_text(n: int) -> str:
+    return f"{n} full day{'' if n == 1 else 's'}"
+
+
+def long_reasons(days: list[dict[str, Any]], used: float, pct: Pct) -> list[str]:
     """Why a setting fails on its full days (empty: it passes). The one definition both the scoring and the
     shortlist of settings whose last 24 h is re-run use."""
-    return [r for _money, r in long_checks(days, used, pct, listed_days)]
+    return [r for _money, r in long_checks(days, used, pct)]
 
 
 def cost_per_1k(pnl: float, volume: float) -> float | None:
@@ -571,8 +563,7 @@ def cost_per_1k(pnl: float, volume: float) -> float | None:
     return max(0.0, -pnl) / volume * 1000 if volume > 0 else None
 
 
-def passes_long(entry: dict[str, Any], name: str, pct: Pct, listed_days: float | None = None,
-                volume_cost: float | None = None) -> bool:
+def passes_long(entry: dict[str, Any], name: str, pct: Pct, volume_cost: float | None = None) -> bool:
     """Does setting `name` pass the multi-day checks in this backtest entry (Scanner.backtest)? With volume_cost
     (dollars per $1,000 of volume), a setting that loses money also passes when it costs at most that and every
     other check passes: the volume and aggressive lists (bot/scout/profiles.py) need its last 24 h too."""
@@ -580,7 +571,7 @@ def passes_long(entry: dict[str, Any], name: str, pct: Pct, listed_days: float |
         return False
     days = [r for _d, rs in sorted(entry["days"].items()) for r in rs if r["config"] == name]
     used = float(entry["risk"].get("used_usd") or entry["risk"].get("capital_usd") or 100.0)
-    checks = long_checks(days, used, pct, listed_days)
+    checks = long_checks(days, used, pct)
     if not checks:
         return True
     if volume_cost is None or any(not money for money, _r in checks):
@@ -590,7 +581,7 @@ def passes_long(entry: dict[str, Any], name: str, pct: Pct, listed_days: float |
 
 
 def _score(market: str, bt: dict[str, Any], now: dict[str, float], risk: dict[str, Any], at_max: bool,
-           pct: Pct, listed_days: float | None = None) -> list[Candidate]:
+           pct: Pct) -> list[Candidate]:
     out = []
     by_cfg: dict[str, list[dict[str, Any]]] = {}
     for _d, rs in sorted(bt["days"].items()):
@@ -608,7 +599,7 @@ def _score(market: str, bt: dict[str, Any], now: dict[str, float], risk: dict[st
     for name in [c.name for c in MENU]:
         days = by_cfg.get(name, [])
         rec = recent.get(name)
-        checks = [(False, bt["skip"])] if bt.get("skip") else long_checks(days, used, pct, listed_days)
+        checks = [(False, bt["skip"])] if bt.get("skip") else long_checks(days, used, pct)
         reasons = [r for _m, r in checks]
         money = [r for m, r in checks if m]
         pnl = [d["pnl"] for d in days]
@@ -700,14 +691,13 @@ def scan(root: Path, *, now_us: int | None = None, markets: list[str] | None = N
                  shortlist=shortlist, volume_cost=volume_cost)
     have = [m for m in sc.store.markets() if m in mis and (not markets or m in markets) and sc.store.days(m)]
     t0 = time.time()
-    rec_first = next(iter(sc.store.days(ALIVE_MARKET)), None)
-    listed = {m: listed_days_ago(meta[m], now_us, next(iter(sc.store.days(m)), None), rec_first) for m in have}
-    bt = sc.backtest(have, now_us, mis, meta, always=always, listed=listed, stop=stop)
+    bt = sc.backtest(have, now_us, mis, meta, always=always, stop=stop)
     cands: list[Candidate] = []
     for m in have:
-        cands += score_market(m, bt[m], market_now(sc.store, m, now_us), pct, listed[m])
+        cands += score_market(m, bt[m], market_now(sc.store, m, now_us), pct)
     ranked = rank(cands)
-    return {"ts_us": now_us, "took_s": round(time.time() - t0, 1), "risk": asdict(sc.risk), "volume_cost": volume_cost,
+    return {"ts_us": now_us, "took_s": round(time.time() - t0, 1), "workers": workers, "day_jobs": sc.day_jobs,
+            "risk": asdict(sc.risk), "volume_cost": volume_cost,
             "capital": {"usd": sc.capital, "source": capital_source, "pct": asdict(pct)},
             "leverage": {"policy": "max, then " + ", ".join(f"{x:g}x" for x in LADDER) if ladder else "max",
                          "caps": LEV_CAPS},
@@ -800,12 +790,12 @@ def table(res: dict[str, Any], limit: int = 25) -> str:
     from bot.scout import profiles
 
     budget = float(res.get("volume_cost") or 0.15)
-    for key in ("volume", "aggressive"):
+    for key in ("volume", "aggressive", "max"):
         p = profiles.PROFILES[key]
         top = profiles.top(res, p, budget)
-        lines += ["", f"{p.title.upper()} top 3 (most volume for at most ${budget:.2f} lost per $1,000; "
-                  "/set volume_cost):", head]
-        lines += rows(top) if top else ["   nothing fits the budget right now"]
+        why = "whatever it costs" if p.any_cost else f"for at most ${budget:.2f} lost per $1,000; /set volume_cost"
+        lines += ["", f"{p.title.upper()} top 3 (most volume {why}):", head]
+        lines += rows(top) if top else ["   nothing fits right now"]
     small = [f"{r['market']} (${r.get('min_capital_usd', 0):,.2f})" for r in res["ranked"]
              if r.get("too_small") and not r["days"]]
     if small:

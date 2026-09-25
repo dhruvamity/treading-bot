@@ -133,6 +133,24 @@ def test_store_roundtrip_dedupes_trades(tmp_path: Path) -> None:
     assert back.n_trades == t.n_trades and back.n_bbo == t.n_bbo
 
 
+def test_two_recorders_on_the_same_days_give_the_backtest_the_same_tape(tmp_path: Path) -> None:
+    # server, 2026-09-24 21:38 to 09-25 07:28 UTC: two scouts recorded the same books into the same days
+    t = tape(lambda s: 100 + 0.02 * math.sin(s / 60), 1800)
+    one, two = TapeStore(tmp_path / "one"), TapeStore(tmp_path / "two")
+    one.write_part("TEST-USD", "bbo", "rec1-20", t.bbo)
+    one.write_part("TEST-USD", "trades", "rec1-20", t.trades)
+    for part in ("rec1-20", "rec2-20"):
+        two.write_part("TEST-USD", "bbo", part, t.bbo)
+        two.write_part("TEST-USD", "trades", part, t.trades)
+        depth = {"ts": t.bbo["ts"], "bp": np.ones((len(t.bbo["ts"]), 10)), "bs": np.ones((len(t.bbo["ts"]), 10)),
+                 "ap": np.ones((len(t.bbo["ts"]), 10)), "as_": np.ones((len(t.bbo["ts"]), 10))}
+        two.write_part("TEST-USD", "depth", part, depth)
+    a, b = one.load_day("TEST-USD", "2026-09-20"), two.load_day("TEST-USD", "2026-09-20")
+    assert a.n_bbo == b.n_bbo and a.n_trades == b.n_trades
+    assert run(a, FLAT).as_dict() == run(b, FLAT).as_dict()
+    assert len(two.load_depth("TEST-USD", T0, T0 + US_DAY)["ts"]) == len(t.bbo["ts"])
+
+
 # ------------------------------------------------------------------------------------------------ parity
 @pytest.mark.parametrize("inv", [D(0), D("0.05"), D("-0.2")])
 def test_mid_policy_quotes_what_the_live_strategy_quotes(inv: D) -> None:
@@ -312,3 +330,23 @@ def test_a_skip_window_stops_new_quotes() -> None:
     assert run(t, FLAT, start=start).maker_fills > 0
     assert run(t, Config("x", "mid", spacing_bps=3, safety=False, skip_et=("09:00-16:30",)), start=start).maker_fills == 0
     assert run(t, Config("x", "mid", spacing_bps=3, safety=False, skip_et=("16:30-17:00",)), start=start).maker_fills > 0
+
+
+def test_the_engine_counts_why_it_did_not_quote_and_how_often_it_rested_at_the_best_price() -> None:
+    mk = fixture_markets()
+    a = mk[Venue.ARCUS]["BTC"]
+    ev = list(merge([book_events(Venue.ARCUS, "BTC", trend_path(86000, 0.0), start_us=1_790_000_000_000_000,
+                                 seconds=600, tick=a.tick_size, step=a.step_size, half_spread_ticks=5,
+                                 trades_per_s=1.0, trade_size=D("0.01"), seed=6)]))
+
+    def quotes(**kw: Any) -> Any:
+        sess = mm_session(mode="mid", levels_per_side=1, order_size_usd=25, inventory_cap_usd=50, capital_usd=100,
+                          **kw)
+        return Simulator([sess], mk, SimConfig()).run_sync(ev).stats["t"]["quotes"]
+
+    q = quotes(execution_style="aggressive", spacing_bps=2)       # one tick inside the best bid and ask
+    assert q.seconds > 500 and q.quoting / q.seconds > 0.9 and q.bid_touch / q.bid > 0.9
+    q = quotes(execution_style="passive", spacing_bps=20, passive_k_sigma=0.0)   # 20 bp from the mid: far behind
+    assert q.bid > 500 and q.bid_touch == 0 and q.bid_ticks / q.bid > 50
+    q = quotes(execution_style="aggressive", spacing_bps=2, session={"skip_et": ["09:00-16:30"]})
+    assert q.quoting == 0 and q.blocked == {"skip window": q.seconds}

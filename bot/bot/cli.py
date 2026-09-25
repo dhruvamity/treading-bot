@@ -396,6 +396,25 @@ def cmd_report(a: argparse.Namespace) -> None:
     print(p.read_text() if p.exists() else f"no {a.mode} report for {a.date} at {p}")
 
 
+def cmd_diagnose(a: argparse.Namespace) -> None:
+    """Why a run filled what it filled (bot/core/diagnose.py). Read-only."""
+    import datetime as dt
+
+    from bot.core.diagnose import diagnose
+
+    app = load_app()
+
+    def when(x: str) -> int:
+        t = dt.datetime.fromisoformat(x.replace("T", " "))
+        return int((t if t.tzinfo else t.replace(tzinfo=dt.UTC)).timestamp() * 1_000_000)
+
+    end = when(a.until) if a.until else time.time_ns() // 1000
+    start = when(a.since) if a.since else end - int(a.hours * 3600 * 1_000_000)
+    base = a.market.upper().removesuffix("-USD") if a.market else None
+    print(diagnose(db=Path(app.state_db_for(a.mode)), logs=Path(app.logs_dir), tape_root=Path("data/scout/tape"),
+                   markets_json=Path("data/scout/markets.json"), start_us=start, end_us=end, base=base, mode=a.mode))
+
+
 def cmd_keys(a: argparse.Namespace) -> None:
     from bot.core.creds import arcus_address, arcus_private_keys, discover_arcus_keys
     from bot.venues.arcus.rest import ArcusRest
@@ -807,6 +826,13 @@ def build_parser() -> argparse.ArgumentParser:
     sp = add("report", cmd_report, "print a daily report")
     sp.add_argument("--date", default=time.strftime("%Y-%m-%d", time.gmtime()))
     sp.add_argument("--mode", choices=["live", "testnet", "paper"], default="live")
+    sp = add("diagnose", cmd_diagnose, "why a run filled what it filled: orders, acks, rejects, blocks, where orders "
+             "rested against the best price, and the takers that traded (read-only)")
+    sp.add_argument("--mode", choices=["live", "testnet", "paper"], default="live")
+    sp.add_argument("--hours", type=float, default=6.0, help="the last N hours (default 6)")
+    sp.add_argument("--since", help="window start, UTC: 2026-09-25 20:00")
+    sp.add_argument("--until", help="window end, UTC (default now)")
+    sp.add_argument("--market", help="e.g. QQQ (default: the market with the most orders)")
     sp = add("keys", cmd_keys, "your API keys as the venue sees them: subaccount, status, expiry")
     sp.add_argument("--testnet", action="store_true")
     sp = add("guardian", cmd_guardian, "run the independent guardian process")

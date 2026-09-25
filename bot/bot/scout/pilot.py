@@ -6,17 +6,20 @@ Files (paths relative to the project root):
   state/pilot_events.jsonl      what happened; the Telegram bot posts every new line
   config/sessions/pilot.yaml    the session the runner starts with, rewritten on each approval
 
-Three lists (bot/scout/profiles.py): breakeven (the scan's GO top 3, offered after each scan), volume and aggressive
-(the most volume within the owner's cost per $1,000, /set volume_cost). Each pick runs at the list's recommended
-leverage or, when the owner chooses, at the market's maximum (the same setting's max-leverage backtest).
+Four lists (bot/scout/profiles.py): breakeven (the scan's GO top 3), volume and aggressive (the most volume within
+the owner's cost per $1,000, /set volume_cost) and max (the most volume at any cost). A pick runs at any leverage of
+its ladder: judged by its list when that rung is in the list, else as the owner's own pick.
 
 After every scan, review():
-- nothing running: offer the breakeven top 3 when they differ from the last offer;
+- nothing running: post the breakeven top 3 when its #1 changes, at most every OFFER_EVERY_S (/top3 shows the lists
+  any time);
 - running and still in its list (judged by the list it was picked from): nothing to do;
 - running and out of its list: pause quoting on it (the runner's reduce-only exit works any position off), say why,
   and offer the current top 3. It unpauses by itself once it is back in its list on two scans in a row;
 - another GO candidate with at least 1.5x its maker volume: suggest a switch. The bot never switches on its own.
 Approving a different candidate closes the current position first (runner "close" command), then starts the new one.
+Besides the lists' top 3, the owner can deploy any backtested market x setting x leverage (find(), profile "manual"):
+the scout reports on it but never pauses it for failing a list, only when its market goes offline.
 
 Sizes follow the account: the scout scans at the subaccount's equity (bot/scout/capital.py) and the engine re-sizes
 from it at start and at 00:00 UTC (bot/common/sizing.py), never above 1.25x the last capital a GO scan covered. Each
@@ -27,6 +30,7 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import hashlib
 import json
 import os
 import time
@@ -49,6 +53,7 @@ SESSION = "pilot"
 SWITCH_X = 1.5
 RESUME_AFTER_GO_SCANS = 2
 MAX_SCAN_AGE_S = 90 * 60
+OFFER_EVERY_S = 3 * 3600
 
 
 def base_of(market: str) -> str:
@@ -112,14 +117,19 @@ def session_for(market: str, cfg: Config, risk: Risk, *, live: bool, account_ind
 
 
 def describe(c: dict[str, Any]) -> str:
-    """One line a person can read: market, setting, backtest numbers."""
-    size = f" · ${c['order_usd']:,.0f} orders, cap ${c['cap_usd']:,.0f}" if c.get("order_usd") else ""
-    if c.get("used_usd"):
-        size += f" on ${c['used_usd']:,.0f} of capital"
-    return (f"{c['market']} · {c['config']}{size} · {c['fills_day']:.0f} fills/day · "
-            f"${c['volume_day']:,.0f} maker volume/day"
-            f" · PnL {c['pnl_day']:+.2f}/day (worst day {c['worst_day']:+.2f}, {c['days']} days) · last 24 h "
-            f"{c['recent_pnl']:+.2f}")
+    """One line: market, setting, sizes, backtest numbers."""
+    return f"{c['market']} · {c['config']} · {numbers(c)}"
+
+
+def numbers(c: dict[str, Any]) -> str:
+    """Sizes and backtest numbers of a scan row."""
+    size = f"${c['order_usd']:,.0f} orders · max position ${1.25 * c['cap_usd']:,.0f} · " if c.get("order_usd") else ""
+    return (f"{size}backtest ${c['volume_day']:,.0f}/day, {_signed(c['pnl_day'])}/day, worst "
+            f"{_signed(c['worst_day'])} ({c['days']}d)")
+
+
+def _signed(x: float) -> str:
+    return f"{'+' if x > 0 else '-' if x < 0 else ''}${abs(x):,.2f}"
 
 
 class Pilot:
@@ -200,21 +210,19 @@ class Pilot:
         keys = [f"{c['market']}|{c['config']}" for c in top]
         a = st.get("active")
         if not a or not self.control.is_running(a["mode"]):
-            if keys != st.get("offer_keys"):
-                st["offer_keys"] = keys
-                if top:
-                    out.append(self.event("offer", "Best setups right now (backtested with the $100 account's stops):",
-                                          top=top))
-                else:
-                    out.append(self.event("offer", "Nothing passes all checks right now: no setup is both near "
-                                          "breakeven or better on the long window and still working now.", top=[]))
+            if keys and keys[0] != st.get("offer_first") and \
+                    time.time() - float(st.get("offer_ts") or 0) >= OFFER_EVERY_S:
+                st["offer_first"], st["offer_ts"] = keys[0], time.time()
+                out.append(self.event("offer", "🏆 New #1 setup", top=top, profile="breakeven"))
             self.save(st)
             return out
         cand = next((c for c in scan.get("all", []) if c["market"] == a["market"] and c["config"] == a["config"]), None)
         prof = profiles.profile_of(a.get("profile"))
         budget = self.budget()
         why_not = profiles.verdict(cand, prof, budget) if cand is not None else ["not in scan"]
-        if prof.key != "breakeven":
+        if not prof.listed:
+            top = []            # the owner's own pick: no switch suggestions
+        elif prof.key != "breakeven":
             top = profiles.top(scan, prof, budget)
         base = base_of(a["market"])
         if a["market"] in (scan.get("offline") or []):
@@ -223,35 +231,38 @@ class Pilot:
                 why = "Arcus has taken the market offline"
                 self.control.set_pause(a["mode"], base, f"scout: {why}")
                 st["paused_by_scout"] = why
-                out.append(self.event("paused", f"Paused {a['market']} ({a['config']}): {why}. Any position is being "
-                                      "closed with reduce-only orders once it trades again.", top=top))
+                out.append(self.event("paused", f"⏸ Paused {a['market']} · {a['config']}: {why}. Closing any "
+                                      "position once it trades.", top=top, profile=prof.key))
         elif cand is None:
-            out.append(self.event("review", f"{a['market']} is not in this scan (no fresh data?). Leaving it as is."))
+            if not st.get("missing_noted"):
+                st["missing_noted"] = True
+                out.append(self.event("review", f"{a['market']} · {a['config']} is not in the last scan (no fresh "
+                                      "data?). Left running."))
         elif why_not:
             st["go_streak"] = 0
             if not st.get("paused_by_scout"):
                 why = "; ".join(why_not)
                 self.control.set_pause(a["mode"], base, f"scout: {why}")
                 st["paused_by_scout"] = why
-                out.append(self.event("paused", f"Paused {a['market']} ({a['config']}): {why}. Any position is being "
-                                      "closed with reduce-only orders. It resumes by itself if the checks pass again "
-                                      "twice in a row.", top=top))
+                out.append(self.event("paused", f"⏸ Paused {a['market']} · {a['config']}: {why}. Closing any "
+                                      "position; resumes after 2 good scans.", top=top, profile=prof.key))
         else:
+            st.pop("missing_noted", None)
             st["go_streak"] = st.get("go_streak", 0) + 1
             if cand.get("capital_usd"):   # still GO at this capital: the engine may size up to 1.25x it
                 self.control.set_sizing_ok(a["mode"], float(cand["capital_usd"]), base)
             if st.get("paused_by_scout") and st["go_streak"] >= RESUME_AFTER_GO_SCANS:
                 self.control.clear_pause(a["mode"], base)
                 st.pop("paused_by_scout", None)
-                out.append(self.event("resumed", f"{a['market']} ({a['config']}) is back in the {prof.title} list: "
-                                      "quoting resumed."))
+                out.append(self.event("resumed", f"▶️ Resumed {a['market']} · {a['config']}: back in "
+                                      f"{prof.icon} {prof.title}."))
             best = next((c for c in top if c["market"] != a["market"]), None)
             if best and best["volume_day"] >= SWITCH_X * max(cand["volume_day"], 1.0) and \
                     st.get("suggested") != f"{best['market']}|{best['config']}":
                 st["suggested"] = f"{best['market']}|{best['config']}"
-                out.append(self.event("suggest", f"{best['market']} ({best['config']}) now backtests at "
-                                      f"${best['volume_day']:,.0f}/day vs ${cand['volume_day']:,.0f}/day for "
-                                      f"{a['market']}. Switch only if you approve.", top=top))
+                out.append(self.event("suggest", f"💡 {best['market']} · {best['config']}: ${best['volume_day']:,.0f}"
+                                      f"/day vs ${cand['volume_day']:,.0f}/day now. Switch only if you want.",
+                                      top=top, profile=prof.key))
         st["last_review"] = {"ts": time.time(), "go": bool(cand is not None and not why_not),
                              "reasons": why_not, "profile": prof.key}
         self.save(st)
@@ -266,13 +277,18 @@ class Pilot:
             return list((scan or {}).get("top") or [])
         return profiles.top(scan, prof, self.budget())
 
-    def pick(self, k: int, profile: str = "breakeven", lev: str = "rec") -> dict[str, Any]:
-        """Candidate k of a list; lev "max": the same market and setting at the market's maximum leverage."""
+    def fresh_scan(self) -> dict[str, Any]:
+        """The last scan, if it is recent enough to deploy from."""
         scan = self.latest_scan()
         if not scan:
             raise ValueError("no scan yet: start `bot scout run` and wait for the first scan")
         if time.time() - scan["ts_us"] / 1e6 > MAX_SCAN_AGE_S:
             raise ValueError("the last scan is over 90 minutes old; is `bot scout run` running?")
+        return scan
+
+    def pick(self, k: int, profile: str = "breakeven", lev: str = "rec") -> dict[str, Any]:
+        """Candidate k of a list; lev "max": the same market and setting at the market's maximum leverage."""
+        scan = self.fresh_scan()
         prof = profiles.profile_of(profile)
         top = self.top(prof.key)
         if not 1 <= k <= len(top):
@@ -283,10 +299,30 @@ class Pilot:
             if m is None:
                 raise ValueError(f"{c['market']} has no maximum-leverage backtest for {c.get('setting') or c['config']}")
             c = m
-        name = c.get("setting") or c["config"]
-        if name not in BY_NAME:   # a scan made before the menu changed
-            raise ValueError(f"{name!r} is no longer in the scout's menu; wait for the next scan and pick again")
+        _in_menu(c)
         return {**c, "profile": prof.key, "lev": lev}
+
+    def rows(self, market: str, setting: str | None = None) -> list[dict[str, Any]]:
+        """The last scan's backtests of one market (one setting), every leverage, highest leverage first."""
+        return sorted((c for c in (self.latest_scan() or {}).get("all") or [] if c["market"] == market
+                       and (setting is None or setting_of(c) == setting)), key=lambda c: -float(c["leverage"]))
+
+    def find(self, market: str, setting: str, lev: float | str) -> dict[str, Any]:
+        """Any backtested setup: market, menu setting, leverage (a number, or "max"). The owner's own pick."""
+        scan = self.fresh_scan()
+        rows = [c for c in scan.get("all") or [] if c["market"] == market and setting_of(c) == setting]
+        if not rows:
+            raise ValueError(f"{market} {setting}: not in the last scan")
+        c = next((r for r in rows if r.get("at_max")), None) if lev == "max" else \
+            next((r for r in rows if abs(float(r["leverage"]) - float(lev)) < 0.01), None)
+        if c is None:
+            levs = ", ".join(f"{r['leverage']:g}x" for r in sorted(rows, key=lambda r: -float(r["leverage"])))
+            raise ValueError(f"{market} {setting}: no backtest at {lev}{'' if lev == 'max' else 'x'} (has {levs})")
+        if c.get("too_small"):
+            raise ValueError(f"{market} at {c['leverage']:g}x needs ${c.get('min_capital_usd', 0):,.2f} of capital "
+                             "(Arcus minimum order)")
+        _in_menu(c)
+        return {**c, "profile": "manual", "lev": f"{float(c['leverage']):g}x"}
 
     def write_session(self, c: dict[str, Any], *, live: bool) -> Path:
         cfg = BY_NAME[c.get("setting") or c["config"]]
@@ -301,14 +337,19 @@ class Pilot:
 
     async def approve(self, k: int, *, live: bool, by: str, profile: str = "breakeven", lev: str = "rec",
                       wait_close_s: float = 660.0, wait_start_s: float = 90.0) -> str:
-        c = self.pick(k, profile, lev)
+        return await self.deploy(self.pick(k, profile, lev), live=live, by=by, wait_close_s=wait_close_s,
+                                 wait_start_s=wait_start_s)
+
+    async def deploy(self, c: dict[str, Any], *, live: bool, by: str, wait_close_s: float = 660.0,
+                     wait_start_s: float = 90.0) -> str:
+        """Run candidate c (from pick() or find()): close whatever runs, write the session, start it."""
         mode = "live" if live else "paper"
         st = self.state()
         a = st.get("active")
         for m in {mode, a["mode"] if a else mode}:
             if self.control.is_running(m):
                 self.control.request_close(m, by)
-                self.event("closing", f"Closing the running {m} bot's position before switching.")
+                self.event("closing", f"Closing the running {m} bot first…")
                 t0 = time.time()
                 while self.control.is_running(m) and time.time() - t0 < wait_close_s:
                     await asyncio.sleep(5)
@@ -328,8 +369,8 @@ class Pilot:
             await asyncio.sleep(3)
             if self.control.is_running(mode):
                 prof = profiles.profile_of(c["profile"])
-                self.event("deployed", f"Running {describe(c)} in {mode.upper()}, from the {prof.icon} {prof.title} "
-                           f"list{' at the maximum leverage' if c['lev'] == 'max' else ''} (approved by {by}).")
+                self.event("deployed", f"🟢 {mode.upper()} · {c['market']} · {c['config']}\n{numbers(c)}"
+                           f"\n{prof.icon} {prof.title}{' · max leverage' if c['lev'] == 'max' else ''} · by {by}")
                 if live:   # the live bot's independent watchdog (bot/ops.py); best effort, never blocks the deploy
                     with contextlib.suppress(Exception):
                         from bot import ops
@@ -337,7 +378,7 @@ class Pilot:
                         ops.start(self.control.app, "guardian")
                 return f"running in {mode}"
         tail = self.control.log_tail(rec["log"])
-        self.event("failed", f"{c['market']} did not start. Last log lines:\n{tail[-1500:]}")
+        self.event("failed", f"❌ {c['market']} did not start:\n{tail[-1500:]}")
         raise RuntimeError(f"{c['market']} did not start; see {rec['log']}")
 
     async def close(self, *, by: str, wait_s: float = 660.0) -> str:
@@ -353,5 +394,25 @@ class Pilot:
         st["active"] = None
         st.pop("paused_by_scout", None)
         self.save(st)
-        self.event("closed", f"Closed {a['market']} ({a['config']}) and stopped (by {by}).")
+        self.event("closed", f"⏹ Closed {a['market']} · {a['config']} (by {by}).")
         return "closed"
+
+
+def setting_of(c: dict[str, Any]) -> str:
+    """The menu setting of a scan row ("touch 1bp" of "touch 1bp @ 20x")."""
+    return str(c.get("setting") or c["config"].split(" @ ")[0])
+
+
+def _in_menu(c: dict[str, Any]) -> None:
+    if setting_of(c) not in BY_NAME:   # a scan made before the menu changed
+        raise ValueError(f"{setting_of(c)!r} is no longer in the scout's menu; wait for the next scan and pick again")
+
+
+def setting_id(name: str) -> str:
+    """A short id of a menu setting for Telegram buttons (64 bytes of data at most). Derived from the name, so a
+    button from before a menu change can never start a different setting."""
+    return hashlib.sha1(name.encode()).hexdigest()[:6]
+
+
+def setting_by_id(sid: str) -> str | None:
+    return next((n for n in BY_NAME if setting_id(n) == sid), None)

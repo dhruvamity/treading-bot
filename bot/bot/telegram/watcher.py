@@ -94,22 +94,21 @@ class Watcher:
         # ---- bot up / down
         if m.running and not v.running:
             if now - m.stop_requested_at < 300:
-                await self._say(f"⏹ <b>{name}</b> bot stopped, as requested.")
+                await self._say(f"⏹ <b>{name}</b> stopped.")
             else:
-                await self._say(f"🔴 <b>{name} bot is DOWN</b> — no heartbeat for {ago(v.heartbeat_age_s)}. Resting "
-                                "quotes stay on the venue until the dead man's switch or the guardian cancels them. "
-                                "Check the server; /status", critical=True)
+                await self._say(f"🔴 <b>{name} DOWN</b> · no heartbeat {ago(v.heartbeat_age_s)} · resting quotes stay "
+                                "until the dead man's switch or the guardian cancels them · /status", critical=True)
         elif v.running and not m.running:
-            await self._say(f"🟢 <b>{name}</b> bot started (pid {v.pid}).")
+            await self._say(f"🟢 <b>{name}</b> started.")
         m.running = v.running
         # ---- risk flags
         risk = tuple(_risk(v))
         for r in risk:
             if r not in m.risk:
-                await self._say(f"🔴 <b>{name}</b>: {r}. Quoting stopped; /status for details, /resumeaftersl after you "
-                                "have checked.", critical=r.startswith(("SAFE", "STOPPED")))
+                await self._say(f"🔴 <b>{name}</b> · {r} · quoting stopped · /status · /resumeaftersl once checked",
+                                critical=r.startswith(("SAFE", "STOPPED")))
         if m.risk and not risk and v.running:
-            await self._say(f"🟢 <b>{name}</b>: safety stops cleared, quoting allowed again.")
+            await self._say(f"🟢 <b>{name}</b> · safety stops cleared.")
         m.risk = risk
         # ---- daily PnL against the loss limit
         day = dt.datetime.fromtimestamp(now, dt.UTC).strftime("%Y-%m-%d")
@@ -121,11 +120,11 @@ class Watcher:
         if self.prefs.pnl_alerts and dp is not None and limit > 0:
             if dp <= -limit and m.pnl_level < 2:
                 m.pnl_level = 2
-                await self._say(f"🔴 <b>{name}</b> day PnL {usd(dp)} reached the daily loss limit ({usd(-limit)}). "
-                                "The bot stops opening new positions until 00:00 UTC.", critical=True)
+                await self._say(f"🔴 <b>{name}</b> · day PnL {usd(dp)} hit the daily stop ({usd(-limit)}) · no new "
+                                "positions until 00:00 UTC", critical=True)
             elif dp <= -limit / 2 and m.pnl_level < 1:
                 m.pnl_level = 1
-                await self._say(f"🟡 <b>{name}</b> day PnL {usd(dp)}: half of the daily loss limit ({usd(-limit)}).")
+                await self._say(f"🟡 <b>{name}</b> · day PnL {usd(dp)}, half the daily stop ({usd(-limit)})")
         # ---- fills
         new = self.control.fills_since(mode, m.last_fill_ts)
         if new:

@@ -309,7 +309,8 @@ class Simulator:
             placed += pv.actions
         for e in self.engines:
             stats[e.sid] = {"ticks": e.stats.ticks, "actions": e.stats.actions, "rejects": e.stats.rejects,
-                            "errors": e.stats.errors, "iocs": e.stats.iocs, "risk_events": len(e.stats.risk_events)}
+                            "errors": e.stats.errors, "iocs": e.stats.iocs, "risk_events": len(e.stats.risk_events),
+                            "quotes": e.quotes}
             for k, secs in e.stats.mode_time_s.items():
                 mode_time[k] = mode_time.get(k, 0.0) + secs
         return SimResult(breakdown=bd, total=self.ledger.total(marks), equity_curve=self.equity_curve, fills=self.fills,

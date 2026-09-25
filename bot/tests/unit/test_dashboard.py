@@ -89,11 +89,11 @@ def test_live_today_volume_pnl_and_capital(tmp_path: Path) -> None:
     assert [(p["market"], p["size"], p["mark"]) for p in d.positions] == [("QQQ", 0.1, 600.0)]
     t_from = max(day0, now - 7200)
     if now - t_from >= dashboard.PACE_AFTER_S:
-        assert d.pace_day == pytest.approx(110 / (now - t_from) * DAY)
+        assert d.pace_day == pytest.approx(d.maker_volume / (now - t_from) * DAY)   # maker, as backtested
 
     html = dashboard.render(d)
     for part in ("📊 <b>QQQ-USD</b> · <b>LIVE</b>", "<i>deep 2bp x2 @ 10x", "Volume <b>$110</b> · 2 fills",
-                 "2% of $5,369/day backtest", "PnL <b>+$0.42</b> · +0.84%", "Long <b>0.1 QQQ</b>",
+                 "of the $5,369/day backtest", "PnL <b>+$0.42</b> · +0.84%", "Long <b>0.1 QQQ</b>",
                  "Equity <b>$50.42</b> · deposited $50.00", "P/L <b>+$0.42</b> · +0.84%", "every 10 s",
                  "<blockquote><b>Today</b>", "<blockquote><b>Position</b>", "<blockquote><b>Capital</b>"):
         assert part in html, (part, html)

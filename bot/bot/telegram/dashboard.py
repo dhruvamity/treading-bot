@@ -66,6 +66,7 @@ class Dash:
     positions: list[dict[str, Any]] = field(default_factory=list)   # views.positions_of: market, size, mark, entry
     open_orders: int = 0
     stops: dict[str, float] = field(default_factory=dict)          # position / daily / kill, in dollars
+    quotes: dict[str, Any] = field(default_factory=dict)            # engine QuoteStats of the day (first session)
     # capital
     equity: float | None = None
     free: float | None = None
@@ -132,6 +133,8 @@ def collect(control: Control, *, now: float | None = None, account: int = 0,
             for k, x in (s.get("stops") or {}).items():
                 if x:
                     d.stops[k] = d.stops.get(k, 0.0) + float(x)
+            if s.get("quotes") and not d.quotes:
+                d.quotes = s["quotes"]
     _deployed(d, state_dir)
 
     # the account: live uses the real one (bot, own read, history); paper only what the paper bot publishes
@@ -204,8 +207,8 @@ def _today(d: Dash, v: ModeView, snap: dict[str, Any]) -> None:
         return
     started = snap.get("started_us", 0) / 1e6 or d.now
     t_from = max(d.day_start, min(started, first if first is not None else started))
-    if d.now - t_from >= PACE_AFTER_S:
-        d.pace_day = d.volume / (d.now - t_from) * DAY
+    if d.now - t_from >= PACE_AFTER_S:   # maker volume: what the backtest's $/day counts
+        d.pace_day = d.maker_volume / (d.now - t_from) * DAY
 
 
 def _deployed(d: Dash, state_dir: Path) -> None:
@@ -215,6 +218,27 @@ def _deployed(d: Dash, state_dir: Path) -> None:
         return
     if a and (d.mode is None or a.get("mode") == d.mode):
         d.market, d.config, d.backtest = a.get("market"), a.get("config"), a.get("backtest") or {}
+
+
+def quote_lines(q: dict[str, Any] | None) -> list[str]:
+    """How much of the day the bot quoted, what blocked it, and how often it rested at the best price: the first
+    things to look at when fills are fewer than the backtest's."""
+    if not q or not q.get("seconds"):
+        return []
+    tot = float(q["seconds"])
+    blocks = sorted((q.get("blocked") or {}).items(), key=lambda kv: -kv[1])
+    out = [f"Quoting {q['quoting'] / tot * 100:.0f}% of {ago(tot)}"
+           + "".join(f" · {k} {v / tot * 100:.0f}%" for k, v in blocks[:2] if v / tot >= 0.01)]
+    sides = []
+    for side in ("bid", "ask"):
+        rest = float(q.get(side) or 0)
+        if rest >= 1:
+            at = float(q.get(f"{side}_touch") or 0) / rest
+            behind = float(q.get(f"{side}_ticks") or 0) / rest
+            sides.append(f"{side} {at * 100:.0f}%" + (f" (avg {behind:.1f} ticks behind)" if at < 0.95 else ""))
+    if sides:
+        out.append("At the best price: " + " · ".join(sides))
+    return out
 
 
 def _clock(ts: float) -> str:
@@ -289,8 +313,13 @@ def render(d: Dash, *, html: bool = True, frame: str = "live") -> str:
             + (e(f" · pace {_k(d.pace_day)}/day") if d.pace_day is not None else "")]
     bt_vol, bt_pnl = d.backtest.get("volume_day"), d.backtest.get("pnl_day")
     if bt_vol:
-        rows.append(c(bar(d.volume / float(bt_vol))) + e(f" {d.volume / float(bt_vol) * 100:.0f}% of "
-                                                          f"{_k(float(bt_vol))}/day backtest"))
+        bt = float(bt_vol)
+        if d.pace_day is not None:
+            rows.append(c(bar(d.pace_day / bt)) + e(f" pace {d.pace_day / bt * 100:.0f}% of the {_k(bt)}/day backtest"))
+        else:
+            rows.append(c(bar(d.maker_volume / bt)) + e(f" {d.maker_volume / bt * 100:.0f}% of the {_k(bt)}/day "
+                                                         "backtest so far"))
+    rows += [e(x) for x in quote_lines(d.quotes)]
     if d.fees >= 0.005:
         rows.append(e(f"Fees {usd(d.fees, sign=False)} (taker fills)"))
     if d.day_pnl is not None:

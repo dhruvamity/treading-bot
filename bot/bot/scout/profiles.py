@@ -5,8 +5,12 @@
 - volume:     any setting whose losses cost at most `volume_cost` dollars per $1,000 of volume (/set volume_cost),
               with every check that is not about money still passing (fills, kill, liquidation, fresh data, trend,
               volatility, new listing). Most volume first: paying a known price for volume.
-- aggressive: the same budget, but only Mid quoting at or inside the best bid/ask ("improve touch", "touch 1bp",
-              and both with the US session skipped): the fastest flipping, the most fills.
+- aggressive: the same budget, but only Mid quoting at or inside the best bid/ask ("improve touch", "touch 0bp",
+              "touch 1bp", and two of them with the US session skipped): the fastest flipping, the most fills.
+- max:        the most volume whatever it costs: every check that is not about money still applies. The last 24 h
+              is not required (the scout re-checks it only for settings within the budget), and a row says so.
+- manual:     not a list: a setup the owner picked by hand (market, setting, leverage). The pilot never pauses it for
+              failing a list, only when its market goes offline.
 
 The daily stop still applies to every run: a setting whose backtest hit it has that already in its numbers, since
 the scout backtests with the owner's own stops. The lists are ranked from the scan's `all` rows at view time, so a
@@ -19,7 +23,8 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Any
 
-AGGRESSIVE = ("improve touch", "touch 1bp", "improve touch, skip US session", "touch 1bp, skip US session")
+AGGRESSIVE = ("improve touch", "touch 0bp", "touch 1bp", "improve touch, skip US session",
+              "touch 1bp, skip US session")
 RECENT_X = 2.0     # the last 24 h may cost up to this multiple of the budget (one day is noisy)
 MONEY_PREFIXES = ("loses $", "hit the daily stop", "only ", "last 24 h lost", "last 6 h lost")   # older scans
 
@@ -32,6 +37,8 @@ class Profile:
     blurb: str
     settings: tuple[str, ...] | None = None   # None: every setting in the scout's menu
     budget: bool = False                        # judged by cost per $1,000 instead of breakeven
+    any_cost: bool = False                      # budget lists: no cost limit at all (max volume)
+    listed: bool = True                         # False: not a list (the owner's own pick): never judged
 
 
 PROFILES: dict[str, Profile] = {p.key: p for p in (
@@ -40,8 +47,13 @@ PROFILES: dict[str, Profile] = {p.key: p for p in (
             budget=True),
     Profile("aggressive", "⚡", "Aggressive Mid", "quotes at or inside the best bid/ask and flips fast; most volume "
             "within your cost per $1,000", settings=AGGRESSIVE, budget=True),
+    Profile("max", "🚀", "Max volume", "the most volume whatever it costs; safety checks still apply", budget=True,
+            any_cost=True),
+    Profile("manual", "🎯", "Your pick", "a setup you picked by hand", listed=False),
 )}
-ALIASES = {"be": "breakeven", "safe": "breakeven", "vol": "volume", "agg": "aggressive", "mid": "aggressive"}
+ALIASES = {"be": "breakeven", "safe": "breakeven", "vol": "volume", "agg": "aggressive", "mid": "aggressive",
+           "maxvolume": "max", "mine": "manual"}
+LISTS = tuple(p for p in PROFILES.values() if p.listed)
 
 
 def profile_of(name: str | None) -> Profile:
@@ -69,6 +81,8 @@ def money_reasons(c: dict[str, Any]) -> list[str]:
 def verdict(c: dict[str, Any], profile: Profile | str, budget: float) -> list[str]:
     """Why this scan row is not in the profile's list (empty: it is)."""
     p = profile if isinstance(profile, Profile) else profile_of(profile)
+    if not p.listed:
+        return []
     if p.settings is not None and (c.get("setting") or c["config"].split(" @ ")[0]) not in p.settings:
         return [f"not a {p.title} setting"]
     if not p.budget:
@@ -80,6 +94,8 @@ def verdict(c: dict[str, Any], profile: Profile | str, budget: float) -> list[st
     cost = cost_1k(c)
     if cost is None:
         out.append("no volume in the backtest")
+    elif p.any_cost:
+        return out
     elif cost > budget:
         out.append(f"costs ${cost:.2f} per $1,000 (budget ${budget:.2f})")
     if not c.get("recent_checked", True):
