@@ -5,7 +5,24 @@ policy blocks every exchange (see [7](#7-live-paper-run-on-arcus)).
 
 ## 1. Summary
 
-_Written last._
+_Provisional until the live run (tier D) happens._
+
+- **Capital efficiency multiplies cost.** Loss per day as a share of capital = turnover × cost per $1M. The
+  settings that turn a small account over fastest need a cost close to zero, or they drain it: Mid −1 at $237 per
+  $1M (RiseX, 19 runs) is 1.2% a day at 50× turnover and 24% at 1,000×.
+- **The best posted volume-per-dollar result** is a plain Grid on a zero-builder-fee venue: 525× the capital a day
+  at ~$24 per $1M (S20). DGrid in calm hours had a trading profit; all its cost was fees (S02).
+- **Mid 0 (the hypothesis) wins on volume, not on breakeven.** Every tight posted setting lost 1.4–3.3 bp before
+  fees. On Arcus, which charges makers nothing, the equivalent settings cost $30–130 per $1M (the owner's recorded
+  data). In the model Mid 0 was just above breakeven on quiet thin books and lost on busy or toxic ones.
+- **Quoting 1–3 bps off the mid is the best trade-off** in every tier that measured it: GO near breakeven at
+  100–230× the capital a day on real Arcus books, and ~60% of Mid 0's volume at a profit in the model.
+- **Two filters help:** skip the US cash session (real data), and gate Mid 0 by volatility (new; model only).
+- **Avoid for this goal:** BTC/ETH, last-fill grids without a soft reset (and RGrid/DGrid copies), RSI Signal, and
+  20x+ on touch settings.
+- **Not done:** the 12–15 hour live paper run. This session's network policy blocks `api.arcus.xyz`. The farm that
+  does it is built, tested end to end against a stand-in server, and runs with one command (`bot farm run --hours
+  15`).
 
 ## 2. What was asked, and how it was tested
 
@@ -167,7 +184,32 @@ _Pending: blocked by the session's network policy (api.arcus.xyz denied)._
 
 ## 8. Recommendation
 
-_Written last._
+**Provisional: based on tiers A–C. Tier D (live Arcus paper trading) could not run in this session.**
+
+For the most volume per dollar within hours, at or near breakeven, with limit orders only, on Arcus:
+
+| Rank | Setting (farm name → this bot's scout menu) | Where | Leverage | Expected | Risk |
+|---|---|---|---|---|---|
+| 1 | **Mid +1 with inventory skew** (`mid+1 skew` → the scout's `deep 1bp` or `touch 1bp`; the skew is `skew_kappa: 1` in the session) | Quiet RWA perps: QQQ, SPY, GLD, NVDA, SLV | 5–10x | Model: ~100× the capital an hour, profitable in most scenarios. Real (tier B): `touch 1bp` costs $30–130 per $1M | **R2** |
+| 2 | **Deep 1.5–3 bp** (`mid+2`/`mid+3` → `deep 1.5bp, no pause`, `deep 3bp, skew`) | The same markets | 10–20x | Real (tier B): GO near breakeven at 100–230× the capital **a day** | **R1–R2** |
+| 3 | **Gated Mid 0** (`mid0 vgate`, new) | The same markets | 5x | Model: ~60% of Mid 0's volume at about breakeven. No real data yet | **R3** until tested live |
+| 4 | **Mid 0 / join / improve the touch** (`mid0`, `join`, `improve1` → `improve touch`) | Only where something pays more than ~$30–130 per $1M | 5x, skip the US session | Most volume; a steady loss of turnover × cost | **R3** |
+
+Add the **skip-US-session** filter to all of them (real data: 339 of 455 combinations improved).
+
+Avoid, for this goal:
+- BTC, ETH and busy crypto majors (every tier: −2.3 bp real, all settings lost in the model; S45).
+- Grids anchored to the last fill without a soft reset, and RGrid / DGrid copies (real: −2.4 to −4.0 bp; model:
+  $94–480 per $1M; posts: "stalls in a trend", "$1200+ CPM" runs). **R3–R4.**
+- RSI Signal for volume (the model's worst tails, R4; one posted round trip).
+- 20x+ on the touch settings: turnover and loss scale together, and the daily stop fires.
+
+Use the formula before sizing up: **loss per day % = turnover per day × cost per $1M ÷ 10,000.** A setting that is
+fine at 50× a day can lose a fifth of the account at 1,000×.
+
+How to confirm on live data (any machine that can reach Arcus): `bot farm run --hours 15`, then compare the
+leaderboard's `mid+1 skew`, `mid+2`, `mid0 vgate` and `mid0` rows on QQQ, SPY, GLD and NVDA. Only move to real money
+through the scout and pilot (`bot pilot approve`), in paper first.
 
 ## 9. Caveats
 
