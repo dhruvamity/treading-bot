@@ -36,6 +36,9 @@ FARM_MENU: list[Entry] = [
           "at the best bid and ask"),
     Entry(Config("improve1", "mid", style="aggressive", safety=False), "aggressive", "S04 'aggressive'",
           "one tick inside the best bid and ask"),
+    Entry(Config("touch 0bp", "mid", style="normal", spacing_bps=0), "aggressive",
+          "the scout menu's `touch 0bp` (Telegram `/run BTC touch 0bp max`)",
+          "as `join`, with the scout's safety pause on: the same config the live paper engines run"),
     Entry(Config("mid0 skipUS", "tmid", spacing_bps=0, safety=False, skip_et=US_SESSION), "aggressive",
           "S28 + S02/S21 'avoid NYC hours'"),
     # ---- research additions (not in the posts): Mid 0 only while the market is calm (research/REPORT.md)
