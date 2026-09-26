@@ -186,8 +186,10 @@ class SessionEngine:
             return view.oracle or view.index or view.mark or view.mid()
 
         def open_notional(v: Venue, b: str, s: Side, exclude: str | None = None) -> Decimal:
+            # an order whose cancel is out is on its way off the book (a requote's old half), not resting
             return sum((o.remaining * o.req.price for o in state.open_orders(v, b)
-                        if o.req.side is s and not o.req.reduce_only and o.req.client_id != exclude), Z)
+                        if o.req.side is s and not o.req.reduce_only and o.req.client_id != exclude
+                        and not self.om.is_cancelling(o.req.client_id or "")), Z)
 
         def oi(v: Venue, b: str) -> tuple[Decimal | None, Decimal | None]:
             view = hub.get(v, b)
@@ -645,7 +647,8 @@ class SessionEngine:
     async def execute(self, d: RiskDecision, now_us: int) -> None:
         self.stats.risk_events.append(d)
         if self.alerter is not None:
-            level = "crit" if d.action in (RiskAction.STOP_ALL, RiskAction.STOP_VENUE_CRIT, RiskAction.SAFE_MODE) else "warn"
+            level = "crit" if d.action in (RiskAction.STOP_ALL, RiskAction.STOP_VENUE_CRIT, RiskAction.SAFE_MODE) else \
+                "info" if d.trigger == "safety_pause" else "warn"   # self-clearing in 30 s; the dashboard shows its share
             getattr(self.alerter, level)(d.trigger, f"{d.action.value}: {d.reason}")
         venues = [d.venue] if d.venue else list(self.adapters)
         if d.action in (RiskAction.PAUSE_QUOTES, RiskAction.STOP_MARKET_QUOTING, RiskAction.NO_NEW_QUOTES):

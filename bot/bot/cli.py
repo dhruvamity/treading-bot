@@ -427,6 +427,8 @@ def cmd_diagnose(a: argparse.Namespace) -> None:
                 raise SystemExit("--replay: no deployed setup found; give --market, --setting, --capital and --leverage")
             setup = {"market": market, "setting": a.setting, "leverage": a.leverage,
                      "risk": asdict(Risk.for_capital(a.capital, a.leverage))}
+        if a.sl is not None:
+            setup = {**setup, "max_loss_usd": a.sl or None}
     print(diagnose(db=Path(app.state_db_for(a.mode)), logs=Path(app.logs_dir), tape_root=Path("data/scout/tape"),
                    markets_json=Path("data/scout/markets.json"), start_us=start, end_us=end, base=base, mode=a.mode,
                    setup=setup))
@@ -783,6 +785,8 @@ def build_parser() -> argparse.ArgumentParser:
     sp.add_argument("--setting", help="--replay by hand: the menu setting the run used")
     sp.add_argument("--capital", type=float, help="--replay by hand: the capital it was sized for")
     sp.add_argument("--leverage", type=float, help="--replay by hand: its leverage")
+    sp.add_argument("--sl", type=float, help="--replay: the run's loss limit in dollars (/run ... sl=), which lifts "
+                                             "the daily stop and the kill; 0 for none (default: the deployed one)")
     sp = add("keys", cmd_keys, "your API keys as the venue sees them: subaccount, status, expiry")
     sp.add_argument("--testnet", action="store_true")
     sp = add("guardian", cmd_guardian, "run the independent guardian process")

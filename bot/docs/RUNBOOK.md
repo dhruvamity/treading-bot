@@ -142,10 +142,10 @@ names `/scout`, `/pilot`, `/report`, `/pause`, `/resume`, `/flatten` still work)
 | `/dashboard` | One message edited every 10 s and pinned (state/telegram_dashboard.json, survives a restart): today's volume and pace, today's PnL from the balance history (deposits excluded), position, equity and capital P/L. ⏹ / ▶️ buttons; `bot dashboard` is the terminal version |
 | `/status`, `/pnl`, `/positions`, `/orders` | What is running, today's PnL, fills and maker volume; PnL by market since start |
 | `/sessions`, `/logs [n]`, `/yesterdayreport [date]` | Session files; latest decisions; the daily report (yesterday by default) |
-| `/pauseneworders [MARKET]` | Quoting stops within a second; reduce-only exit orders keep working off any position. Persists across restarts. |
+| `/pauseneworders [MARKET]` | Quoting stops within a second; reduce-only exit orders keep working off any position. Persists across restarts (`bot up`); a new `/run` clears it. |
 | `/unpause [MARKET]` | Quoting again |
 | `/stop` | Confirm button, then a clean shutdown: quotes cancelled, positions kept. SIGINT fallback after 25 s. |
-| `/resumeaftersl` | Confirm button: clears safe mode / drawdown stop (same as `bot resume`). Look at `/logs` first. |
+| `/resumeaftersl` | Confirm button: clears safe mode / drawdown stop (same as `bot resume`). Look at `/logs` first. Not a pause you set: that is `/unpause`. |
 | `/run NAME` / `/run NAME live` | Paper: confirm button. Live: the session needs `live_enabled: true`, `doctor` must pass, then you type a one-time code. |
 | `/doctor NAME` | Live readiness check (reads only) |
 | `/cancelall [venue]` | Confirm button: cancels every open order on the account (live/testnet only) |

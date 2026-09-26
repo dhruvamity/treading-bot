@@ -119,3 +119,8 @@ def test_diagnose_replays_the_runs_setup_beside_the_run(tmp_path: Path) -> None:
     assert "Replay    touch 1bp @ 25x: order $224, cap $447" in text and "(the engine's sizes)" in text
     assert "the run      volume $      223  fills    1" in text
     assert "backtest through" in text and "backtest queue (scan)" in text and "backtest front" in text
+    # 2026-09-26: a run with sl=30 was replayed with its $2.20 daily stop, so the backtest stopped at 07:06 while the
+    # run went on to $57k; the limit lifts the daily stop and the kill in the replay as in the engine
+    text = diagnose(db=db, logs=tmp_path / "logs", tape_root=tmp_path / "tape", markets_json=tmp_path / "markets.json",
+                    start_us=T0, end_us=T0 + 600 * S, setup={**setup, "max_loss_usd": 30})
+    assert "stops $1.00/$30.00/$30.00 (the engine's sizes), sl=$30" in text

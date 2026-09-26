@@ -273,7 +273,7 @@ class RiskEngine:
         med = view.spread_med_1h.median()
         if (sb is not None and med is not None and len(view.spread_med_1h.buf) >= s.warmup_samples
                 and sb > s.spread_x_median * med and sb - med > s.spread_min_excess_bps):
-            reasons.append(f"spread {sb:.1f} bps > {s.spread_x_median}x median {med:.1f}")
+            reasons.append(f"spread {sb:.2f} bps > {s.spread_x_median}x median {med:.2f}")
         dm = view.depth_med_1h.median()
         if dm and len(view.depth_med_1h.buf) >= s.warmup_samples:
             d = float(view.book.depth_notional(True, within_bps=25) + view.book.depth_notional(False, within_bps=25))
