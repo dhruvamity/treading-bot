@@ -16,7 +16,8 @@ from typing import Any
 from bot.common.config import SizingDefaults
 
 FILE = "settings.json"
-DEFAULT_VOLUME_COST = 0.15   # dollars per $1,000 of volume the volume lists may cost (about 1.5 bp)
+DEFAULT_VOLUME_COST = 0.20   # dollars per $1,000 of volume the lists may cost in the backtest (2 bp): the backtest
+                             # costs ~1.25x what live BTC runs cost (3 runs, 2026-09-26), so about 1.6 bp live
 DEFAULT_SCAN_BUDGET_MIN = 30   # minutes of full-day backtests per scan; the rest continues in the next one
 CRYPTO = ("BTC-USD", "ETH-USD")   # the markets /set crypto_lev caps
 
@@ -53,7 +54,7 @@ SETTINGS: dict[str, Setting] = {s.name: s for s in (
     Setting("scan_workers", "workers", 1, 32,
             "CPU cores a scan may use: auto = all but one; all but two while a bot runs on this machine", "next scan"),
     Setting("volume_cost", "per1k", 0.01, 5,
-            "The most the Volume and Aggressive Mid lists may cost: dollars lost per $1,000 traded (0.15 = 1.5 bp)",
+            "The most the Most Volume and Cheapest lists may cost: dollars lost per $1,000 traded (0.20 = 2 bp)",
             "those lists at once; the next scan also re-checks the last 24 h of the settings it lets in"),
     Setting("crypto_lev", "lev", 1, 50,
             "Highest leverage the scan tests on BTC and ETH: max = what Arcus allows (BTC 40x, ETH 25x), or a number "

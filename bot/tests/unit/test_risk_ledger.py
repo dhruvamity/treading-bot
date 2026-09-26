@@ -506,7 +506,7 @@ def test_a_resume_after_a_kill_quotes_again_but_not_past_the_run_limit() -> None
                                             stop_loss_pct=100, take_profit_pct=None, day_pnl=D(0), capital=D(30),
                                             equity=D(eq), ts_us=T0, kill_usd=D(3))]
     assert pnl("30") == [] and pnl("26.9") == ["drawdown"]
-    e = SimpleNamespace(stopped=True, risk=r, session=SimpleNamespace(max_loss_usd=None), run_pnl=None,
+    e = SimpleNamespace(stopped=True, risk=r, session=SimpleNamespace(max_loss_usd=None), run_pnl=None, finishing="",
                         clock=SimpleNamespace(state=SessionState.EXITING), decisions=DecisionLog(), venue=Venue.ARCUS,
                         base="BTC", sid="s")
     SessionEngine.resume_if_cleared(e, T0)

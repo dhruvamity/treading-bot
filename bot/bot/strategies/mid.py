@@ -1,7 +1,9 @@
-"""Mid: 1-3 levels per side at r +/- (anchor + i x level step), skewed around the reservation price.
+"""Mid (Tread.fi's Mid): 1-3 levels per side at r +/- (anchor + i x level step), skewed around the reservation price.
 
-Tread "Mid-1 / Mid-2" = offset_bps -1 / -2 (quotes inside the spread). Off-hours on an Arcus RWA perp Mid only quotes
-with off_hours.allow_mid (pilot sessions set it: the backtests quote at all hours).
+The pilot's setups use the passive anchor with passive_k_sigma 0, so a quote sits exactly `spacing_bps` from the mid:
+Mid 0 joins the best bid and ask on a one-tick book, Mid +1 quotes 1 bp away, and a negative spread (Mid -1) goes
+inside the mid as far as a post-only order can (one tick from the other side). Off-hours on an Arcus RWA perp Mid only
+quotes with off_hours.allow_mid (pilot sessions set it: the backtests quote at all hours).
 """
 
 from __future__ import annotations

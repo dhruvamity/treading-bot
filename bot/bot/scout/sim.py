@@ -45,7 +45,6 @@ from typing import Any
 
 import numpy as np
 
-from bot.common.indicators import ema, rsi
 from bot.common.sizing import Pct, sizes
 from bot.common.time import NEW_YORK
 from bot.scout.tape import DayTape
@@ -115,25 +114,19 @@ class Risk:
 
 @dataclass(frozen=True)
 class Config:
-    """One strategy setting. `mode` and the fields map 1:1 onto a session file (see scout/pilot.py)."""
+    """One setting (bot/strategies/setup.py builds them). `mode` and the fields map 1:1 onto a session file (see
+    scout/pilot.py)."""
 
     name: str
-    mode: str                   # mid | grid | rgrid | signal | anchor
-    style: str = "passive"      # mid: passive (fixed distance from mid) | normal | aggressive
-    spacing_bps: float = 3.0
+    mode: str                   # mid | grid
+    style: str = "passive"      # mid: passive (exactly spacing_bps from the mid) | normal | aggressive
+    spacing_bps: float = 3.0    # Mid: distance from the mid (negative: inside it); Grid: distance from the last fill
     levels: int = 1
     level_step_bps: float = 2.0
     kappa: float = 0.0
-    reset_pct: float = 0.5      # grid / rgrid; anchor: the soft reset distance
-    recentre_after_s: float = 120.0
-    rgrid_ema_s: float = 300.0
-    rgrid_cut_after_s: float = 20.0
-    rsi_low: float = 25.0       # signal
-    rsi_high: float = 75.0
-    tp_bps: float = 15.0
-    sl_bps: float = 25.0
-    max_hold_min: float = 120.0
-    cooldown_min: float = 5.0
+    reset_pct: float = 0.5      # grid: the soft reset distance
+    bias: int = 0               # +1 Long, -1 Short: hold bias_frac of the position cap
+    bias_frac: float = 0.5
     safety: bool = True         # the live safety pause (session safety_pause); off = thresholds out of reach
     stops: tuple[float, float, float] | None = None   # its own stops (position, daily, kill in % of capital); None:
                                                       # the owner's (/set position_stop, daily_stop, kill)
@@ -237,7 +230,6 @@ class Book:
     entry: float | None
     sigma_1m: float
     sigma_1h: float
-    closes: deque[float]
 
 
 # ------------------------------------------------------------------------------------------------ policies
@@ -270,7 +262,11 @@ class Policy:
         return (inv + qu > lim or inv >= cap), (inv - qu < -lim or inv <= -cap)
 
     def u(self, b: Book) -> float:
-        return max(-1.0, min(1.0, b.pos * b.mid / self.cap)) if self.cap > 0 else 0.0
+        """Inventory skew around the bias's target position (0 when neutral), as the live MMBase.u."""
+        if self.cap <= 0:
+            return 0.0
+        target = self.c.bias * self.c.bias_frac * self.cap
+        return max(-1.0, min(1.0, (b.pos * b.mid - target) / self.cap))
 
     def two_sided(self, b: Book, levels: list[tuple[float, float, str]], q: float, u: float,
                   no_buys: bool, no_sells: bool) -> list[tuple[int, float, float, str]]:
@@ -324,184 +320,10 @@ class MidPolicy(Policy):
 
 
 class GridPolicy(Policy):
-    """Static geometric grid; a filled buy at j re-lists as a sell at j+1 and vice versa. Re-centres when the mid stays
-    more than reset_pct away for recentre_after_s; carried inventory is then exited by skewing sizes (skew_exit)."""
-
-    def __init__(self, cfg: Config, risk: Risk, mi: MarketInfo) -> None:
-        super().__init__(cfg, risk, mi)
-        self.center: float | None = None
-        self.points: dict[int, int] = {}
-        self.n = 0
-        self.out_since: int | None = None
-        self.skew = False
-
-    def reset(self, mid: float) -> None:
-        self.center = mid
-        q_usd = max(self.order_usd, self.venue_min_usd(mid) * 1.2)
-        self.n = max(1, min(12, self.c.levels)) if self.c.levels else max(1, int(self.cap // q_usd))
-        self.points = {j: BUY for j in range(-self.n, 0)} | {j: SELL for j in range(1, self.n + 1)}
-        self.out_since = None
-
-    def quotes(self, b: Book) -> tuple[list[tuple[int, float, float, str]], float]:
-        if self.center is None:
-            self.reset(b.mid)
-        assert self.center is not None
-        dev = abs(b.mid - self.center) / self.center
-        if dev <= self.c.reset_pct / 100:
-            self.out_since = None
-        elif self.out_since is None:
-            self.out_since = b.t
-        elif (b.t - self.out_since) / S >= self.c.recentre_after_s:
-            self.reset(b.mid)
-            self.skew = b.pos != 0
-        if self.skew and b.pos == 0:
-            self.skew = False
-        q = self.q_base(b.mid)
-        u = self.u(b) if self.skew else 0.0
-        min_q = base_for_usd(self.venue_min_usd(b.mid) * 1.01, b.mid, self.m.step)
-        qb, qa = (max(min_q, q * (1 - u)) if u < 1 else 0.0, max(min_q, q * (1 + u)) if u > -1 else 0.0) \
-            if u else (q, q)
-        nb, ns = self.caps(b, max(qb, qa))
-        tick, d = self.m.tick, self.c.spacing_bps * BP
-        out = []
-        for j, side in sorted(self.points.items()):
-            px = self.center * (1 + d) ** j
-            if side == BUY and not nb and qb > 0:
-                out.append((BUY, round_bid(min(px, b.ask - tick), tick), qb, f"g{j}"))
-            elif side == SELL and not ns and qa > 0:
-                out.append((SELL, round_ask(max(px, b.bid + tick), tick), qa, f"g{j}"))
-        return out, 0.0
-
-    def on_fill(self, side: int, px: float, qty: float, tag: str, t: int, pos_after: float) -> None:
-        if not tag.startswith("g"):
-            return
-        j = int(tag[1:])
-        if side == BUY and self.points.get(j) == BUY:
-            self.points.pop(j, None)
-            if j + 1 <= self.n:
-                self.points[j + 1] = SELL
-        elif side == SELL and self.points.get(j) == SELL:
-            self.points.pop(j, None)
-            if j - 1 >= -self.n:
-                self.points[j - 1] = BUY
-
-
-class RGridPolicy(Policy):
-    """Trailing grid on an EMA of mid; jumps to mid past reset_pct; inventory beyond 1.5 clips that is more than one
-    level under water is cut (maker at the touch, then a taker order every rgrid_cut_after_s)."""
-
-    def __init__(self, cfg: Config, risk: Risk, mi: MarketInfo) -> None:
-        super().__init__(cfg, risk, mi)
-        self.ema: float | None = None
-        self.center: float | None = None
-        self.last_t = 0
-        self.cut_side = 0
-        self.cut_since = 0
-
-    def quotes(self, b: Book) -> tuple[list[tuple[int, float, float, str]], float]:
-        dt = (b.t - self.last_t) / S if self.last_t else 1.0
-        self.last_t = b.t
-        a = 1 - math.exp(-dt / max(1.0, self.c.rgrid_ema_s))
-        self.ema = b.mid if self.ema is None else self.ema + a * (b.mid - self.ema)
-        if self.center is None:
-            self.center = self.ema
-        d = self.c.spacing_bps * BP
-        q1 = base_for_usd(max(self.order_usd, self.venue_min_usd(b.mid) * 1.2), b.mid, self.m.step)
-        if abs(b.mid - self.center) / self.center > self.c.reset_pct / 100:
-            self.center = b.mid
-        elif self.cut_side == 0:
-            self.center = self.ema
-        entry = b.entry or b.mid
-        adverse = (b.mid - entry) / entry * (-1 if b.pos > 0 else 1) if b.pos else 0.0
-        if self.cut_side == 0 and abs(b.pos) - 1.5 * q1 > 0 and adverse > d:
-            self.cut_side = BUY if b.pos < 0 else SELL
-            self.cut_since = b.t
-        tick = self.m.tick
-        n = max(1, min(3, self.c.levels))
-        levels = []
-        for k in range(1, n + 1):
-            bp, ap = self.center * (1 - k * d), self.center * (1 + k * d)
-            if bp >= b.ask:
-                bp = b.ask - tick
-            if ap <= b.bid:
-                ap = b.bid + tick
-            levels.append((round_bid(bp, tick), round_ask(ap, tick), str(k)))
-        q = self.q_base(b.mid)
-        nb, ns = self.caps(b, q)
-        out = self.two_sided(b, levels, q, self.u(b), nb or self.cut_side == SELL, ns or self.cut_side == BUY)
-        taker = 0.0
-        if self.cut_side:
-            if abs(b.pos) <= 1.5 * q1 or (self.cut_side == SELL and b.pos < 0) or (self.cut_side == BUY and b.pos > 0):
-                self.cut_side = 0
-            else:
-                side = SELL if b.pos > 0 else BUY
-                out.append((side, b.ask if side == SELL else b.bid, abs(b.pos), "exit"))
-                if (b.t - self.cut_since) / S >= self.c.rgrid_cut_after_s:
-                    size = max(abs(b.pos) - q1, 0.0)
-                    taker = -size if b.pos > 0 else size
-                    self.cut_since = b.t
-        return out, taker
-
-
-class SignalPolicy(Policy):
-    """RSI(14) on 1-minute mids with a flat-trend filter; maker entry at the touch, maker take-profit, taker stop,
-    maker exit after max_hold_min, cooldown after each trade."""
-
-    def __init__(self, cfg: Config, risk: Risk, mi: MarketInfo) -> None:
-        super().__init__(cfg, risk, mi)
-        self.entry_px: float | None = None
-        self.entry_t = 0
-        self.cool_until = 0
-        self._ind_min = -1                                  # the indicators only change when a minute closes
-        self._ind: tuple[float | None, float | None, float | None] = (None, None, None)
-
-    def quotes(self, b: Book) -> tuple[list[tuple[int, float, float, str]], float]:
-        c, tick = self.c, self.m.tick
-        minute = b.t // (60 * S)
-        if minute != self._ind_min:   # closes are appended on minute boundaries only
-            closes = list(b.closes)
-            self._ind = (rsi(closes, 14), ema(closes[-120:], 20), ema(closes[-180:], 60))
-            self._ind_min = minute
-        r, e20, e60 = self._ind
-        sig_px = b.mid * b.sigma_1h
-        flat = e20 is not None and e60 is not None and sig_px > 0 and abs(e20 - e60) < 1.0 * sig_px
-        if b.pos != 0:
-            if self.entry_px is None:
-                self.entry_px, self.entry_t = b.mid, b.t
-            long = b.pos > 0
-            pnl_bps = (b.mid - self.entry_px) / self.entry_px / BP * (1 if long else -1)
-            if pnl_bps <= -c.sl_bps:
-                self.cool_until = b.t + int(c.cooldown_min * 60 * S)
-                self.entry_px = None
-                return [], -b.pos
-            if (b.t - self.entry_t) / 60e6 >= c.max_hold_min:
-                return [(SELL if long else BUY, b.ask if long else b.bid, abs(b.pos), "sig_time")], 0.0
-            tp = self.entry_px * (1 + c.tp_bps * BP) if long else self.entry_px * (1 - c.tp_bps * BP)
-            tp = max(tp, b.bid + tick) if long else min(tp, b.ask - tick)
-            tp = round_ask(tp, tick) if long else round_bid(tp, tick)
-            return [(SELL if long else BUY, tp, abs(b.pos), "sig_tp")], 0.0
-        self.entry_px = None
-        if b.t < self.cool_until or r is None or not flat:
-            return [], 0.0
-        q = self.q_base(b.mid)
-        if r < c.rsi_low:
-            return [(BUY, b.bid, q, "sig_entry_long")], 0.0
-        if r > c.rsi_high:
-            return [(SELL, b.ask, q, "sig_entry_short")], 0.0
-        return [], 0.0
-
-    def on_fill(self, side: int, px: float, qty: float, tag: str, t: int, pos_after: float) -> None:
-        if tag.startswith("sig_entry"):
-            self.entry_px, self.entry_t = px, t
-        elif pos_after == 0:
-            self.cool_until = t + int(self.c.cooldown_min * 60 * S)
-
-
-class AnchorPolicy(Policy):
-    """Quotes around the last fill (the Grid mode of Tread users): flat, mid +/- max(d, half the spread); holding a
-    position, last fill x (1 -/+ d), so a sell never goes below the last buy + d. When the mid runs more than
-    reset_pct against the position from the last fill, it stops adding and closes at the touch; flat again, it
-    starts over around the mid."""
+    """Tread's Grid: quotes around the last fill. Flat, mid +/- max(d, half the spread); holding a position, last
+    fill x (1 -/+ d), so a sell never goes below the last buy + d. When the mid runs more than reset_pct against the
+    position from the last fill, it stops adding and closes at the touch; flat again, it starts over around the mid.
+    A bias skews the sizes toward its target position (bot/strategies/grid.py)."""
 
     def __init__(self, cfg: Config, risk: Risk, mi: MarketInfo) -> None:
         super().__init__(cfg, risk, mi)
@@ -511,6 +333,8 @@ class AnchorPolicy(Policy):
     def quotes(self, b: Book) -> tuple[list[tuple[int, float, float, str]], float]:
         c, tick = self.c, self.m.tick
         d = c.spacing_bps * BP
+        if b.pos and self.ref is None and b.entry is not None:
+            self.ref = b.entry   # a position with no last fill (the live bot after a restart): its entry stands in
         if b.pos == 0 or self.ref is None:
             self.ref, self.resetting = None, False
             half = max(d * b.mid, (b.ask - b.bid) / 2)
@@ -529,7 +353,8 @@ class AnchorPolicy(Policy):
             ask = b.bid + tick
         q = self.q_base(b.mid)
         nb, ns = self.caps(b, q)
-        return self.two_sided(b, [(round_bid(bid, tick), round_ask(ask, tick), "0")], q, 0.0, nb, ns), 0.0
+        u = self.u(b) if c.bias else 0.0
+        return self.two_sided(b, [(round_bid(bid, tick), round_ask(ask, tick), "0")], q, u, nb, ns), 0.0
 
     def on_fill(self, side: int, px: float, qty: float, tag: str, t: int, pos_after: float) -> None:
         if abs(pos_after) < self.m.step / 2:
@@ -538,8 +363,7 @@ class AnchorPolicy(Policy):
             self.ref = px
 
 
-POLICIES: dict[str, type[Policy]] = {"mid": MidPolicy, "grid": GridPolicy, "rgrid": RGridPolicy,
-                                     "signal": SignalPolicy, "anchor": AnchorPolicy}
+POLICIES: dict[str, type[Policy]] = {"mid": MidPolicy, "grid": GridPolicy}
 
 
 # ------------------------------------------------------------------------------------------------ simulator
@@ -717,7 +541,6 @@ class Sim:
         state = "normal"   # normal | exit_pos | exit_day | day_stopped | cooldown | killed
         exit_since = cool_until = 0
         done_seq = -1
-        closes: deque[float] = deque(maxlen=240)
         vol_1m: float | None = None
         a1m = 1 - math.exp(math.log(0.5) / 30)
         last_min_mid: float | None = None
@@ -865,7 +688,6 @@ class Sim:
                         r = math.log(mid / last_min_mid)
                         vol_1m = r * r if vol_1m is None else (1 - a1m) * vol_1m + a1m * r * r
                     last_min_mid = mid
-                    closes.append(mid)
                 last_mid = mid
             if t < w.start_us:
                 continue
@@ -946,10 +768,10 @@ class Sim:
                         else:
                             sig = math.sqrt(vol_1m) if vol_1m else 0.0
                             b = Book(t, BID[i], ASK[i], mid, st["pos"], st["entry"], sig,
-                                     sig * math.sqrt(60), closes)
+                                     sig * math.sqrt(60))
                             q, tq = policy.quotes(b)
                             cache_key, cache_q = key, q
-                        desired = [(s, p, qq, tg, tg == "exit" or tg in ("sig_tp", "sig_time")) for s, p, qq, tg in q]
+                        desired = [(s, p, qq, tg, tg == "exit") for s, p, qq, tg in q]
                         half_ticks = cfg.spacing_bps * BP * mid / tick
                         res.quoting_s += dt_s
                         if tq:

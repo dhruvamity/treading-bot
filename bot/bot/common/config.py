@@ -151,19 +151,8 @@ class OffHoursCfg(_Model):
     allow_mid: bool = False
 
 
-class SignalCfg(_Model):
-    rsi_len: int = 14
-    rsi_low: float = 25
-    rsi_high: float = 75
-    tp_bps: float = 15
-    sl_bps: float = 25
-    cooldown_s: float = 300
-    max_hold_min: float = 120
-    trend_z: float = 1.0
-
-
 class AutoSpacingCfg(_Model):
-    """Grid / RGrid with `spacing_bps: auto`: delta = clamp(k x sigma_1h / sqrt(fills per hour), min, max)."""
+    """Grid with `spacing_bps: auto`: delta = clamp(k x sigma_1h / sqrt(fills per hour), min, max)."""
 
     target_fills_per_hour: float = 20
     k_delta: float = 1.0
@@ -204,12 +193,12 @@ class MMSession(_Model):
     venue: Literal["arcus"] = "arcus"
     account_index: int = 1
     market: str
-    mode: Literal["mid", "grid", "rgrid", "signal", "anchor"] = "mid"
+    mode: Literal["mid", "grid"] = "mid"          # Tread.fi's reference price: Mid or Grid (bot/strategies/setup.py)
     live_enabled: bool = False
     capital_usd: float = 35
     leverage_max: float = 5
-    bias: Literal["neutral", "long_skew", "short_skew"] = "neutral"
-    bias_size_usd: float = 0
+    bias: Literal["neutral", "long", "short"] = "neutral"   # directional bias: hold part of the cap long or short
+    bias_frac: float = 0.5                         # ... this share of the position cap
     execution_style: Literal["aggressive", "normal", "passive"] = "normal"
     offset_bps: float = 0
     spacing_bps: float | Auto = "auto"
@@ -220,11 +209,7 @@ class MMSession(_Model):
     inventory_cap_off_usd: float | None = None   # Arcus RWA off-hours (higher initial margin); None = same cap
     skew_kappa: float = 1.0
     passive_k_sigma: float = 1.0
-    reset_threshold_pct: float = 0.25
-    recentre_after_s: float = 120
-    recentre_inventory: Literal["skew_exit", "maker_unwind"] = "skew_exit"
-    rgrid_ema_s: float = 300
-    rgrid_cut_after_s: float = 20
+    reset_threshold_pct: float = 0.5              # Grid: soft reset once the mid runs this far against the position
     stop_loss_pct: float = 10
     take_profit_pct: float | None = None
     participation_cap_pct: float = 25
@@ -232,7 +217,6 @@ class MMSession(_Model):
     safety_pause: SafetyPauseCfg = SafetyPauseCfg()
     session: SessionWindowCfg = SessionWindowCfg()
     off_hours: OffHoursCfg = OffHoursCfg()
-    signal: SignalCfg = SignalCfg()
     auto_spacing: AutoSpacingCfg = AutoSpacingCfg()
     exit_taker_after_s: float = 60
     # Dollar stops for a small account. The scout's backtests apply exactly these rules (bot/scout/sim.py).
@@ -242,9 +226,30 @@ class MMSession(_Model):
     kill_usd: float | None = None        # equity X below its peak: flatten and stop until a manual resume
     max_loss_usd: float | None = None    # this run may lose X in all (/run ... sl=X): then flatten and stop. The
                                          # daily stop, kill and session stop never stop it sooner
+    take_profit_usd: float | None = None     # the run is done once it is up X (/run ... tp=X): close, then stop
+    volume_target_usd: float | None = None   # the run is done once it has traded X (/run ... vol=X): close, then stop
     run_id: str = ""                     # one deployment (the pilot writes it): the run's loss survives restarts
     cooldown_s: float = 60               # pause after a position stop
     sizing: SizingCfg | None = None      # follow the account's equity (pilot sessions); None = the fixed numbers above
+
+    @model_validator(mode="before")
+    @classmethod
+    def _renamed(cls, data: Any) -> Any:
+        """Names from before 2026-09-26: `anchor` is now Grid, the skew biases are Long / Short. RGrid, the RSI signal
+        and the static grid were retired (they lost on every market in the backtests)."""
+        if not isinstance(data, dict):
+            return data
+        d = dict(data)
+        if d.get("mode") == "anchor":
+            d["mode"] = "grid"
+        elif d.get("mode") in ("rgrid", "signal"):
+            raise ValueError(f"mode {d['mode']!r} was retired on 2026-09-26: use mid or grid")
+        b = str(d.get("bias") or "neutral")
+        d["bias"] = {"long_skew": "long", "short_skew": "short"}.get(b, b)
+        for k in ("bias_size_usd", "recentre_after_s", "recentre_inventory", "rgrid_ema_s", "rgrid_cut_after_s",
+                  "signal"):
+            d.pop(k, None)   # settings of the retired modes: ignored
+        return d
 
     @model_validator(mode="after")
     def _checks(self) -> MMSession:
@@ -252,6 +257,12 @@ class MMSession(_Model):
             raise ValueError("account_index must be 0-9 (Arcus subaccount)")
         if not 0 <= self.skew_kappa <= 2:
             raise ValueError("skew_kappa must be in [0, 2]")
+        if not 0 <= self.bias_frac <= 1:
+            raise ValueError("bias_frac must be in [0, 1]")
+        for k in ("take_profit_usd", "volume_target_usd"):
+            v = getattr(self, k)
+            if v is not None and v <= 0:
+                raise ValueError(f"{k} must be positive")
         return self
 
 

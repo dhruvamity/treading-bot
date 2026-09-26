@@ -19,6 +19,7 @@ Where each number comes from:
 
 from __future__ import annotations
 
+import contextlib
 import json
 import time
 from dataclasses import dataclass, field
@@ -28,14 +29,11 @@ from typing import Any
 
 from bot.core.balances import DAY, BalanceLog, pnl
 from bot.telegram.control import Control, ModeView, _today_start_us
-from bot.telegram.views import ago, money, positions_of, state_of, usd
+from bot.telegram.views import ago, kusd, mode_state, money, positions_of, usd
 
 REFRESH_S = 10.0
 FRESH_S = 60.0          # an account reading older than this makes the dashboard read the account itself
 PACE_AFTER_S = 1800.0   # extrapolate today's volume to a full day only after 30 min of trading
-SPARK = "▁▂▃▄▅▆▇█"
-SPARK_POINTS = 16
-BAR_CELLS = 12
 
 
 @dataclass
@@ -43,8 +41,8 @@ class Dash:
     now: float
     mode: str | None = None
     running: bool = False
-    icon: str = "⚪"
-    state: str = "no trading bot running"
+    state: str = "NOT RUNNING"                               # the title's state word (views.mode_state)
+    state_lines: list[str] = field(default_factory=list)     # what the state means, and what to send
     up_s: float | None = None
     market: str | None = None
     config: str | None = None
@@ -61,13 +59,13 @@ class Dash:
     day_pnl: float | None = None
     day_pnl_base: float | None = None     # equity the day's PnL is measured against (for the %)
     day_pnl_note: str = ""
-    day_series: list[float] = field(default_factory=list)   # PnL today at each balance reading (for the sparkline)
     # now
     positions: list[dict[str, Any]] = field(default_factory=list)   # views.positions_of: market, size, mark, entry
     open_orders: int = 0
     stops: dict[str, float] = field(default_factory=dict)          # position / daily / kill, in dollars
     bot_day_pnl: float | None = None   # the running bot's own day PnL (what its daily stop counts: this run only)
-    run: dict[str, Any] | None = None                              # {pnl, limit}: the run's loss limit (sl=)
+    run: dict[str, Any] | None = None                              # {pnl, limit, tp, volume, target, done}: the run's
+                                                                   # own limits (sl=, tp=, vol=)
     quotes: dict[str, Any] = field(default_factory=dict)            # engine QuoteStats of the day (first session)
     # capital
     equity: float | None = None
@@ -121,7 +119,7 @@ def collect(control: Control, *, now: float | None = None, account: int = 0,
     snap = (v.snapshot or {}) if v else {}
     if v is not None:
         d.running = v.running
-        d.icon, d.state = state_of(v)
+        _e, d.state, d.state_lines = mode_state(v, "RUNNING")
         if v.running and snap.get("started_us"):
             d.up_s = now - snap["started_us"] / 1e6
             if v.snapshot_age_s is not None and v.snapshot_age_s > 30:
@@ -169,10 +167,6 @@ def collect(control: Control, *, now: float | None = None, account: int = 0,
         d.day_pnl_base = float(base["equity"])
         if base["ts"] >= d.day_start:
             d.day_pnl_note = f"since {_clock(base['ts'])}, the first reading today"
-        if p_base is not None and d.day_pnl is not None:
-            d.day_series = [0.0] + [float(pnl(r) or 0) - p_base for r in log.rows(since=d.day_start)
-                                    if int(r.get("account", 0)) == account and pnl(r) is not None
-                                    and r["ts"] > base["ts"]] + [d.day_pnl]
     elif v is not None:
         vals = [float(s["day_pnl"]) for s in snap.get("sessions") or [] if s.get("day_pnl") is not None]
         if vals:
@@ -226,28 +220,29 @@ def _deployed(d: Dash, state_dir: Path) -> None:
         d.market, d.config, d.backtest = a.get("market"), a.get("config"), a.get("backtest") or {}
 
 
-def quote_lines(q: dict[str, Any] | None) -> list[str]:
-    """How much of the day the bot quoted, what blocked it, and how often it rested at the best price: the first
-    things to look at when fills are fewer than the backtest's."""
+def quote_summary(q: dict[str, Any] | None) -> list[str]:
+    """How much of the day the bot quoted and rested on each side, what blocked it, how often it rested at the best
+    price, and orders its own checks refused: the first things to look at when fills are fewer than the backtest's."""
     if not q or not q.get("seconds"):
         return []
     tot = float(q["seconds"])
+    out = [f"{q['quoting'] / tot * 100:.0f}% active · Bid {float(q.get('bid') or 0) / tot * 100:.0f}% · "
+           f"Ask {float(q.get('ask') or 0) / tot * 100:.0f}%"]
     blocks = sorted((q.get("blocked") or {}).items(), key=lambda kv: -kv[1])
-    out = [f"Quoting {q['quoting'] / tot * 100:.0f}% of {ago(tot)}"
-           + "".join(f" · {k} {v / tot * 100:.0f}%" for k, v in blocks[:2] if v / tot >= 0.01)]
-    out.append("On the book: " + " · ".join(f"{name} {float(q.get(side) or 0) / tot * 100:.0f}%"
-                                            for side, name in (("bid", "buy"), ("ask", "sell"))))
+    held = [f"{k[:1].upper()}{k[1:]} {v / tot * 100:.0f}%" for k, v in blocks[:2] if v / tot >= 0.01]
+    if held:
+        out.append(" · ".join(held))
     sides = []
-    for side in ("bid", "ask"):
+    for side, name in (("bid", "bid"), ("ask", "ask")):
         rest = float(q.get(side) or 0)
         if rest >= 1:
             at = float(q.get(f"{side}_touch") or 0) / rest
             behind = float(q.get(f"{side}_ticks") or 0) / rest
-            sides.append(f"{side} {at * 100:.0f}%" + (f" (avg {behind:.1f} ticks behind)" if at < 0.95 else ""))
+            sides.append(f"{name} {at * 100:.0f}%" + (f" ({behind:.1f} ticks behind)" if at < 0.95 else ""))
     if sides:
         out.append("At the best price: " + " · ".join(sides))
     if q.get("refused"):
-        out.append(f"⚠️ {q['refused']:,} orders refused by the bot's own checks: {q.get('refused_why', '')[:100]}")
+        out.append(f"Refused {q['refused']:,} by the bot's own checks: {q.get('refused_why', '')[:90]}")
     return out
 
 
@@ -261,19 +256,6 @@ def _pct(x: float | None, of: float | None) -> str:
     return f"{x / of * 100:+.2f}%" if x is not None and of else ""
 
 
-def spark(values: list[float], points: int = SPARK_POINTS) -> str:
-    """A one-line chart, e.g. ▁▂▃▅▆▅▇, of at most `points` values (evenly picked, the last one always kept)."""
-    if len(values) < 3:
-        return ""
-    if len(values) > points:
-        step = (len(values) - 1) / (points - 1)
-        values = [values[round(i * step)] for i in range(points)]
-    lo, hi = min(values), max(values)
-    if hi - lo < 0.005:
-        return SPARK[0] * len(values)
-    return "".join(SPARK[min(len(SPARK) - 1, int((x - lo) / (hi - lo) * len(SPARK)))] for x in values)
-
-
 def _px(x: float) -> str:
     return f"{x:,.2f}" if x >= 10 else f"{x:.6g}"
 
@@ -283,113 +265,132 @@ def _k(x: float) -> str:
     return f"${x / 1000:,.1f}k" if x >= 10_000 else money(x)
 
 
-def bar(frac: float, cells: int = BAR_CELLS) -> str:
-    """━━━━──────── for a third."""
-    n = max(0, min(cells, round(frac * cells)))
-    return "━" * n + "─" * (cells - n)
+def _cfg(config: str | None, capital: float | None) -> str:
+    """"Mid 0 · Neutral · 40x · $110 sizing": the setup (mode, spread, bias), the leverage and the sizing."""
+    from bot.strategies import setup as su
+
+    setting, _, lev = (config or "").partition(" @ ")
+    with contextlib.suppress(ValueError):
+        setting = su.parse(setting).label if setting else ""
+    return " · ".join(x for x in (setting, lev, f"${capital:,.0f} sizing" if capital else "") if x)
+
+
+def run_lines(run: dict[str, Any] | None) -> list[str]:
+    """This run against its own limits: "-$2.36 / -$10.00 stop", "Volume $48.2k / $100.0k target"."""
+    if not run:
+        return []
+    pnl = float(run.get("pnl") or 0)
+    vol = float(run.get("volume") or 0)
+    out = [f"{usd(pnl)} / -${float(run['limit']):,.2f} stop" if run.get("limit") else "",
+           f"{usd(pnl)} / +${float(run['tp']):,.2f} take profit" if run.get("tp") else "",
+           f"Volume {kusd(vol)} / {kusd(float(run['target']))} target" if run.get("target") else
+           (f"Volume {kusd(vol)}" if vol else ""),
+           f"Done: {run['done']}" if run.get("done") else ""]
+    return [x for x in out if x]
+
+
+def control_text(d: Dash, title: str = "Bot Control", extra: list[str] | None = None) -> str:
+    """/start and /menu (the owner's template): what runs and its state, the equity and today's PnL."""
+    from bot.common.tgfmt import card, codes
+
+    if d.mode is None:
+        return card("🤖", title, codes("No bot has run here yet", "/run to start one", *(extra or [])))
+    what = " · ".join(x for x in (d.market or "No setup deployed", d.mode.upper(), d.state) if x)
+    money_line = " · ".join(x for x in (f"Equity {usd(d.equity, sign=False)}" if d.equity is not None else "",
+                                        f"PnL {usd(d.day_pnl)}" if d.day_pnl is not None else "") if x)
+    return card("🤖", title, codes(what, money_line, *d.state_lines[:1], *(extra or [])))
 
 
 def render(d: Dash, *, html: bool = True, frame: str = "live") -> str:
-    """Three cards (today, position, capital) under a title. html=True: Telegram HTML, each card a blockquote; else
-    plain text for a terminal, each card behind a bar. frame: "live" (updating), "stopped" (the last frame of a
-    Telegram dashboard that stopped updating) or "once" (`bot dashboard --once`)."""
+    """The owner's dashboard template: the market, mode and state in the title, the setup, then Today, Quotes,
+    Position, Capital and This Run. html=True: Telegram HTML; else plain text for a terminal. frame: "live"
+    (updating), "stopped" (the last frame of a Telegram dashboard that stopped updating) or "once"
+    (`bot dashboard --once`)."""
     def b(x: str) -> str:
         return f"<b>{escape(x)}</b>" if html else x
 
     def e(x: str) -> str:
         return escape(x) if html else x
 
+    def c(x: str) -> str:
+        return f"<code>{escape(x)}</code>" if html else x
+
     def i(x: str) -> str:
         return f"<i>{escape(x)}</i>" if html else x
 
-    def c(x: str) -> str:   # monospace (Telegram draws it in the accent colour): the bar and the sparkline
-        return f"<code>{escape(x)}</code>" if html else x
+    def sec(label: str, rows: list[str]) -> str:
+        return "\n".join([b(label) if html else label.upper(), *rows])
 
-    def card(title: str, rows: list[str]) -> str:
-        if html:
-            return f"<blockquote><b>{escape(title)}</b>\n" + "\n".join(rows) + "</blockquote>"
-        return "\n".join(["│ " + title.upper()] + ["│ " + r for r in rows])
-
-    title = d.market or ("Dashboard" if d.mode is None else "No setup deployed")
-    out = [f"📊 {b(title)}" + (f" · {b(d.mode.upper())}" if d.mode else ""),
-           f"{d.icon} {e(d.state[:1].upper() + d.state[1:])}" + (f" · up {ago(d.up_s)}" if d.up_s is not None else "")]
-    if d.config:
-        out.append(i(d.config + (f" · sizing for {usd(d.size_capital, sign=False)}" if d.size_capital else "")))
-    out += ["⚠️ " + e(w) for w in d.warnings]
-    cards = []
+    title = " · ".join(x for x in (d.market or "No setup deployed", d.mode.upper(), d.state) if x) if d.mode else \
+        "Dashboard · NO BOT RUNNING"
+    blocks = ["📊 " + b(title) if html else title]
+    top = [c(x) for x in (_cfg(d.config, d.size_capital), *d.state_lines, *d.warnings) if x]
+    if top:
+        blocks.append("\n".join(top))
 
     # today
-    rows = [f"Volume {b(money(d.volume))} · {d.fills} fill{'' if d.fills == 1 else 's'}"
-            + (e(f" · pace {_k(d.pace_day)}/day") if d.pace_day is not None else "")]
-    bt_vol, bt_pnl = d.backtest.get("volume_day"), d.backtest.get("pnl_day")
-    if bt_vol:
-        bt = float(bt_vol)
-        if d.pace_day is not None:
-            rows.append(c(bar(d.pace_day / bt)) + e(f" pace {d.pace_day / bt * 100:.0f}% of the {_k(bt)}/day backtest"))
-        else:
-            rows.append(c(bar(d.maker_volume / bt)) + e(f" {d.maker_volume / bt * 100:.0f}% of the {_k(bt)}/day "
-                                                         "backtest so far"))
-    rows += [e(x) for x in quote_lines(d.quotes)]
-    if d.fees >= 0.005:
-        rows.append(e(f"Fees {usd(d.fees, sign=False)} (taker fills)"))
+    rows = [f"Volume {b(_k(d.volume))} · {d.fills} fill{'' if d.fills == 1 else 's'}"
+            + (f" · Fees {b(usd(d.fees, sign=False))}" if d.fees >= 0.005 else "")]
     if d.day_pnl is not None:
-        extra = []
-        if d.day_pnl_base:
-            extra.append(_pct(d.day_pnl, d.day_pnl_base))
         run_day = d.bot_day_pnl if d.bot_day_pnl is not None else d.day_pnl   # the stop counts this run's day only
+        extra = ""
         if run_day < 0 and d.stops.get("daily"):
-            extra.append(f"{-run_day / d.stops['daily'] * 100:.0f}% of day stop"
-                         + (" (this run)" if d.bot_day_pnl is not None and d.bot_day_pnl != d.day_pnl else ""))
-        elif bt_pnl is not None:
-            extra.append(f"backtest {usd(bt_pnl)}/day")
-        rows.append(f"PnL {b(usd(d.day_pnl))}" + e("".join(f" · {x}" for x in extra)))
-        line = spark(d.day_series)
-        if line or d.day_pnl_note:
-            rows.append((c(line) if line else "") + (" " if line and d.day_pnl_note else "") + (i(d.day_pnl_note) if d.day_pnl_note
-                                                                              else ""))
+            this_run = " (this run)" if d.bot_day_pnl is not None and d.bot_day_pnl != d.day_pnl else ""
+            used = -run_day / d.stops["daily"] * 100
+            extra = f" · Stop {b(f'{used:.0f}% used')}{e(this_run)}"
+        rows.append(f"PnL {b(usd(d.day_pnl))}" + (e(f" ({_pct(d.day_pnl, d.day_pnl_base)})") if d.day_pnl_base else "")
+                    + extra)
+        if d.day_pnl_note:
+            rows.append(e(d.day_pnl_note[:1].upper() + d.day_pnl_note[1:]))
     else:
-        rows.append(e("PnL — no balance reading yet today"))
-    if d.run and d.run.get("limit"):
-        pnl, lim = float(d.run.get("pnl") or 0), float(d.run["limit"])
-        rows.append(e(f"This run {usd(pnl)} · stops at -${lim:,.2f}" + (f" ({-pnl / lim * 100:.0f}% used)" if pnl < 0
-                                                                        else "")))
-    cards.append(card("Today", rows))
+        rows.append(e("PnL: no balance reading yet today"))
+    bt_vol, bt_pnl = d.backtest.get("volume_day"), d.backtest.get("pnl_day")
+    if bt_vol and d.pace_day is not None:
+        rows.append(e(f"Pace {_k(d.pace_day)}/day · backtest {_k(float(bt_vol))}/day"
+                      + (f", {usd(bt_pnl)}/day" if bt_pnl is not None else "")))
+    blocks.append(sec("Today", rows))
+    q = quote_summary(d.quotes)
+    if q:
+        blocks.append(sec("Quotes", [e(x) for x in q]))
 
     # position
     rows = []
     for p in d.positions:
         side = "Long" if p["size"] > 0 else "Short"
-        rows.append(f"{e(side)} {b(format(abs(p['size']), '.6g') + ' ' + p['market'])}"
-                    + (e(f" ≈ {usd(abs(p['size'] * p['mark']), sign=False)}") if p.get("mark") else ""))
+        line = f"{side} {format(abs(p['size']), '.6g')} {p['market']}" + \
+            (f" ≈ {usd(abs(p['size'] * p['mark']), sign=False)}" if p.get("mark") else "")
         if p.get("entry") and p.get("mark"):
-            upnl = p["size"] * (p["mark"] - p["entry"])
-            rows.append(e(f"{_px(p['entry'])} → {_px(p['mark'])} · ") + b(usd(upnl))
-                        + (e(f" · stop {usd(-d.stops['position'])}") if d.stops.get("position") else ""))
-    if not d.positions:
-        rows.append("Flat")
-    rows.append(e(f"{d.open_orders} open order{'' if d.open_orders == 1 else 's'}"))
-    cards.append(card("Position", rows))
+            rows += [e(line + " · PnL ") + b(usd(p["size"] * (p["mark"] - p["entry"]))),
+                     e(f"Entry {_px(p['entry'])} → {_px(p['mark'])}")]
+        else:
+            rows.append(e(line))
+    n = f"{d.open_orders} open order{'' if d.open_orders == 1 else 's'}"
+    stop = f"Stop {usd(-d.stops['position'])} · " if d.positions and d.stops.get("position") else ""
+    rows.append(e(("Flat · " if not d.positions else stop) + n))
+    blocks.append(sec("Position", rows))
 
     # capital
-    rows = []
     paper = d.mode == "paper"
-    if d.equity is not None:
-        dep = "" if d.net_deposits is None else f" · {'started with' if paper else 'deposited'} " \
-            f"{usd(d.net_deposits, sign=False)}"
-        rows.append(f"Equity {b(usd(d.equity, sign=False))}" + e(dep))
-    if d.capital_pnl is not None:
-        ch = "".join(f" · {k} {usd(x)}" for k, x in d.changes.items())
-        rows.append(f"P/L {b(usd(d.capital_pnl))}" + e((f" · {_pct(d.capital_pnl, d.net_deposits)}"
-                                                         if d.net_deposits else "") + ch))
-    if not rows:
-        rows.append(e("No balance reading yet (ARCUS_ADDRESS in .env lets the bot and the scout read it)"))
-    cards.append(card("Capital" + (" (paper)" if paper else ""), rows))
+    if d.equity is not None or d.capital_pnl is not None:
+        parts = []
+        if d.equity is not None:
+            parts.append(f"Equity {b(usd(d.equity, sign=False))}")
+        if d.capital_pnl is not None:
+            pct = f" ({_pct(d.capital_pnl, d.net_deposits)})" if d.net_deposits else ""
+            parts.append(f"P/L {b(usd(d.capital_pnl) + pct)}")
+        rows = [" · ".join(parts)]
+        if d.changes:
+            rows.append(e(" · ".join(f"{k} {usd(x)}" for k, x in d.changes.items())))
+    else:
+        rows = [e("No balance reading yet (ARCUS_ADDRESS in .env lets the bot and the scout read it)")]
+    blocks.append(sec("Capital" + (" (paper)" if paper else ""), rows))
+    if run_lines(d.run):
+        blocks.append(sec("This Run", [c(x) for x in run_lines(d.run)]))
 
     t = time.localtime(d.now)
     stamp = time.strftime("%H:%M:%S ", t) + (t.tm_zone or "")
     age = f" · balance {ago(d.account_age_s)} old" if d.account_age_s is not None else ""
-    foot = {"live": f"↻ {stamp} · every {REFRESH_S:.0f} s{age}",
-            "stopped": f"⏸ Stopped at {stamp} · tap ▶️ or send /dashboard to update it again"}.get(frame,
-                                                                                               f"{stamp}{age}")
-    sep = "" if html else "\n"
-    return "\n".join(out) + "\n" + sep + (sep + "\n").join(cards) + "\n" + sep + i(foot)
+    foot = {"live": f"Updated {stamp} · every {REFRESH_S:.0f} s{age}",
+            "stopped": f"Stopped updating at {stamp} · /dashboard to update again"}.get(frame, f"{stamp}{age}")
+    blocks.append(i(foot))
+    return "\n\n".join(blocks)

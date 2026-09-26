@@ -111,12 +111,12 @@ def test_diagnose_replays_the_runs_setup_beside_the_run(tmp_path: Path) -> None:
                             "data": {"capital": 100, "order": 223.5, "cap": 447, "cap_off": 447, "pos_stop": 1,
                                      "daily_stop": 2, "kill": 10}}) + "\n")
     events = tmp_path / "pilot_events.jsonl"
-    setup = {"market": "QQQ-USD", "setting": "touch 1bp", "leverage": 25.0, "risk": asdict(Risk.for_capital(28, 25))}
+    setup = {"market": "QQQ-USD", "setting": "Mid +1", "leverage": 25.0, "risk": asdict(Risk.for_capital(28, 25))}
     events.write_text(json.dumps({"ts": T0 / S - 60, "kind": "deployed", "text": "x", "setup": setup}) + "\n")
     assert find_setup(events, "QQQ-USD", T0 + 600 * S) == setup and find_setup(events, "BTC-USD", T0 + 600 * S) is None
     text = diagnose(db=db, logs=tmp_path / "logs", tape_root=tmp_path / "tape", markets_json=tmp_path / "markets.json",
                     start_us=T0, end_us=T0 + 600 * S, setup=setup)
-    assert "Replay    touch 1bp @ 25x: order $224, cap $447" in text and "(the engine's sizes)" in text
+    assert "Replay    Mid +1 @ 25x: order $224, cap $447" in text and "(the engine's sizes)" in text
     assert "the run      volume $      223  fills    1" in text
     assert "backtest through" in text and "backtest queue (scan)" in text and "backtest front" in text
     # 2026-09-26: a run with sl=30 was replayed with its $2.20 daily stop, so the backtest stopped at 07:06 while the

@@ -225,10 +225,13 @@ def replay(setup: dict[str, Any], fills: list[dict[str, Any]], dec: list[dict[st
     Sizes are the ones the engine traded (its `resize` decision), else the deployed candidate's."""
     from dataclasses import replace
 
-    from bot.scout.scan import BY_NAME, load_holidays, load_markets, market_meta, session_mask
+    from bot.scout.scan import config_for, load_holidays, load_markets, market_meta, session_mask
     from bot.scout.sim import Risk, Sim, SimParams, Window
 
-    cfg = BY_NAME.get(str(setup.get("setting")))
+    try:
+        cfg = config_for(str(setup.get("setting")))   # a setup of any spread, or an old name ("touch 0bp")
+    except ValueError:
+        cfg = None
     if cfg is None or not setup.get("risk") or markets_json is None:
         return [f"Replay    cannot: setting {setup.get('setting')!r} or its sizes are unknown"]
     risk = Risk(**setup["risk"]).with_stops(cfg.stops)

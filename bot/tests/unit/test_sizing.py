@@ -108,13 +108,13 @@ def test_cache_keys_ignore_the_price_dependent_minimum_and_a_non_binding_ceiling
 
 
 def test_go_thresholds_are_percent_of_the_capital_used() -> None:
-    day = {"config": "deep 3bp", "pnl": -2.0, "maker_fills": 50, "maker_usd": 10_000, "day_stops": 0,
+    day = {"config": "Mid +3", "pnl": -2.0, "maker_fills": 50, "maker_usd": 10_000, "day_stops": 0,
            "killed": False, "taker_usd": 0, "actions": 100}
     rec = {**day, "hours": 24, "tail_pnl": 0.0, "pnl": 0.0}
     for cap, go in ((100, False), (1_000, True)):                # -$2/day: -2% of $100, -0.2% of $1,000
         r = Risk.for_capital(cap, 10).__dict__
         c = next(x for x in _score("QQQ-USD", {"days": {"2026-09-20": [day]}, "recent": [rec]}, {"age_s": 1},
-                                   r, True, Pct()) if x.setting == "deep 3bp")
+                                   r, True, Pct()) if x.setting == "Mid +3")
         assert ("loses" not in "; ".join(c.reasons)) is go
     skip = {"days": {}, "recent": [], "skip": "needs $27.06 of capital at 2x (Arcus minimum order)"}
     c = _score("SNDK-USD", skip, {"age_s": 1}, Risk.for_capital(10, 2).__dict__, False, Pct())[0]
@@ -143,7 +143,7 @@ def _pilot_session(tmp_path: Path, capital: float = 100, lev: float = 20, off: f
                    order_max: float | None = None) -> Path:
     r = Risk.for_capital(capital, lev, off, order_max=order_max, min_capital=0.9)
     p = tmp_path / "pilot.yaml"
-    p.write_text(yaml.safe_dump(session_for("BTC-USD", BY_NAME["deep 3bp, skew"], r, live=False)))
+    p.write_text(yaml.safe_dump(session_for("BTC-USD", BY_NAME["Mid +3"], r, live=False)))
     return p
 
 
@@ -232,9 +232,9 @@ def test_a_go_review_records_the_capital_it_covered(tmp_path: Path) -> None:
 
     StateStore(str(tmp_path / app.state_db_for("paper"))).close()
     pilot = Pilot(tmp_path, ctl)
-    cand = {"market": "QQQ-USD", "config": "deep 3bp @ 20x", "go": True, "reasons": [], "volume_day": 1,
-            "capital_usd": 2_500.0}
-    pilot.save({"active": {"market": "QQQ-USD", "config": "deep 3bp @ 20x", "mode": "paper"}})
+    cand = {"market": "QQQ-USD", "config": "Mid +3 @ 20x", "go": True, "reasons": [], "volume_day": 1,
+            "pnl_day": 0.1, "days": 5, "capital_usd": 2_500.0}
+    pilot.save({"active": {"market": "QQQ-USD", "config": "Mid +3 @ 20x", "mode": "paper"}})
     ctl.is_running = lambda mode: True  # type: ignore[method-assign]
     pilot.review({"top": [cand], "all": [cand]})
     assert ctl._kv_get("paper", "sizing_ok") == "2500.00:QQQ"
@@ -273,7 +273,7 @@ def test_a_loss_limit_and_a_new_run_id_go_into_the_session(tmp_path: Path) -> No
     from bot.telegram.control import Control
 
     pilot = Pilot(tmp_path, Control(AppConfig(), root=tmp_path))
-    c = {"market": "BTC-USD", "config": "touch 0bp @ 20x", "setting": "touch 0bp", "volume_day": 3266,
+    c = {"market": "BTC-USD", "config": "Mid 0 @ 20x", "setting": "Mid 0", "volume_day": 3266,
          "pnl_day": -0.76, "worst_day": -0.93, "days": 5, "risk": asdict(Risk.for_capital(28, 20, 20)),
          "max_loss_usd": 30}
     a = load_session(pilot.write_session(c, live=True, path=tmp_path / "check.yaml"))
@@ -323,8 +323,9 @@ def test_a_setting_can_carry_its_own_stops_into_the_backtest_and_the_session(tmp
     """2026-09-26 research: deep quotes on the anchored perps only held up with room for the reversion (3/6/15 of the
     capital, not the default 1/2/10). The setting carries those stops into its backtest and into the live session."""
     from bot.scout.scan import BY_NAME
+    from bot.scout.sim import Config
 
-    cfg = BY_NAME["deep 3bp, no pause, 3% stop"]
+    cfg = Config("Mid +3, 3% stop", "mid", spacing_bps=3, safety=False, stops=(3.0, 6.0, 15.0))
     r = Risk.for_capital(100, 25, 16.67, min_capital=0.9)
     own = r.with_stops(cfg.stops)
     assert (own.pos_stop_usd, own.daily_stop_usd, own.kill_usd) == pytest.approx((3.0, 6.0, 15.0))
@@ -335,5 +336,5 @@ def test_a_setting_can_carry_its_own_stops_into_the_backtest_and_the_session(tmp
     assert s.sizing is not None and (s.sizing.position_stop_pct, s.sizing.daily_stop_pct, s.sizing.kill_pct) == \
         pytest.approx((3.0, 6.0, 15.0))
     assert (s.pos_stop_usd, s.daily_stop_usd, s.kill_usd) == pytest.approx((3.0, 6.0, 15.0))
-    p.write_text(yaml.safe_dump(session_for("QQQ-USD", BY_NAME["deep 3bp, no pause"], r, live=False)))
+    p.write_text(yaml.safe_dump(session_for("QQQ-USD", BY_NAME["Mid +3"], r, live=False)))
     assert load_session(p).pos_stop_usd == pytest.approx(r.pos_stop_usd)       # no own stops: the owner's

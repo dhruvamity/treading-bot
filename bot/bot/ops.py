@@ -179,10 +179,17 @@ def dashboard(app: AppConfig, env: dict[str, str], root: Path) -> str:
         scan: dict[str, Any] = json.loads((root / "data" / "scout" / "latest.json").read_text())
         cap = scan.get("capital") or {}
         usd = cap.get("usd") or (scan.get("risk") or {}).get("capital_usd") or 100
+        from bot.common import settings
+        from bot.scout import profiles
+
+        top = profiles.top(scan, profiles.DEFAULT, settings.volume_cost(settings.load(app.state_dir)))
         lines.append(f"  last scan {ago(time.time() - scan['ts_us'] / 1e6)} ago at ${usd:,.2f} "
-                     f"({cap.get('source', 'older scan')}); {len(scan.get('top') or [])} setups pass all checks")
-        for i, c in enumerate(scan.get("top") or [], 1):
-            lines.append(f"   {i}. {c['market']} {c['config']}: ${c['volume_day']:,.0f}/day, PnL {c['pnl_day']:+.2f}/day")
+                     f"({cap.get('source', 'older scan')}); Most Volume top 3:")
+        for i, c in enumerate(top, 1):
+            lines.append(f"   {i}. {c['market']} {c['config']}: ${c['volume_day']:,.0f}/day, PnL {c['pnl_day']:+.2f}/day, "
+                         f"${profiles.cost_1k(c) or 0:.2f} per $1,000")
+        if not top:
+            lines.append("   nothing within the budget (/top3 in Telegram shows the closest)")
     except (OSError, ValueError, KeyError):
         lines.append("  no scan yet")
     lines += ["", "BALANCE"]

@@ -27,7 +27,7 @@ from bot.core.calendar import TradingCalendar
 from bot.core.ledger import Ledger
 from bot.core.marketdata import MarketDataHub
 from bot.core.order_manager import BBOTicks, OrderManager, PlanParams
-from bot.core.risk import AccountSnapshot, RiskAction, RiskContext, RiskDecision, RiskEngine
+from bot.core.risk import AccountSnapshot, RiskAction, RiskContext, RiskDecision, RiskEngine, alert_text
 from bot.core.scheduler import SessionClock, SessionState
 from bot.core.state import StateStore
 from bot.strategies.base import StrategyContext, StrategyOutput
@@ -49,6 +49,7 @@ class EngineStats:
 
 
 REFUSED_ALERT_PER_MIN = 30   # pre-trade refusals in one minute that make an alert
+SAFETY_ALERT_EVERY_S = 900   # a spread / move / depth safety pause alerts at most this often
 RESIZE_MOVE = 0.25           # re-size within the day once the equity is this far from what the sizes were taken on
 RESIZE_CHECK_S = 3600        # ... checked at most this often
 BLOCKS = (("safety pause", "safety pause"), ("skip window", "skip window"), ("daily", "daily stop"),
@@ -138,7 +139,10 @@ class SessionEngine:
         self._refused_at: deque[int] = deque()           # pre-trade refusals in the last minute
         self._refused_alert_us: dict[str, int] = {}      # last alert per check
         self.session_start_equity: Decimal | None = None
-        self.run_pnl: Decimal | None = None             # the whole run's PnL when it has a loss limit (sl=)
+        self.run_pnl: Decimal | None = None             # the whole run's PnL when it has a limit (sl=, tp=)
+        self.run_volume = 0.0                           # the whole run's traded volume (across restarts of the run)
+        self._run_vol_carry: float | None = None
+        self.finishing = ""                             # a run target was reached (tp=, vol=): closing, then stop
         self.day_pnl: Decimal | None = None             # the UTC day's PnL, carried across restarts of the run
         self._day_carry: dict[str, Decimal] = {}        # ... what earlier processes made that day
         self._day_saved: tuple[bool, str | None] | None = None
@@ -249,7 +253,8 @@ class SessionEngine:
             self.decisions.record("resize", self.too_small, venue=self.venue.value, market=self.base, session=self.sid,
                                   ts_us=now_us)
             if self.alerter is not None:
-                self.alerter.warn("sizing", self.too_small)
+                self.alerter.warn("sizing", f"⚠️ ACCOUNT TOO SMALL\n{self.base} · equity ${eq:,.2f} · needs "
+                                  f"${z.min_capital_usd:,.2f} at this leverage\n\nArcus minimum order · not quoting")
             return
         self.too_small = ""
         out = sizing.apply(s, cap, z)
@@ -310,7 +315,7 @@ class SessionEngine:
         ctx = StrategyContext(
             now_us=now_us, venue=self.venue, market=m, view=view, params=self.session,
             inventory=self.state.position(self.venue, self.base), entry_price=self.state.entry.get((self.venue, self.base)),
-            session_progress=self.clock.progress(now_us), quoting_allowed=ok and mode is not BudgetMode.CANCELS_ONLY,
+            quoting_allowed=ok and mode is not BudgetMode.CANCELS_ONLY,
             quoting_block_reason=why if not ok else ("budget: cancels only" if mode is BudgetMode.CANCELS_ONLY else ""),
             event_window=ev, off_hours=off_hours, our_fill_usd_5m=sum(x for _, x in self._fill_usd_5m))
         return ctx
@@ -380,9 +385,8 @@ class SessionEngine:
         if len(self._refused_at) >= REFUSED_ALERT_PER_MIN and self.alerter is not None and \
                 now_us - self._refused_alert_us.get(check, 0) > 1800 * US_PER_S:
             self._refused_alert_us[check] = now_us
-            self.alerter.warn("orders_refused", f"{self.base}: the bot's own pre-trade check refused "
-                              f"{len(self._refused_at)} orders in the last minute ({why[:160]}). Nothing reaches "
-                              "Arcus; /status")
+            self.alerter.warn("orders_refused", f"⚠️ ORDERS REFUSED\n{self.base} · {len(self._refused_at)} in the last "
+                              f"minute\n{why[:120]}\n\nBy the bot's own checks · nothing reached Arcus")
 
     def _count_quotes(self, ctx: StrategyContext, state: SessionState, now_us: int, dt: float) -> None:
         from bot.common.time import utc_date_str
@@ -409,8 +413,24 @@ class SessionEngine:
         self.quotes.add(dt, why, sides[0], sides[1])
 
     def _stop_exit(self, ctx: StrategyContext, now_us: int) -> str | None:
-        """Position stop, daily-stop exit and the cool-down after a position stop. Returns why quoting is blocked."""
+        """Position stop, daily-stop exit, a finished run and the cool-down after a position stop. Returns why quoting
+        is blocked."""
         s, inv = self.session, ctx.inventory
+        if self.finishing:
+            if inv != 0:
+                if self.exit_since_us is None:
+                    self.exit_since_us = now_us   # close what is left: maker first, then a taker order
+                return f"run done ({self.finishing}): closing the position"
+            if not self.stopped:
+                self.stopped, self.exit_since_us = True, None
+                self.risk.all_stopped = f"this run is done: {self.finishing}"
+                if self.alerter is not None:
+                    pnl = f"PnL {'+' if (self.run_pnl or 0) >= 0 else '-'}${abs(self.run_pnl or 0):,.2f} · " \
+                        if self.run_pnl is not None else ""
+                    self.alerter.warn("run_done", f"✅ RUN DONE\n{self.base} · {self.finishing[:1].upper()}"
+                                      f"{self.finishing[1:]}\n{pnl}Volume ${self.run_volume:,.0f}\n\n"
+                                      "Flat · quotes cancelled · start a new run: /run")
+            return f"run done ({self.finishing})"
         if self.too_small:
             if inv != 0 and self.exit_since_us is None:
                 self.exit_since_us = now_us   # close what is left: maker first, then a taker order
@@ -436,11 +456,12 @@ class SessionEngine:
                 self.pos_stop_active, self.exit_since_us = True, now_us
                 d = RiskDecision("position_stop", RiskAction.PAUSE_QUOTES, self.venue, self.base,
                                  f"open position {inv} down ${-upnl:.2f} (stop ${s.pos_stop_usd:.2f})",
-                                 f"position closed, then {s.cooldown_s:.0f} s")
+                                 f"position closed, then {s.cooldown_s:.0f} s",
+                                 (f"{self.base} · PnL -${-upnl:.2f}", f"Stop -${s.pos_stop_usd:.2f}"))
                 self.risk._log(d, now_us)
                 self.stats.risk_events.append(d)
                 if self.alerter is not None:
-                    self.alerter.warn("position_stop", d.reason)
+                    self.alerter.warn("position_stop", alert_text(d))
                 return "position stop: closing the position"
         return None
 
@@ -503,6 +524,7 @@ class SessionEngine:
         f = replace(f, tag=tag)
         if not self.state.on_fill(f, self.sid, tag):
             return
+        self._add_run_volume(float(f.notional))
         view = self.hub.get(f.venue, f.base)
         vmid = view.mid() if view is not None else None
         mid: Decimal = vmid if vmid is not None else f.price
@@ -556,8 +578,15 @@ class SessionEngine:
         self.risk.roll_day(now_us)
         self._restore_day(day)
         s = self.session
-        if s.max_loss_usd:
+        if s.max_loss_usd or s.take_profit_usd:
             self.run_pnl = self._run_total(equity - self.session_start_equity, now_us)
+        if not self.finishing:
+            done = self._target_reached()
+            if done:
+                self.finishing = done
+                self.decisions.record("run_target", f"run target reached: {done}; closing the position, then "
+                                      "stopping", venue=self.venue.value, market=self.base, session=self.sid,
+                                      ts_us=now_us)
         self.day_pnl = self._day_carry.get(day, Decimal(0)) + equity - self.day_start_equity[day]
         for d in self.risk.on_pnl(venue=self.venue, session_id=self.sid, session_pnl=equity - self.session_start_equity,
                                   session_margin=self.size_capital, stop_loss_pct=s.stop_loss_pct,
@@ -582,8 +611,11 @@ class SessionEngine:
     def resume_if_cleared(self, now_us: int) -> None:
         """After a drawdown kill the engine stops ticking; a manual resume clears the risk engine's stop, and this
         starts quoting again (it did not: /resumeaftersl after a kill did nothing). A run past its own loss limit
-        (sl=) is the exception: the stop comes back and the engine stays stopped."""
+        (sl=) or done (tp=, vol=) is the exception: the stop comes back and the engine stays stopped."""
         if not self.stopped or self.risk.all_stopped:
+            return
+        if self.finishing:
+            self.risk.all_stopped = f"this run is done: {self.finishing}"
             return
         lim = self.session.max_loss_usd
         if lim and self.run_pnl is not None and self.run_pnl <= -Decimal(str(lim)):
@@ -632,6 +664,25 @@ class SessionEngine:
         self.state.kv_set(key, json.dumps({"day": day, "pnl": str(self.day_pnl), "stopped": state[0],
                                            "rearm": state[1]}))
 
+    def _target_reached(self) -> str:
+        """The run's own targets (/run ... tp= vol=, Tread's Take Profit and Volume): what was reached, else ""."""
+        s = self.session
+        if s.take_profit_usd and self.run_pnl is not None and self.run_pnl >= Decimal(str(s.take_profit_usd)):
+            return f"take profit +${s.take_profit_usd:,.2f} reached"
+        if s.volume_target_usd and self.run_volume >= s.volume_target_usd:
+            return f"volume target ${s.volume_target_usd:,.0f} reached"
+        return ""
+
+    def _add_run_volume(self, usd: float) -> None:
+        """The run's volume across restarts: kv run_vol:<run_id>, written on every fill."""
+        key = f"run_vol:{self.session.run_id}" if self.session.run_id else ""
+        if self._run_vol_carry is None:
+            self._run_vol_carry = float(self.state.kv_get(key) or 0) if key else 0.0
+            self.run_volume += self._run_vol_carry
+        self.run_volume += usd
+        if key:
+            self.state.kv_set(key, f"{self.run_volume:.2f}")
+
     def _run_total(self, pnl: Decimal, now_us: int) -> Decimal:
         """The run's PnL across restarts: what earlier processes of this run (the pilot's run_id) made, kept in kv
         and saved every 5 s, plus this process's. A session without a run_id counts this process only."""
@@ -647,9 +698,11 @@ class SessionEngine:
     async def execute(self, d: RiskDecision, now_us: int) -> None:
         self.stats.risk_events.append(d)
         if self.alerter is not None:
-            level = "crit" if d.action in (RiskAction.STOP_ALL, RiskAction.STOP_VENUE_CRIT, RiskAction.SAFE_MODE) else \
-                "info" if d.trigger == "safety_pause" else "warn"   # self-clearing in 30 s; the dashboard shows its share
-            getattr(self.alerter, level)(d.trigger, f"{d.action.value}: {d.reason}")
+            if d.action in (RiskAction.STOP_ALL, RiskAction.STOP_VENUE_CRIT, RiskAction.SAFE_MODE):
+                self.alerter.crit(d.trigger, alert_text(d))
+            else:   # a safety pause clears itself in 30 s and can flap: one alert per SAFETY_ALERT_EVERY_S at most
+                self.alerter.warn(d.trigger, alert_text(d),
+                                  every_s=SAFETY_ALERT_EVERY_S if d.trigger == "safety_pause" else None)
         venues = [d.venue] if d.venue else list(self.adapters)
         if d.action in (RiskAction.PAUSE_QUOTES, RiskAction.STOP_MARKET_QUOTING, RiskAction.NO_NEW_QUOTES):
             return  # the quoting gate removes quotes on the next tick; positions are kept

@@ -1,101 +1,38 @@
-"""Static geometric grid.
+"""Grid (Tread.fi's Grid): quotes around the last fill.
 
-Grid points j in [-N, N] at C(1+delta)^j. Start: buys at j = -1..-N, sells at j = 1..N (point 0 empty). A filled buy
-at j re-lists as a sell at j+1 (one step up); a filled sell at j re-lists as a buy at j-1. Each point holds at most one
-order, tagged `g{j}` so the order manager keeps queue priority across ticks.
-No new buys once inventory x P >= I_cap (symmetric for sells). Re-centre when |m - C| / C > R for longer than
-T_recentre; inventory then follows `recentre_inventory`: skew_exit (keep, skew the new grid against it) or
-maker_unwind (reduce-only maker order at the touch, grid side that adds is paused). The grid only changes on fills or
-re-centre, so it barely touches the order budget.
+Flat: one bid and one ask at mid -/+ max(spread, half the book spread). Holding a position: last fill x (1 -/+ spread),
+so a sell never goes below the last buy + spread and a buy never above the last sell - spread; each further fill
+moves the reference, so the position builds one order per step until the position cap. Soft reset: once the mid has
+run more than reset_threshold_pct against the position from the last fill, it stops adding and closes with a
+reduce-only maker order at the touch; flat again, it starts over around the mid. A Long or Short bias skews the order
+sizes toward holding part of the cap (bot/strategies/setup.py). The scout backtests the same rules
+(bot/scout/sim.py GridPolicy). After a restart with a position there is no last fill yet: its average entry stands in.
 """
 
 from __future__ import annotations
 
 from bot.common.config import MMSession
-from bot.core.order_manager import DesiredOrder
 from bot.strategies import quoting as qt
 from bot.strategies.base import StrategyContext, StrategyOutput
 from bot.strategies.mm_base import MMBase
-from bot.venues.base import Fill, Side
+from bot.venues.base import Fill
 
 
 class GridStrategy(MMBase):
     name = "grid"
 
-    def __init__(self, params: MMSession, *, delta: float | None = None, levels: int | None = None) -> None:
+    def __init__(self, params: MMSession) -> None:
         super().__init__(params)
-        self.delta_override = delta
-        self.levels_override = levels
-        self.center: float | None = None
-        self.delta: float = 0.0
-        self.n: int = 0
-        self.points: dict[int, Side] = {}
-        self.out_of_range_since: int | None = None
-        self.recentres = 0
-        self.unwind_active = False
-        self.skew_active = False  # skew_exit: inventory carried over a re-centre is exited by skewing sizes
-
-    # ---------------------------------------------------------------- parameters
-    def spacing(self, ctx: StrategyContext, mid: float) -> float:
-        if self.delta_override is not None:
-            return self.delta_override * (self.p.off_hours.spacing_mult if ctx.off_hours else 1.0)
-        return self.grid_spacing(ctx, mid)
-
-    def level_count(self, ctx: StrategyContext, mid: float, q_usd: float) -> int:
-        cap = 12
-        if self.levels_override is not None:
-            return max(1, min(cap, self.levels_override))
-        if self.p.levels_per_side != "auto":
-            return max(1, min(cap, int(self.p.levels_per_side)))
-        return max(1, min(cap, int(self.p.inventory_cap_usd // max(q_usd, 1e-9))))
-
-    # ---------------------------------------------------------------- state
-    def reset(self, ctx: StrategyContext, mid: float) -> None:
-        self.center = mid
-        self.delta = self.spacing(ctx, mid)
-        q = self.q_usd(ctx, mid, 3)
-        self.n = self.level_count(ctx, mid, q)
-        self.points = {j: Side.BUY for j in range(-self.n, 0)} | {j: Side.SELL for j in range(1, self.n + 1)}
-        self.out_of_range_since = None
-
-    def price(self, j: int) -> float:
-        assert self.center is not None
-        return self.center * (1 + self.delta) ** j
+        self.ref: float | None = None
+        self.resetting = False
 
     def on_fill(self, ctx: StrategyContext, fill: Fill) -> None:
         super().on_fill(ctx, fill)
-        tag = fill.tag or ""
-        if not tag.startswith("g") or not tag[1:].lstrip("-").isdigit():
-            return
-        j = int(tag[1:])
-        if fill.side is Side.BUY and self.points.get(j) is Side.BUY:
-            self.points.pop(j, None)
-            if j + 1 <= self.n:
-                self.points[j + 1] = Side.SELL
-        elif fill.side is Side.SELL and self.points.get(j) is Side.SELL:
-            self.points.pop(j, None)
-            if j - 1 >= -self.n:
-                self.points[j - 1] = Side.BUY
+        if ctx.inventory == 0:
+            self.ref, self.resetting = None, False
+        elif not (fill.tag or "").startswith("exit"):   # exits (maker or IOC) close; they are not a new level
+            self.ref = float(fill.price)
 
-    def check_recentre(self, ctx: StrategyContext, mid: float) -> str | None:
-        assert self.center is not None
-        dev = abs(mid - self.center) / self.center
-        if dev <= self.p.reset_threshold_pct / 100:
-            self.out_of_range_since = None
-            return None
-        if self.out_of_range_since is None:
-            self.out_of_range_since = ctx.now_us
-            return None
-        if (ctx.now_us - self.out_of_range_since) / 1e6 >= self.p.recentre_after_s:
-            self.recentres += 1
-            old = self.center
-            self.reset(ctx, mid)
-            self.unwind_active = self.p.recentre_inventory == "maker_unwind" and ctx.inventory != 0
-            self.skew_active = self.p.recentre_inventory == "skew_exit" and ctx.inventory != 0
-            return f"re-centre #{self.recentres}: {old:.4f} -> {mid:.4f} (|dev| {dev:.3%} > R)"
-        return None
-
-    # ---------------------------------------------------------------- tick
     def on_tick(self, ctx: StrategyContext) -> StrategyOutput:
         why = self.blocked(ctx)
         if why:
@@ -103,46 +40,33 @@ class GridStrategy(MMBase):
         mid, bbo = self.mid(ctx), self.bbo(ctx)
         if mid is None or bbo is None:
             return self.exit_book(ctx, "no book")
-        if self.center is None:
-            self.reset(ctx, mid)
-        note = self.check_recentre(ctx, mid) or ""
-        inv_usd = self.inventory_usd(ctx, mid)
-        q_base = qt.base_for_usd(self.q_usd(ctx, mid, self.n), mid, ctx.market)
-        if self.skew_active and ctx.inventory == 0:
-            self.skew_active = False
-        u = self.u(ctx, mid) if self.skew_active else 0.0
-        min_q = qt.base_for_usd(self.venue_min_usd(ctx, mid) * 1.01, mid, ctx.market)
-        qb, qa = qt.skewed_sizes(q_base, u, min_q) if u else (q_base, q_base)
-        no_buys, no_sells = self.caps(ctx, mid, max(qb, qa))
-        cap_buys = no_buys or (self.unwind_active and ctx.inventory > 0)
-        cap_sells = no_sells or (self.unwind_active and ctx.inventory < 0)
         bb, ba = bbo
         tick = float(ctx.market.tick_size)
-        orders: list[DesiredOrder] = []
-        min_base = float(ctx.market.min_size)
-        for j, side in sorted(self.points.items()):
-            px = self.price(j)
-            if side is Side.BUY:
-                if cap_buys or qb < min_base:
-                    continue
-                px = min(px, ba - tick)
-                d = qt.to_desired(ctx.market, Side.BUY, px, qb, f"g{j}")
-            else:
-                if cap_sells or qa < min_base:
-                    continue
-                px = max(px, bb + tick)
-                d = qt.to_desired(ctx.market, Side.SELL, px, qa, f"g{j}")
-            if d is not None:
-                orders.append(d)
-        out = StrategyOutput(reason=(f"grid C={self.center:.4f} delta={self.delta / qt.BP:.1f}bp N={self.n} "
-                                     f"inv=${inv_usd:.2f} " + note).strip(),
-                             half_spread_ticks=self.delta * mid / tick)
-        if self.unwind_active:
-            ex = self.exit_book(ctx, "maker unwind after re-centre")
-            orders += ex.desired.get((ctx.venue, ctx.market.base), [])
-            if ctx.inventory == 0:
-                self.unwind_active = False
+        d = self.grid_spacing(ctx, mid)
+        if ctx.inventory == 0:
+            self.ref, self.resetting = None, False
+        elif self.ref is None and ctx.entry_price is not None:
+            self.ref = float(ctx.entry_price)
+        if self.ref is None:
+            half = max(d * mid, (ba - bb) / 2)
+            bid, ask = mid - half, mid + half
+            where = "around the mid"
+        else:
+            adverse = (self.ref - mid) / self.ref if ctx.inventory > 0 else (mid - self.ref) / self.ref
+            if self.p.reset_threshold_pct > 0 and adverse > self.p.reset_threshold_pct / 100:
+                self.resetting = True
+            if self.resetting:
+                return self.exit_book(ctx, f"grid soft reset: the mid ran {adverse:.3%} against the last fill "
+                                           f"{self.ref:.4f}; closing at the touch")
+            bid, ask = self.ref * (1 - d), self.ref * (1 + d)
+            where = f"around the last fill {self.ref:.4f}"
+        bid, ask = qt.post_only_guard(bid, ask, bb, ba, tick)
+        q_base = qt.base_for_usd(self.q_usd(ctx, mid, 1), mid, ctx.market)
+        caps = self.caps(ctx, mid, q_base)
+        u = self.u(ctx, mid) if self.p.bias != "neutral" else 0.0
+        orders = self.two_sided(ctx, levels=[(bid, ask, "0")], q_base=q_base, u=u, cap_buys=caps[0],
+                                cap_sells=caps[1])
+        out = StrategyOutput(reason=f"grid {d / qt.BP:+.1f}bp {self.p.bias} {where}", half_spread_ticks=d * mid / tick)
         out.set(ctx.venue, ctx.market.base, orders)
-        out.metrics = {"delta_bps": self.delta / qt.BP, "levels": float(self.n), "inv_usd": inv_usd, "u": u}
+        out.metrics = {"d_bps": d / qt.BP, "ref": self.ref or 0.0, "inv_usd": self.inventory_usd(ctx, mid), "u": u}
         return out
-

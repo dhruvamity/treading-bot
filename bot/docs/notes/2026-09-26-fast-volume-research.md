@@ -168,17 +168,22 @@ queue $18.8k and $16.6k. Found:
 | | Run 1: ~$30 at 20x, 00:10–00:45 | Run 2: about $100 at 40x, `sl=30`, 07:02–07:38 |
 |---|---|---|
 | Live | $4,493, 31 fills, −$0.57 (1.3 bp) | $57,836, 53 fills, −$4.39 incl. $0.58 fees (0.76 bp) |
-| Backtest, queue fills (the scan) | $3,893, 33 fills, −$0.73 (1.9 bp); daily stop 5.5 min before the run's | not comparable: replayed with a $2.20 daily stop, the run had $30 |
-| Backtest, through-only | $6,112, 50 fills, −$0.63 | same problem |
-| Backtest, front of queue | $7,957, 64 fills, −$0.78 | same problem |
+| Backtest, queue fills (the scan) | $3,893, 33 fills, −$0.73 (1.9 bp); daily stop 5.5 min before the run's | $48,267, 44 fills, −$4.46 (0.92 bp) |
+| Backtest, through-only | $6,112, 50 fills, −$0.63 | $44,497, 44 fills, −$4.78 (1.07 bp) |
+| Backtest, front of queue | $7,957, 64 fills, −$0.78 | $87,902, 92 fills, −$4.93 (0.56 bp) |
+
+Run 2 is replayed with its own loss limit (`--sl 30`). A first replay with the $2.20 daily stop stopped within minutes,
+at 1.5–2.8 bp, and made the live run look far cheaper than the backtest.
 
 What differs between the backtest and the account:
 
-- **Volume and fills: the queue model holds up** (run 1: 0.87x the volume, 33 fills for 31). Through-only and
-  front-of-queue miss in opposite directions, and their paths split at the daily stop.
-- **Cost: both live runs were cheaper than every backtest** (1.3 bp and 0.76 bp live; 1.9–2.8 bp in the replays;
-  1.7–2.0 bp steady state below). The scan is conservative on BTC cost by roughly 1.5–2.5x. Two runs and about 70
-  minutes are not enough to correct the model; each new run adds a point.
+- **Volume and fills: the queue model holds up**: 0.87x and 0.83x the live volume, 33 fills for 31 and 44 for 53. It
+  is a little low, and front-of-queue is too high (1.5x on run 2). The live runs sit between the two, much closer to
+  the queue model.
+- **Cost: the queue model is slightly cautious on the same minutes**, at 1.5x (1.9 bp vs 1.3 bp) and 1.2x (0.92 bp vs
+  0.76 bp) the live cost. Run 2's low cost was mostly a calm half hour: the backtest of those same minutes was cheap
+  too, against 1.7–2.0 bp over whole days below. Two runs (about 70 minutes) are not enough to adjust the model; each
+  new run adds a point.
 - **Requotes and margin (fixed).** Arcus requotes are a cancel then a new order. Until the venue confirmed the
   cancel, the bot's own pre-trade check counted the old order as still resting beside its replacement. So a buy that
   reduced a short looked like it opened a position (~$80 of margin wanted, ~$50 free), and it was refused 14 times in run
@@ -204,8 +209,9 @@ stop and a large balance, so this is the cost over a whole day rather than the f
 It is better on every one of the 4 days (0.25–0.33 bp). Each position stop crosses the spread (taker fee plus slip)
 and pauses quoting. At 3% the loss limit (`sl=`) still bounds the run, so for the same dollars lost, 3% buys about 16%
 more volume. Smaller orders ($880 or $440) cost about the same as 3% (1.70–1.80 bp), with less volume. **Use
-`/set position_stop 3`** before a BTC run at 40x. It applies from the next `/run` on any market (the owner's settings
-are global); the anchored stock setting `deep 3bp, no pause, 3% stop` already uses 3%.
+`/set daily_stop 6`, then `/set position_stop 3`** before a BTC run at 40x: a position stop above the daily stop is
+refused (the default daily stop is 2%), and 3/6 matches the anchored settings' stop profile. They apply from the next
+`/run` on any market (the owner's settings are global), and a run's `sl=` still lifts the daily stop to itself.
 
 At 40x, a ~$100 account holding the full position is liquidated after losing roughly two thirds of it (the backtest
 without a daily stop was, within 21 minutes of quoting). Keep `sl=` under about a third of the balance at 40x.

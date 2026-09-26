@@ -76,18 +76,38 @@ class Guardian:
     started_us: int = field(default_factory=now_us)
     ids: ClientIdFactory = field(default_factory=lambda: ClientIdFactory("guardian", now_us() // 60_000_000 % 10**7))
 
-    async def cancel_all_everywhere(self, why: str) -> None:
+    async def cancel_all_everywhere(self, why: str, *, alert: bool = True) -> None:
+        failed = []
         for gv in self.venues:
             try:
                 await gv.adapter.cancel_all(None)  # type: ignore[attr-defined]
                 log.critical("guardian_cancel_all", venue=gv.venue.value, reason=why)
             except Exception as e:
+                failed.append(gv.venue.value)
                 log.critical("guardian_cancel_all_failed", venue=gv.venue.value, reason=type(e).__name__,
                              data={"err": str(e)[:200]})
-        await self.alerter.send(Level.CRIT, "guardian", f"guardian cancel-all: {why}")
+        if alert:
+            done = f"Cancel failed on {', '.join(failed)}" if failed else "Orders cancelled"
+            await self.alerter.send(Level.CRIT, "guardian", f"🚨 GUARDIAN STOP\n{why}\n\n"
+                                    f"{done} · position status: {await self._positions_text()}")
+
+    async def _positions_text(self) -> str:
+        """"Flat", or each open position ("BTC short 0.0273"); "unknown" when the venue cannot be read."""
+        out = []
+        for gv in self.venues:
+            try:
+                pos = await gv.adapter.positions()  # type: ignore[attr-defined]
+            except Exception:
+                return "unknown"
+            out += [f"{p.base} {'long' if p.size > 0 else 'short'} {abs(p.size):g}" for p in pos if p.size]
+        return ", ".join(out) or "Flat"
 
     async def flatten_everywhere(self, why: str) -> None:
-        await self.cancel_all_everywhere(why)
+        await self.cancel_all_everywhere(why, alert=False)
+        pos = await self._positions_text()
+        what = "nothing to close" if pos == "Flat" else \
+            f"closing {pos} (maker, then taker after {self.taker_after_s:.0f} s)"
+        await self.alerter.send(Level.CRIT, "guardian", f"🚨 GUARDIAN STOP\n{why}\n\nOrders cancelled · {what}")
         for taker in (False, True):
             for gv in self.venues:
                 try:
@@ -121,7 +141,7 @@ class Guardian:
             if age > self.heartbeat_timeout_s and not self.fired_heartbeat:
                 self.fired_heartbeat = True
                 actions.append("heartbeat_cancel_all")
-                await self.cancel_all_everywhere(f"bot heartbeat silent for {age:.0f}s")
+                await self.cancel_all_everywhere(f"Bot heartbeat lost · {age:.0f}s")
             elif age <= self.heartbeat_timeout_s:
                 self.fired_heartbeat = False
         for gv in self.venues:
@@ -137,8 +157,8 @@ class Guardian:
             if cap and gv.start_equity - eq > cap * Decimal(self.drawdown_hard_pct) / 100 and not self.fired_drawdown:
                 self.fired_drawdown = True
                 actions.append("drawdown_flatten")
-                await self.flatten_everywhere(f"{gv.venue.value} equity {eq} below start {gv.start_equity} by more "
-                                              f"than {self.drawdown_hard_pct}% of ${cap}")
+                await self.flatten_everywhere(f"Drawdown over {self.drawdown_hard_pct:g}% · equity ${eq:,.2f} from "
+                                              f"${gv.start_equity:,.2f}")
         return actions
 
     async def run(self) -> None:

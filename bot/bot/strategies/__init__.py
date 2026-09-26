@@ -1,4 +1,5 @@
-"""Strategy registry: session config -> strategy instance."""
+"""Strategy registry: session config -> strategy instance. Two modes, as on Tread.fi: Mid and Grid
+(bot/strategies/setup.py)."""
 
 from __future__ import annotations
 
@@ -8,11 +9,7 @@ from bot.common.config import MMSession
 
 
 def make_strategy(session: MMSession) -> Any:
-    from bot.strategies.anchor import AnchorStrategy
     from bot.strategies.grid import GridStrategy
     from bot.strategies.mid import MidStrategy
-    from bot.strategies.rgrid import RGridStrategy
-    from bot.strategies.signal import SignalStrategy
 
-    return {"mid": MidStrategy, "grid": GridStrategy, "rgrid": RGridStrategy, "signal": SignalStrategy,
-            "anchor": AnchorStrategy}[session.mode](session)
+    return {"mid": MidStrategy, "grid": GridStrategy}[session.mode](session)

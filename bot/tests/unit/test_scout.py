@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import math
-from collections import deque
 from collections.abc import Callable
 from decimal import Decimal as D
 from pathlib import Path
@@ -17,9 +16,9 @@ from bot.core.marketdata import MarketView
 from bot.scout.sim import (
     BUY,
     SELL,
-    AnchorPolicy,
     Book,
     Config,
+    GridPolicy,
     MarketInfo,
     MidPolicy,
     Risk,
@@ -177,7 +176,7 @@ def test_mid_policy_quotes_what_the_live_strategy_quotes(inv: D) -> None:
     live = sorted((o.side, o.price_ticks, o.size_quantums) for o in out.desired[(Venue.ARCUS, "AMD")])
     mi = MarketInfo(float(m.tick_size), float(m.step_size), float(m.min_notional), float(m.min_size))
     pol = MidPolicy(Config("x", "mid", spacing_bps=3), Risk(order_usd=25, cap_usd=50), mi)
-    q, _ = pol.quotes(Book(T0, 620.0, 620.4, 620.2, float(inv), None, 0.0, 0.0, deque()))
+    q, _ = pol.quotes(Book(T0, 620.0, 620.4, 620.2, float(inv), None, 0.0, 0.0))
     ours = sorted((Side.BUY if s == BUY else Side.SELL, round(p / mi.tick), round(qq / mi.step)) for s, p, qq, _t in q)
     assert live == ours
     assert {s for s, *_ in q} <= {BUY, SELL}
@@ -198,7 +197,7 @@ def test_touch_quotes_sit_where_the_backtest_puts_them(bid: str, ask: str) -> No
     mi = MarketInfo(float(m.tick_size), float(m.step_size), float(m.min_notional), float(m.min_size))
     b, a = float(bid), float(ask)
     q, _ = MidPolicy(Config("touch 1bp", "mid", style="normal", spacing_bps=1), Risk(order_usd=25, cap_usd=50),
-                     mi).quotes(Book(T0, b, a, (b + a) / 2, 0.0, None, 0.0, 0.0, deque()))
+                     mi).quotes(Book(T0, b, a, (b + a) / 2, 0.0, None, 0.0, 0.0))
     assert live == sorted((Side.BUY if sd == BUY else Side.SELL, round(p / mi.tick)) for sd, p, _q, _t in q)
 
 
@@ -218,7 +217,7 @@ def test_live_engine_position_stop_closes_with_a_taker_order() -> None:
     assert any(f.tag == "exit_ioc" for f in res.fills)   # the unfilled maker exit was replaced by a taker order
 
 
-def test_live_engine_runs_the_anchor_grid() -> None:
+def test_live_engine_runs_the_grid() -> None:
     mk = fixture_markets()
     a = mk[Venue.ARCUS]["BTC"]
 
@@ -226,7 +225,7 @@ def test_live_engine_runs_the_anchor_grid() -> None:
         ev = list(merge([book_events(Venue.ARCUS, "BTC", path, start_us=1_790_000_000_000_000, seconds=1800,
                                      tick=a.tick_size, step=a.step_size, half_spread_ticks=5, trades_per_s=2.0,
                                      trade_size=D("0.01"), seed=5)]))
-        sess = mm_session(mode="anchor", spacing_bps=3, reset_threshold_pct=0.1, levels_per_side=1, order_size_usd=25,
+        sess = mm_session(mode="grid", spacing_bps=3, reset_threshold_pct=0.1, levels_per_side=1, order_size_usd=25,
                           inventory_cap_usd=50, capital_usd=100, daily_stop_usd=50, pos_stop_usd=50, kill_usd=50,
                           safety_pause={"move_sigma_1s": 1e9, "spread_x_median": 1e9, "depth_frac_min": 0.0})
         return Simulator([sess], mk, SimConfig()).run_sync(ev)
@@ -236,7 +235,7 @@ def test_live_engine_runs_the_anchor_grid() -> None:
     grid = [f for f in chop.fills if f.tag in ("b0", "a0")]
     assert len(grid) > 100 and {f.side for f in grid} == {Side.BUY, Side.SELL}
     trend = run_on(trend_path(86000, -0.01, 0.0004))     # -1%/h: it fills long, stalls, then soft-resets
-    assert any("anchor soft reset" in str(d.get("reason")) for d in trend.decisions)
+    assert any("grid soft reset" in str(d.get("reason")) for d in trend.decisions)
 
 
 def test_live_engine_quotes_nothing_in_a_skip_window() -> None:
@@ -259,21 +258,21 @@ def test_live_engine_quotes_nothing_in_a_skip_window() -> None:
     assert run_with(["16:30-17:00"]).fills
 
 
-# ------------------------------------------------------------------------------------------------ anchor, skip windows
-ANCHOR = Config("anchor 3bp", "anchor", spacing_bps=3, reset_pct=0.1, safety=False)
+# ------------------------------------------------------------------------------------------------ grid, skip windows
+GRID = Config("Grid +3", "grid", spacing_bps=3, reset_pct=0.1, safety=False)
 
 
 def at(mid: float, pos: float, spread_bps: float = 1.0) -> Book:
     h = mid * spread_bps / 2e4
-    return Book(T0, mid - h, mid + h, mid, pos, None, 0.0, 0.0, deque())
+    return Book(T0, mid - h, mid + h, mid, pos, None, 0.0, 0.0)
 
 
 def prices(q: list[tuple[int, float, float, str]]) -> set[tuple[int, float, str]]:
     return {(s, round(p, 2), tag) for s, p, _q, tag in q}
 
 
-def test_anchor_quotes_around_the_last_fill_and_soft_resets() -> None:
-    pol = AnchorPolicy(ANCHOR, Risk(order_usd=25, cap_usd=50), MI)
+def test_grid_quotes_around_the_last_fill_and_soft_resets() -> None:
+    pol = GridPolicy(GRID, Risk(order_usd=25, cap_usd=50), MI)
     q, _ = pol.quotes(at(100.0, 0.0))
     assert prices(q) == {(BUY, 99.97, "b0"), (SELL, 100.03, "a0")}   # flat: mid -/+ 3 bp
     pol.on_fill(BUY, 99.97, 0.25, "b0", T0, 0.25)
@@ -290,16 +289,16 @@ def test_anchor_quotes_around_the_last_fill_and_soft_resets() -> None:
 
 
 @pytest.mark.parametrize("inv", [D(0), D("0.05"), D("-0.05")])
-def test_anchor_policy_quotes_what_the_live_strategy_quotes(inv: D) -> None:
+def test_grid_policy_quotes_what_the_live_strategy_quotes(inv: D) -> None:
     m = fixture_markets()[Venue.ARCUS]["AMD"]
-    sess = mm_session(market="AMD", mode="anchor", spacing_bps=3, reset_threshold_pct=0.1, levels_per_side=1,
+    sess = mm_session(market="AMD", mode="grid", spacing_bps=3, reset_threshold_pct=0.1, levels_per_side=1,
                       order_size_usd=25, inventory_cap_usd=50, skew_kappa=0.0)
     view = MarketView(Venue.ARCUS, "AMD")
     view.book = L2Book()
     view.book.load([(D("620.00"), D("1"))], [(D("620.40"), D("1"))], 1)
     live = make_strategy(sess)
     mi = MarketInfo(float(m.tick_size), float(m.step_size), float(m.min_notional), float(m.min_size))
-    pol = AnchorPolicy(Config("x", "anchor", spacing_bps=3, reset_pct=0.1), Risk(order_usd=25, cap_usd=50), mi)
+    pol = GridPolicy(Config("x", "grid", spacing_bps=3, reset_pct=0.1), Risk(order_usd=25, cap_usd=50), mi)
     ctx = StrategyContext(now_us=T0, venue=Venue.ARCUS, market=m, view=view, params=sess, inventory=inv)
     if inv:
         side = Side.BUY if inv > 0 else Side.SELL
@@ -308,7 +307,7 @@ def test_anchor_policy_quotes_what_the_live_strategy_quotes(inv: D) -> None:
         pol.on_fill(BUY if inv > 0 else SELL, 620.10, float(abs(inv)), "b0", T0, float(inv))
     out = live.on_tick(ctx)
     got = sorted((o.side, o.price_ticks, o.size_quantums) for o in out.desired[(Venue.ARCUS, "AMD")])
-    q, _ = pol.quotes(Book(T0, 620.0, 620.4, 620.2, float(inv), None, 0.0, 0.0, deque()))
+    q, _ = pol.quotes(Book(T0, 620.0, 620.4, 620.2, float(inv), None, 0.0, 0.0))
     ours = sorted((Side.BUY if s == BUY else Side.SELL, round(p / mi.tick), round(qq / mi.step)) for s, p, qq, _t in q)
     assert got == ours and len(got) == 2
     if inv > 0:   # holding: the sell sits 3 bp above the fill, not around the 620.20 mid
@@ -381,7 +380,7 @@ def test_orders_refused_by_our_own_checks_are_counted_and_alerted_once() -> None
     sim.engines[0].alerter = Alerts()
     q = sim.run_sync(ev).stats["t"]["quotes"]
     assert q.refused > 100 and q.refused_why.startswith("free_collateral") and q.bid == 0 and q.ask == 0
-    assert len(warned) == 1 and "refused" in warned[0] and "free_collateral" in warned[0]
+    assert len(warned) == 1 and "ORDERS REFUSED" in warned[0] and "free_collateral" in warned[0]
 
 
 def test_research_fill_models_and_a_faster_decision_step() -> None:
@@ -400,3 +399,42 @@ def test_research_fill_models_and_a_faster_decision_step() -> None:
     assert abs(fast.quoting_s - queue.quoting_s) <= 1 and fast.hours == queue.hours and fast.maker_fills > 0
     with pytest.raises(ValueError):
         Window(t, T0, T0 + 60 * S, warmup_s=0, step_ms=300)
+
+
+def test_a_run_ends_at_its_volume_target_flat() -> None:
+    """Tread's Volume: once the run has traded vol= it closes its position (maker, then taker) and stops for good;
+    a resume does not restart it."""
+    mk = fixture_markets()
+    a = mk[Venue.ARCUS]["BTC"]
+    ev = list(merge([book_events(Venue.ARCUS, "BTC", sine_path(86000, 0.0003, 120, 0.0004),
+                                 start_us=1_790_000_000_000_000, seconds=3600, tick=a.tick_size, step=a.step_size,
+                                 half_spread_ticks=5, trades_per_s=2.0, trade_size=D("0.01"), seed=5)]))
+    sess = mm_session(mode="mid", execution_style="passive", passive_k_sigma=0, spacing_bps=0, levels_per_side=1,
+                      order_size_usd=25, inventory_cap_usd=50, capital_usd=100, daily_stop_usd=50, pos_stop_usd=50,
+                      kill_usd=50, run_id="t1", volume_target_usd=2_000.0)
+    sim = Simulator([sess], mk, SimConfig())
+    res = sim.run_sync(ev)
+    e = sim.engines[0]
+    done = [d for d in res.decisions if d["kind"] == "run_target"]
+    assert len(done) == 1 and e.finishing and e.stopped and e.state.position(Venue.ARCUS, "BTC") == 0
+    assert str(e.risk.all_stopped).startswith("this run is done: ")
+    last_fill = max(f.ts_us for f in res.fills)
+    assert all(d["ts"] <= last_fill + 2_000_000 for d in res.decisions if d["kind"] == "place")   # no quotes after
+    assert 2_000 <= e.run_volume < 2_150 and e.state.kv_get("run_vol:t1")   # the closing fills on top; kept in kv
+    e.risk.resume(all_=True)
+    e.resume_if_cleared(e.now_us)
+    assert e.stopped and "done" in str(e.risk.all_stopped)
+
+
+def test_take_profit_and_volume_targets_read_the_whole_run() -> None:
+    from types import SimpleNamespace
+
+    from bot.core.engine import SessionEngine
+
+    e = SimpleNamespace(session=SimpleNamespace(take_profit_usd=5.0, volume_target_usd=None), run_pnl=D("4.99"),
+                        run_volume=0.0)
+    assert SessionEngine._target_reached(e) == ""                      # type: ignore[arg-type]
+    e.run_pnl = D("5.00")                                              # the run's PnL across restarts (kv run_pnl)
+    assert SessionEngine._target_reached(e) == "take profit +$5.00 reached"   # type: ignore[arg-type]
+    e.session.take_profit_usd, e.session.volume_target_usd, e.run_volume = None, 100_000.0, 100_000.0
+    assert SessionEngine._target_reached(e) == "volume target $100,000 reached"   # type: ignore[arg-type]

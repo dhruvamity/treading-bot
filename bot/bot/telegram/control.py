@@ -60,6 +60,8 @@ class Control:
         self.bot_bin = bot_bin or str(Path(sys.executable).with_name("bot"))
         self.runs_file = self.root / app.state_dir / "telegram_runs.json"
         self.stop_asked: dict[str, float] = {}   # mode -> when a stop or close was last requested from here
+        self.stop_kind: dict[str, str] = {}      # mode -> "stop" (positions kept) or "close"
+        self.start_asked: dict[str, float] = {}  # mode -> when a run was last started from here
 
     # ------------------------------------------------------------------ paths / db
     def db_path(self, mode: str) -> Path:
@@ -238,12 +240,12 @@ class Control:
         self._kv_set(mode, "sizing_ok", "")
 
     def request_stop(self, mode: str, by: str) -> None:
-        self.stop_asked[mode] = time.time()
+        self.stop_asked[mode], self.stop_kind[mode] = time.time(), "stop"
         self._kv_set(mode, "control", json.dumps({"cmd": "stop", "by": by, "ts": time.time()}))
 
     def request_close(self, mode: str, by: str) -> None:
         """Close every position (maker, then taker), then stop the run."""
-        self.stop_asked[mode] = time.time()
+        self.stop_asked[mode], self.stop_kind[mode] = time.time(), "close"
         self._kv_set(mode, "control", json.dumps({"cmd": "close", "by": by, "ts": time.time()}))
 
     def signal_stop(self, mode: str) -> bool:
@@ -304,6 +306,7 @@ class Control:
         return out
 
     def start_run(self, name: str, *, live: bool) -> dict[str, Any]:
+        self.start_asked["live" if live else "paper"] = time.time()   # the starter says it started, not the watcher
         log_dir = self.root / self.app.logs_dir / "runs"
         log_dir.mkdir(parents=True, exist_ok=True)
         stamp = time.strftime("%Y%m%d-%H%M%S", time.gmtime())
@@ -335,18 +338,20 @@ class Control:
         rep = await _doctor([s], RunMode.LIVE, replacing=replacing)
         return (not rep.failed), rep.render()
 
-    async def cancel_all(self, mode: str, venue: str) -> str:
+    async def cancel_all(self, mode: str, venue: str) -> dict[str, Any]:
+        """{venue, net, account, open: orders the venue still lists afterwards}. Real accounts only."""
         from bot.cli import venue_cancel_all
 
         if mode == "paper":
-            return "paper orders live inside the paper bot: use Pause or Stop instead"
+            raise ValueError("paper orders live inside the paper bot: use Pause or Stop instead")
         return await venue_cancel_all(venue, None, mode == "live")
 
-    async def flatten(self, mode: str, venue: str, taker: bool) -> str:
+    async def flatten(self, mode: str, venue: str, taker: bool) -> dict[str, Any]:
+        """{positions, orders sent, open: positions a moment later, taker}. Real accounts only."""
         from bot.cli import venue_flatten
 
         if mode == "paper":
-            return "paper positions live inside the paper bot: Pause lets its exit orders work them off"
+            raise ValueError("paper positions live inside the paper bot: Pause lets its exit orders work them off")
         return await venue_flatten(venue, None, mode == "live", taker)
 
     # ------------------------------------------------------------------ reports and logs

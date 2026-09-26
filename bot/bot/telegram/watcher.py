@@ -1,8 +1,8 @@
 """Alerts the Telegram bot sends on its own, from the same state the status screen reads:
 
-- the trading bot stopped or started (a dead bot cannot alert about itself);
-- safe mode, a drawdown stop or a daily loss stop appeared or cleared;
-- today's PnL reached half, then all, of the daily loss limit;
+- the trading bot stopped, went down, or started (a dead bot cannot alert about itself);
+- safety stops cleared (the running bot itself alerts when one fires: a daily stop, the kill, safe mode);
+- today's PnL reached half of the daily stop;
 - fills: each one, an hourly summary, or nothing;
 - a digest shortly after 00:00 UTC with yesterday's numbers.
 
@@ -19,8 +19,9 @@ from dataclasses import asdict, dataclass, field
 from html import escape
 from pathlib import Path
 
+from bot.common.tgfmt import card, codes, section
 from bot.telegram.control import Control
-from bot.telegram.views import _risk, ago, day_pnl, fill_line, usd
+from bot.telegram.views import _risk, ago, day_pnl, fill_line, position_line, positions_of, usd
 
 Notify = Callable[[str, bool], Awaitable[None]]  # (html text, critical)
 
@@ -57,7 +58,7 @@ class _Mem:
     summary_start: float = field(default_factory=time.time)
     summary: dict[str, list[float]] = field(default_factory=dict)  # market -> [fills, maker volume]
     pnl_day: str = ""
-    pnl_level: int = 0            # 0 none, 1 half the limit alerted, 2 limit alerted
+    pnl_level: int = 0            # 0 none, 1 half the daily stop alerted, 2 past the stop (the bot alerts that)
     stop_requested_at: float = 0.0
 
 
@@ -97,55 +98,56 @@ class Watcher:
             # whose last heartbeat says it pulled its quotes and stopped (2026-09-26: a replace said "LIVE DOWN")
             asked = max(m.stop_requested_at, self.control.stop_asked.get(mode, 0.0))
             if now - asked < 900 or v.stopped:
-                await self._say(f"⏹ <b>{name}</b> stopped.")
+                pos = positions_of(v)
+                held = " · ".join(position_line(p) for p in pos) or "Flat"
+                if self.control.stop_kind.get(mode) == "close" and now - asked < 900:
+                    await self._say(card("⏹", f"{name} STOPPED", codes("Orders cancelled"), codes(f"Position: {held}")))
+                else:
+                    await self._say(card("⏹", f"{name} STOPPED", codes("Quotes cancelled"),
+                                         codes("Positions unchanged" + (f": {held}" if pos else ""))))
             else:
-                await self._say(f"🔴 <b>{name} DOWN</b> · no heartbeat {ago(v.heartbeat_age_s)} · resting quotes stay "
-                                "until the dead man's switch or the guardian cancels them · /status", critical=True)
-        elif v.running and not m.running:
-            await self._say(f"🟢 <b>{name}</b> started.")
+                await self._say(card("🔴", f"{name} DOWN", codes(f"Heartbeat lost · {ago(v.heartbeat_age_s)}"),
+                                     codes("Guardian / dead-man switch protecting orders")), critical=True)
+        elif v.running and not m.running and now - self.control.start_asked.get(mode, 0.0) > 300:
+            await self._say(card("🟢", f"{name} STARTED", codes("Heartbeat OK")))   # a start from here says so itself
         m.running = v.running
-        # ---- risk flags
+        # ---- risk flags: the running bot alerts each stop when it fires (with its numbers); here only the all-clear
         risk = tuple(_risk(v))
-        for r in risk:
-            if r not in m.risk:
-                await self._say(f"🔴 <b>{name}</b> · {r} · quoting stopped · /status · /resumeaftersl once checked",
-                                critical=r.startswith(("SAFE", "STOPPED")))
         if m.risk and not risk and v.running:
-            await self._say(f"🟢 <b>{name}</b> · safety stops cleared.")
+            await self._say(card("🟢", "SAFETY STOPS CLEARED", codes(f"{name} · quoting again")))
         m.risk = risk
-        # ---- daily PnL against the loss limit
+        # ---- daily PnL against the day stop in force (the bot's own, lifted by a run's sl=)
         day = dt.datetime.fromtimestamp(now, dt.UTC).strftime("%Y-%m-%d")
         if m.pnl_day != day:
             m.pnl_day, m.pnl_level = day, 0
         dp = day_pnl(v)
-        cap = sum(float(s.get("capital") or 0) for s in (v.snapshot or {}).get("sessions", []))
-        limit = cap * self.daily_loss_pct / 100
+        sess = (v.snapshot or {}).get("sessions", [])
+        limit = sum(float((s.get("stops") or {}).get("daily") or 0) for s in sess) or \
+            sum(float(s.get("capital") or 0) for s in sess) * self.daily_loss_pct / 100
         if self.prefs.pnl_alerts and dp is not None and limit > 0:
-            if dp <= -limit and m.pnl_level < 2:
+            if dp <= -limit:
                 m.pnl_level = 2
-                await self._say(f"🔴 <b>{name}</b> · day PnL {usd(dp)} hit the daily stop ({usd(-limit)}) · no new "
-                                "positions until 00:00 UTC", critical=True)
             elif dp <= -limit / 2 and m.pnl_level < 1:
                 m.pnl_level = 1
-                await self._say(f"🟡 <b>{name}</b> · day PnL {usd(dp)}, half the daily stop ({usd(-limit)})")
+                await self._say(card("⚠️", "HALF THE DAY STOP", codes(f"{name} · PnL {usd(dp)}",
+                                                                      f"Day stop {usd(-limit)}")))
         # ---- fills
         new = self.control.fills_since(mode, m.last_fill_ts)
         if new:
             m.last_fill_ts = max(f["ts_us"] for f in new)
             if self.prefs.fills == "each":
                 for i in range(0, len(new), 15):
-                    await self._say(f"💱 <b>{name}</b> fills\n<pre>" + "\n".join(fill_line(f) for f in new[i:i + 15])
-                                    + "</pre>")
+                    await self._say(card("💱", f"{name} FILLS", codes(*(fill_line(f) for f in new[i:i + 15]))))
             for f in new:
                 s = m.summary.setdefault(f["market"], [0.0, 0.0])
                 s[0] += 1
                 s[1] += f["price"] * f["size"] if f["maker"] else 0.0
         if self.prefs.fills == "summary" and now - m.summary_start >= self.prefs.summary_min * 60:
             if m.summary:
-                rows = [f"{mk:<6} {int(n):>4} fills  {usd(vol, sign=False):>10} maker" for mk, (n, vol) in
+                rows = [f"{mk} · {int(n)} fills · {usd(vol, sign=False)} maker" for mk, (n, vol) in
                         sorted(m.summary.items())]
-                await self._say(f"📈 <b>{name}</b> last {self.prefs.summary_min} min · day PnL {usd(dp)}\n<pre>"
-                                + "\n".join(rows) + "</pre>")
+                await self._say(card("📈", f"{name} · LAST {self.prefs.summary_min} MIN", codes(*rows),
+                                     codes(f"Day PnL {usd(dp)}")))
             m.summary, m.summary_start = {}, now
         elif self.prefs.fills != "summary":
             m.summary, m.summary_start = {}, now
@@ -163,9 +165,9 @@ class Watcher:
         for mode in self.control.known_modes():
             rep = self.control.report(mode, y)
             if rep:
-                parts.append(f"<b>{mode.upper()}</b>\n<pre>{_trim(rep)}</pre>")
+                parts.append(section(mode.upper(), [f"<pre>{_trim(rep)}</pre>"]))
         if parts:
-            await self._say(f"🗓 <b>Daily digest {y}</b>\n\n" + "\n\n".join(parts))
+            await self._say(card("🗓", f"DAILY DIGEST {y}", *parts))
 
 
 def _trim(md: str, n: int = 2500) -> str:

@@ -66,12 +66,12 @@ def test_mid_quotes_and_blocks() -> None:
     assert len(ex) == 1 and ex[0].reduce_only and ex[0].side is Side.SELL
 
 
-def test_bias_path_and_participation() -> None:
+def test_bias_target_and_participation() -> None:
     from bot.strategies import quoting as qt
 
-    assert qt.bias_target_usd("long_skew", 0.5, 20) == 20
-    assert qt.bias_target_usd("short_skew", 0.25, 20) == -10
-    assert qt.bias_target_usd("long_skew", 1.0, 20) == 0
+    # Tread's directional bias: a fixed target position (the quotes skew their sizes toward it), not a path
+    assert qt.bias_target_usd("long", 20) == 20 and qt.bias_target_usd("short", 20) == -20
+    assert qt.bias_target_usd("neutral", 20) == 0
     assert qt.participation_mult(30, 100, 25) == 1.5 and qt.participation_mult(10, 100, 25) == 1.0
     from bot.common.indicators import ema, rsi
 

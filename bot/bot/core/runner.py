@@ -352,7 +352,8 @@ class BotRunner:
                 self.risk.operator_paused = new
                 what = ", ".join(sorted({b for _, b in new})) or "nothing (all markets quoting)"
                 self.decisions.record("operator_pause", f"paused: {what}")
-                await self.alerter.send(Level.INFO, "operator_pause", f"{self.mode.value}: paused {what}")
+                await self.alerter.send(Level.INFO, "operator_pause",
+                                        f"⏸ NEW ORDERS PAUSED\n{self.mode.value.upper()} · {what}")
         raw = self.state.kv_get("control") or ""
         if raw:
             self.state.kv_set("control", "")
@@ -362,23 +363,25 @@ class BotRunner:
                 return
             if req.get("cmd") == "stop":
                 self.decisions.record("operator_stop", f"stop requested by {req.get('by') or 'operator'}")
-                await self.alerter.send(Level.WARN, "operator_stop", f"{self.mode.value}: stopping on request of "
-                                        f"{req.get('by') or 'operator'} (quotes cancelled, positions kept)")
+                # INFO: Telegram already answered the request that sent it, and says when the bot has stopped
+                await self.alerter.send(Level.INFO, "operator_stop", f"⏹ STOPPING\n{self.mode.value.upper()} · by "
+                                        f"{req.get('by') or 'operator'}\nQuotes cancelled · positions kept")
                 self._stop.set()
             elif req.get("cmd") == "close" and self._closing_since is None:
                 self._closing_since = time.monotonic()
                 for e in self.engines:
                     e.clock.begin_exit(now_us())
                 self.decisions.record("operator_close", f"close and stop requested by {req.get('by') or 'operator'}")
-                await self.alerter.send(Level.WARN, "operator_close", f"{self.mode.value}: closing positions, then "
-                                        f"stopping (requested by {req.get('by') or 'operator'})")
+                await self.alerter.send(Level.INFO, "operator_close", f"⏳ CLOSING\n{self.mode.value.upper()} · by "
+                                        f"{req.get('by') or 'operator'}\nPositions close, then the bot stops")
         if self._closing_since is not None:
             left = {f"{e.base}": str(self.state.position(e.venue, e.base)) for e in self.engines
                     if self.state.position(e.venue, e.base) != 0}
             if not left or time.monotonic() - self._closing_since > 600:
                 if left:
-                    await self.alerter.send(Level.CRIT, "operator_close", f"{self.mode.value}: stopping with open "
-                                            f"positions after 10 min of trying to close: {left}")
+                    await self.alerter.send(Level.CRIT, "operator_close", f"🚨 CLOSE INCOMPLETE\n"
+                                            f"{self.mode.value.upper()} · stopped after 10 min of trying\nOpen: "
+                                            + " · ".join(f"{b} {p}" for b, p in left.items()) + "\n\n/closeall")
                 self._stop.set()
 
     def snapshot(self) -> dict[str, Any]:
@@ -413,8 +416,11 @@ class BotRunner:
                              "pnl": str(pnl), "day_pnl": str(day_pnl) if day_pnl is not None else None,
                              "capital": str(e.capital), "size_capital": str(e.size_capital),
                              "stops": _stops(e.session),
-                             "run": {"pnl": str(e.run_pnl or 0), "limit": e.session.max_loss_usd}
-                             if e.session.max_loss_usd else None,
+                             "run": {"pnl": str(e.run_pnl or 0), "limit": e.session.max_loss_usd,
+                                     "tp": e.session.take_profit_usd, "volume": round(e.run_volume, 2),
+                                     "target": e.session.volume_target_usd, "done": e.finishing}
+                             if e.session.max_loss_usd or e.session.take_profit_usd or e.session.volume_target_usd
+                             else None,
                              "ticks": e.stats.ticks, "actions": e.stats.actions,
                              "rejects": e.stats.rejects, "errors": e.stats.errors, "quotes": asdict(e.quotes)})
         return {"ts_us": now, "mode": self.mode.value, "started_us": self.started_us, "markets": markets,
@@ -530,8 +536,8 @@ class BotRunner:
                 if any(not s.client_id for s in rep.unknown_live):
                     await ad.cancel_all(None)
             if rep.position_mismatch:
-                await self.alerter.send(Level.WARN, "reconcile", f"{v.value} position mismatch (venue trusted): "
-                                        f"{rep.position_mismatch}")
+                await self.alerter.send(Level.WARN, "reconcile", f"⚠️ POSITION MISMATCH\n{v.value} · the venue's "
+                                        f"position is used\n{rep.position_mismatch}")
 
     async def _reconcile_loop(self) -> None:
         """Every 5 minutes, and within 5 s of an adapter asking (an account stream went `degraded`)."""
@@ -558,22 +564,24 @@ class BotRunner:
             for k in check_keys(keys, now // 1000):
                 if k.level != "ok":
                     await self.alerter.send(Level.CRIT if k.level == "expired" else Level.WARN, f"key:{k.name}",
-                                            f"API key {k.name} {k.level}: {k.remaining_h:.0f} h left; rotate it")
+                                            ("🚨 API KEY EXPIRED" if k.level == "expired" else "⚠️ API KEY EXPIRING")
+                                            + f"\n{k.name} · {k.remaining_h:.0f} h left\n\nRotate it")
             if self.calendar.coverage_days(now, "fomc") < 30 or self.calendar.coverage_days(now, "cpi") < 14:
-                await self.alerter.send(Level.WARN, "calendar", "event calendar coverage is short: update "
-                                        "config/calendars/events.csv (CPI/NFP/FOMC)")
+                await self.alerter.send(Level.WARN, "calendar", "⚠️ EVENT CALENDAR SHORT\nCPI · NFP · FOMC dates run "
+                                        "out soon\nUpdate config/calendars/events.csv")
             if day != last_day and last_day:
                 marks = {(v, b): (vw.mark or vw.mid()) for (v, b), vw in self.hub.views.items() if vw.mid() is not None}
                 md = daily_report_md(last_day, self.ledger, {k: m for k, m in marks.items() if m is not None},
                                      {"mode": self.mode.value, "budget": self.governor.state()})
                 write_daily_report(self.app.reports_for(self.mode.value), last_day, md)
-                await self.alerter.send(Level.INFO, "daily", f"daily report {last_day} written")
+                await self.alerter.send(Level.INFO, "daily", f"🗓 DAILY REPORT\n{last_day} written")
             last_day = day
             await asyncio.sleep(3600)
 
     async def _safe_mode(self, venue: Venue, why: str) -> None:
         d = self.risk.enter_safe_mode(venue, why)
-        await self.alerter.send(Level.CRIT, "safe_mode", f"{venue.value} SAFE MODE: {d.reason}")
+        await self.alerter.send(Level.CRIT, "safe_mode", f"🚨 SAFE MODE\n{venue.value} · {d.reason}\n\nQuotes cancelled"
+                                " · /resumeaftersl once checked")
         ad = self.adapters.get(venue)
         if ad is not None:
             with contextlib.suppress(Exception):
@@ -599,8 +607,8 @@ class BotRunner:
         for sig in (signal.SIGINT, signal.SIGTERM):
             with contextlib.suppress(NotImplementedError):
                 loop.add_signal_handler(sig, self._stop.set)
-        await self.alerter.send(Level.INFO, "start", f"Bot started in {self.mode.value} mode "
-                                f"({', '.join(s.session_id for s in self.sessions)})")
+        await self.alerter.send(Level.INFO, "start", f"🟢 BOT STARTED\n{self.mode.value.upper()} · "
+                                f"{', '.join(s.session_id for s in self.sessions)}")
         try:
             if duration_s:
                 with contextlib.suppress(TimeoutError):

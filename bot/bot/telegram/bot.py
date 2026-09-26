@@ -26,6 +26,8 @@ from typing import Any
 
 from bot.common import settings
 from bot.common.logging import Log, redact_str
+from bot.common.tgfmt import b, card, codes, plain_card, section
+from bot.common.tgfmt import code as mono
 from bot.core.balances import BalanceLog
 from bot.telegram import dashboard
 from bot.telegram.api import Keyboard, TelegramAPI, TelegramError, split_html
@@ -33,32 +35,34 @@ from bot.telegram.control import MODES, Control, pause_where
 from bot.telegram.views import (
     COMMANDS,
     HELP,
-    _sizes,
+    _risk,
     ago,
     balance_text,
     candidate_lines,
+    cannot_start,
     confirm_keyboard,
     dashboard_keyboard,
-    ladder_keyboard,
-    ladder_text,
+    doctor_checks,
+    form_keyboard,
+    form_text,
     markets_keyboard,
     menu_keyboard,
     orders_text,
     pick_keyboard,
     pilot_keyboard,
-    pilot_text,
     pnl_text,
     positions_text,
     profile_keyboard,
     profile_text,
     refresh_keyboard,
-    run_keyboard,
-    run_text,
+    running_block,
     sessions_text,
-    settings_keyboard,
+    set_value,
     settings_text,
     short,
+    size_lines,
     status_text,
+    what,
 )
 from bot.telegram.watcher import Prefs, Watcher
 
@@ -66,31 +70,43 @@ log = Log("telegram_bot")
 VENUES = ("arcus",)
 # The commands' earlier names still work (not listed in Telegram's menu), so old habits and old buttons keep working.
 ALIASES = {"scout": "top3", "pilot": "openpositions", "report": "yesterdayreport", "pause": "pauseneworders",
-           "resume": "resumeaftersl", "flatten": "closeall"}
+           "resume": "resumeaftersl", "flatten": "closeall", "aggressive": "top3", "breakeven": "cheapest",
+           "form": "run"}
 CONFIRM_TTL_S = 120
 DASH_FILE = "telegram_dashboard.json"   # the live /dashboard message: {chat_id, message_id, since}
 SCAN_WAIT_S = 30 * 60                   # no scan running or queued this long after a request: say so
 SCAN_GIVE_UP_S = 6 * 3600               # stop waiting for a scan after this long (a slow one is still running)
 
 
-MAX_LOSS_KEYS = ("sl=", "maxloss=", "max_loss=")
+# the run's own limits (Tread's Stop Loss, Take Profit and Volume): /run ... sl=10 tp=5 vol=100k
+LIMIT_KEYS = {"sl": "max_loss_usd", "maxloss": "max_loss_usd", "max_loss": "max_loss_usd", "tp": "take_profit_usd",
+              "vol": "volume_target_usd", "volume": "volume_target_usd"}
 
 
-def _take_max_loss(args: list[str]) -> tuple[list[str], float | str | None]:
-    """/run ... sl=30 (or sl=$30): (the other arguments, the dollar loss limit); a string is the error to show."""
-    rest, out = [], None
+def _amount(text: str) -> float:
+    """"30", "$30", "100k", "1.5m", "250,000" -> dollars."""
+    t = text.strip().lower().lstrip("$").replace(",", "")
+    mult = {"k": 1e3, "m": 1e6}.get(t[-1:], 1.0)
+    return float(t[:-1] if mult != 1.0 else t) * mult
+
+
+def _take_limits(args: list[str]) -> tuple[list[str], dict[str, float] | str]:
+    """/run ... sl=30 tp=5 vol=100k: (the other arguments, {session field: dollars}); a string is the error to show."""
+    rest, out = [], {}
     for a in args:
-        key = next((k for k in MAX_LOSS_KEYS if a.lower().startswith(k)), None)
-        if key is None:
+        key, eq, val = a.partition("=")
+        field_ = LIMIT_KEYS.get(key.lower()) if eq else None
+        if field_ is None:
             rest.append(a)
             continue
         try:
-            v = float(a[len(key):].strip().lstrip("$").replace(",", ""))
+            v = _amount(val)
         except ValueError:
-            return args, f"sl= takes dollars, e.g. sl=30 (got {escape(a)})"
-        if not 0.5 <= v <= 1_000_000:
-            return args, "sl= must be between $0.50 and $1,000,000"
-        out = v
+            return args, f"{key}= takes dollars, e.g. {key}=30 (got {a})"
+        lo, hi = (1000.0, 1e9) if field_ == "volume_target_usd" else (0.5, 1_000_000.0)
+        if not lo <= v <= hi:
+            return args, f"{key}= must be between ${lo:,.2f} and ${hi:,.0f}"
+        out[field_] = v
     return rest, out
 
 
@@ -174,9 +190,10 @@ class TelegramBot:
         me = await self.api.call("getMe")
         self.username = str((me or {}).get("username") or "")
         await self.api.set_commands(COMMANDS)
-        views = [self.control.view(m) for m in self.control.known_modes()]
-        await self.api.send(self.owner_chat_id, "🤖 <b>Online</b>" + (" · read-only" if self.read_only else "")
-                            + "\n" + status_text(views), keyboard=menu_keyboard(), silent=True)
+        d = dashboard.collect(self.control)
+        await self.api.send(self.owner_chat_id, dashboard.control_text(
+            d, "Bot Online", ["Read-only: controls are off"] if self.read_only else None),
+            keyboard=menu_keyboard(), silent=True)
         await asyncio.gather(self._poll_loop(), self._watch_loop(), self._dashboard_loop())
 
     async def _poll_loop(self) -> None:
@@ -195,7 +212,7 @@ class TelegramBot:
                 except Exception as e:  # one bad update must not stop the bot
                     log.error("update_failed", reason=type(e).__name__, data={"err": str(e)[:300]}, exc_info=True)
                     with contextlib.suppress(TelegramError):
-                        await self.api.send(self.owner_chat_id, f"⚠️ {escape(redact_str(str(e))[:300])}")
+                        await self.api.send(self.owner_chat_id, card("⚠️", "ERROR", codes(redact_str(str(e))[:300])))
 
     async def _watch_loop(self) -> None:
         while True:
@@ -213,15 +230,15 @@ class TelegramBot:
             return
         events, self.pilot_offset = self.pilot.events_since(self.pilot_offset)
         for e in events:
-            text = escape(str(e.get("text", "")))
+            text = plain_card(str(e.get("text", "")))   # the pilot writes plain text: title, then lines
             top = e.get("top")
             if top is not None and e.get("kind") in ("offer", "paused", "suggest"):
-                profile = str(e.get("profile") or "breakeven")
-                text += ("\n" + candidate_lines(top, cost=profile != "breakeven")) if top else ""
+                profile = str(e.get("profile") or "volume")
+                text += ("\n\n" + candidate_lines(top, cost=True)) if top else ""
                 await self.api.send(self.owner_chat_id, text, keyboard=pick_keyboard(top, profile),
                                     silent=e.get("kind") == "offer")
             elif e.get("kind") == "deployed":
-                await self.api.send(self.owner_chat_id, text, keyboard=[[("📺 Live dashboard", "dashboard")]],
+                await self.api.send(self.owner_chat_id, text, keyboard=[[("📊 Dashboard", "dashboard")]],
                                     silent=True)
             else:
                 await self.api.send(self.owner_chat_id, text, silent=e.get("kind") not in ("failed", "paused"))
@@ -246,7 +263,7 @@ class TelegramBot:
         if not text:
             return
         if text.split()[0].split("@")[0] == "/whoami":
-            await self.api.send(ctx.chat_id, f"chat id <code>{ctx.chat_id}</code> · user id <code>{ctx.user_id}</code>")
+            await self.api.send(ctx.chat_id, card("🆔", "WHO AM I", codes(f"Chat id {ctx.chat_id} · user id {ctx.user_id}")))
             return
         if not self.authorized(ctx.chat_id, ctx.user_id):
             log.warning("unauthorized", data={"chat": ctx.chat_id, "user": ctx.user_id})
@@ -255,7 +272,7 @@ class TelegramBot:
             await self._code(ctx, text)
             return
         if not text.startswith("/"):
-            await self.api.send(ctx.chat_id, "Send /menu or /help.")
+            await self.api.send(ctx.chat_id, card("❔", "Send a Command", codes("/menu or /help")))
             return
         head, *args = text.split()
         cmd = head[1:].split("@")[0].lower()
@@ -273,41 +290,43 @@ class TelegramBot:
                 "ping": self.c_ping, "alerts": self.c_alerts, "mute": self.c_mute, "unmute": self.c_unmute,
                 "ok": self.c_ok, "no": self.c_no, "balance": self.c_balance, "settings": self.c_settings,
                 "dashboard": self.c_dashboard, "dashstop": self.c_dashstop, "dashresume": self.c_dashresume,
-                "volume": self.c_volume, "aggressive": self.c_aggressive, "maxvolume": self.c_maxvolume,
-                "pick": self.c_pick, "rm": self.c_rm, "rs": self.c_rs, "rl": self.c_rl,
-                "lev": self.c_old_button, "deploy": self.c_old_button}
+                "volume": self.c_volume, "cheapest": self.c_cheapest, "maxvolume": self.c_maxvolume,
+                "pick": self.c_pick, "rm": self.c_rm, "f": self.c_f,
+                "rs": self.c_old_button, "rl": self.c_old_button, "lev": self.c_old_button,
+                "deploy": self.c_old_button}
         write = {"pauseneworders": self.c_pause, "unpause": self.c_unpause, "stop": self.c_stop,
                  "resumeaftersl": self.c_resume, "run": self.c_run, "doctor": self.c_doctor,
-                 "cancelall": self.c_cancelall, "closeall": self.c_flatten, "rd": self.c_rd, "golive": self.c_golive,
+                 "cancelall": self.c_cancelall, "closeall": self.c_flatten, "fd": self.c_fd,
+                 "rd": self.c_old_button, "golive": self.c_golive,
                  "pilotclose": self.c_pilotclose, "set": self.c_set, "scannow": self.c_scannow,
                  "rescan": self.c_rescan}
         if cmd in read:
             await read[cmd](ctx, args)
         elif cmd in write:
             if self.read_only:
-                await self.reply(ctx, "Read-only bot: controls are off.")
+                await self.reply(ctx, card("🔒", "READ-ONLY", codes("Controls are off on this bot")))
                 return
             await write[cmd](ctx, args)
         else:
-            await self.reply(ctx, f"Unknown /{escape(cmd)} · /help")
+            await self.reply(ctx, card("❔", "UNKNOWN COMMAND", codes(f"/{cmd}"), codes("/help")))
 
     # ------------------------------------------------------------------ scout / pilot: the lists
     async def c_scout(self, ctx: Ctx, args: list[str]) -> None:
-        """/top3 [breakeven|volume|aggressive|max]: that list's top 3 from the last scan, with Run buttons."""
+        """/top3 [volume|cheapest|max]: that list's top 3 from the last scan, with Run buttons."""
         from bot.scout.profiles import profile_of
 
         try:
             prof = profile_of(args[0] if args else None)
         except ValueError as e:
-            await self.reply(ctx, escape(str(e)))
+            await self.reply(ctx, card("❌", "UNKNOWN LIST", codes(str(e))))
             return
         await self._list(ctx, prof.key)
 
     async def c_volume(self, ctx: Ctx, args: list[str]) -> None:
         await self._list(ctx, "volume")
 
-    async def c_aggressive(self, ctx: Ctx, args: list[str]) -> None:
-        await self._list(ctx, "aggressive")
+    async def c_cheapest(self, ctx: Ctx, args: list[str]) -> None:
+        await self._list(ctx, "cheapest")
 
     async def c_maxvolume(self, ctx: Ctx, args: list[str]) -> None:
         await self._list(ctx, "max")
@@ -315,19 +334,22 @@ class TelegramBot:
     async def _list(self, ctx: Ctx, profile: str, *, force: bool = False) -> None:
         """The list from the last scan, and a scan when that one is stale (or asked for): its ETA under the list."""
         if self.pilot is None:
-            await self.reply(ctx, "No pilot on this server.")
+            await self.reply(ctx, card("ℹ️", "NO PILOT", codes("No pilot on this server")))
             return
         note = self._scan_note(ctx.chat_id, profile, force=force)
         await self.reply(ctx, profile_text(self.pilot.latest_scan(), profile, self.pilot.budget(), time.time(), note),
                          profile_keyboard(profile, self.pilot.top(profile)))
 
     async def c_pilot(self, ctx: Ctx, args: list[str]) -> None:
+        """/openpositions: the owner's positions template, and what is deployed under it."""
         if self.pilot is None:
-            await self.reply(ctx, "No pilot on this server.")
+            await self.c_positions(ctx, args)
             return
         a = self.pilot.active()
         paper = bool(a and a["mode"] == "paper" and self.control.is_running("paper"))
-        await self.reply(ctx, pilot_text(self.pilot), pilot_keyboard(paper=paper))
+        mode = a["mode"] if a else (self.control.default_mode() or "live")
+        await self.reply(ctx, positions_text(self.control.view(mode), running=running_block(self.pilot)),
+                         pilot_keyboard(paper=paper))
 
     async def c_rescan(self, ctx: Ctx, args: list[str]) -> None:
         from bot.scout.profiles import profile_of
@@ -335,7 +357,7 @@ class TelegramBot:
         try:
             prof = profile_of(args[0] if args else None)
         except ValueError as e:
-            await self.reply(ctx, escape(str(e)))
+            await self.reply(ctx, card("❌", "UNKNOWN LIST", codes(str(e))))
             return
         await self._list(ctx, prof.key, force=True)
 
@@ -355,12 +377,12 @@ class TelegramBot:
         if st.get("running"):
             started = float(st.get("started") or now)
             eta = eta_s(st, int(st.get("workers") or 1), next_is_full(scan, started))
-            note = "🔎 Scan running" + (f" · ~{ago(max(60.0, eta - (now - started)))} left" if eta else "")
+            note = "Scan running" + (f" · ~{ago(max(60.0, eta - (now - started)))} left" if eta else "")
         elif force or trigger.exists() or age > 1.5 * 60 * float(every or 30):
             trigger.parent.mkdir(parents=True, exist_ok=True)
             trigger.touch()
             eta = eta_s(st, scan_workers(want, bool(self.control.running_modes())), next_is_full(scan, now))
-            note = "🔎 Scan started" + (f" · ~{ago(eta)}" if eta else "")
+            note = "Scan started" + (f" · ~{ago(eta)}" if eta else "")
         else:
             return ""
         if self.pilot is None:
@@ -385,23 +407,23 @@ class TelegramBot:
                 await self.api.send(w["chat"], profile_text(scan, w["profile"], self.pilot.budget(), time.time()),
                                     keyboard=profile_keyboard(w["profile"], self.pilot.top(w["profile"])))
             elif not busy and waited > SCAN_WAIT_S:
-                await self.api.send(w["chat"], f"⌛ No scan finished in {ago(waited)}. Is the scout running? "
-                                    "<code>bot status</code>")
+                await self.api.send(w["chat"], card("⌛", "NO SCAN FINISHED",
+                                                    codes(f"Waited {ago(waited)} · is the scout running?", "bot status")))
             elif waited < SCAN_GIVE_UP_S:
                 keep.append(w)
         self.scan_waiters = keep
 
     def _pick_args(self, args: list[str]) -> tuple[str, int] | None:
-        """[profile] k: button data from before the lists (plain "pick 1") means the breakeven list."""
+        """[profile] k: button data from before the lists (plain "pick 1") means the default list."""
         if args and args[0].isdigit():
-            return "breakeven", int(args[0])
+            return "volume", int(args[0])
         if len(args) >= 2 and args[1].isdigit():
             return args[0], int(args[1])
         return None
 
     async def c_pick(self, ctx: Ctx, args: list[str]) -> None:
-        """▶️ k on a list: that setup's whole leverage ladder, the list's pick starred."""
-        from bot.scout.pilot import setting_id, setting_of
+        """▶️ k on a list: the run form with that setup, at the leverage the list backtested."""
+        from bot.scout.pilot import setup_of
 
         parsed = self._pick_args(args)
         if self.pilot is None or parsed is None:
@@ -410,20 +432,19 @@ class TelegramBot:
         try:
             c = self.pilot.pick(k, profile, "rec")
         except ValueError as e:
-            await self.reply(ctx, escape(str(e)))
+            await self.reply(ctx, card("❌", "CANNOT PICK", codes(str(e))))
             return
-        await self._ladder(ctx, c["market"], setting_id(setting_of(c)), profile, star=float(c["leverage"]))
+        await self._form(ctx, c["market"], setup_of(c), float(c["leverage"]), profile=profile)
 
     async def c_old_button(self, ctx: Ctx, args: list[str]) -> None:
-        await self.reply(ctx, "That button is from an older version. /top3 or /run.")
+        await self.reply(ctx, card("ℹ️", "OLD BUTTON", codes("From an older version · /top3 or /run")))
 
-    # ------------------------------------------------------------------ run any setup: market -> setting -> leverage
+    # ------------------------------------------------------------------ run any setup: the run form
     async def c_run(self, ctx: Ctx, args: list[str]) -> None:
-        """/run: pick a market, a setting and a leverage (the whole ladder), then Paper or LIVE. /run QQQ [setting]
-        [20x|max] [paper|live] [sl=30] jumps ahead (sl: the most the run may lose, in dollars); /run <session file>
-        starts a session file as before."""
-        from bot.scout.pilot import setting_id
-
+        """/run: the run form (Tread.fi's order form as buttons) for a market. /run BTC mid 0 long 40x live sl=10 tp=5
+        vol=100k: any part may be left out (the form opens with the rest); with paper or live and a setup it goes
+        straight to the confirmation. Old names still work (/run BTC touch 0bp 40x live). /run <session file> starts
+        a session file as before."""
         names = {x["name"]: x for x in self.control.sessions()}
         if args and args[0] in names:
             await self._run_session(ctx, args[0], any(a.lower() == "live" for a in args[1:]), names[args[0]])
@@ -432,100 +453,150 @@ class TelegramBot:
             await self.reply(ctx, sessions_text(list(names.values()), self.control.runs()))
             return
         if not args:
-            await self.reply(ctx, "🎯 <b>Run any setup</b> · market", markets_keyboard(self.pilot.latest_scan()))
+            await self.reply(ctx, card("🎛", "Run Form", codes("Pick a market")),
+                             markets_keyboard(self.pilot.latest_scan()))
             return
-        args, max_loss = _take_max_loss(args)
-        if isinstance(max_loss, str):
-            await self.reply(ctx, max_loss)
+        args, limits = _take_limits(args)
+        if isinstance(limits, str):
+            await self.reply(ctx, card("❌", "BAD LIMIT", codes(limits)))
             return
         parsed = self._parse_run(args)
         if isinstance(parsed, str):
-            await self.reply(ctx, parsed)
+            await self.reply(ctx, card("❌", "CANNOT RUN", codes(*parsed.split("\n"))))
             return
-        market, setting, lev, mode = parsed
-        if max_loss and (setting is None or lev is None or mode is None):
-            await self.reply(ctx, "With sl= give the whole setup: <code>/run BTC touch 0bp 20x live sl=30</code>")
+        market, setup, lev, mode = parsed
+        if mode is not None and setup is not None:
+            await self._deploy_flow(ctx, market, setup.name, lev or "max", "manual", live=mode == "live",
+                                    limits=limits)
             return
-        if setting is None:
-            await self._settings(ctx, market)
-        elif lev is None:
-            await self._ladder(ctx, market, setting_id(setting), "manual")
-        elif mode is None:
-            await self._run_screen(ctx, market, setting_id(setting), lev, "manual")
-        else:
-            await self._deploy_flow(ctx, market, setting, lev, "manual", live=mode == "live", max_loss=max_loss)
+        await self._form(ctx, market, setup, lev, limits)
 
-    def _parse_run(self, args: list[str]) -> tuple[str, str | None, float | str | None, str | None] | str:
-        """QQQ "touch 1bp" 20x live -> ("QQQ-USD", "touch 1bp", 20.0, "live"); a string is the error to show."""
-        from bot.scout.scan import BY_NAME
+    def _parse_run(self, args: list[str]) -> tuple[str, Any, float | str | None, str | None] | str:
+        """["BTC", "mid", "+1", "long", "40x", "live"] -> ("BTC-USD", Setup(mid, 1, long), 40.0, "live"), in any
+        order after the market; a string is the error to show (plain lines)."""
+        from bot.strategies import setup as su
 
         markets = {c["market"] for c in (self.pilot.latest_scan() or {}).get("all") or []} if self.pilot else set()
         m = args[0].upper()
         market = m if "-" in m else f"{m}-USD"
         if market not in markets:
-            return f"Unknown market {escape(args[0])}. /run lists them."
-        rest = [a.strip("\"'“”") for a in args[1:]]
-        mode = rest.pop().lower() if rest and rest[-1].lower() in ("paper", "live") else None
+            return f"Unknown market {args[0]}\n/run lists them"
+        mode: str | None = None
         lev: float | str | None = None
-        if rest and (rest[-1].lower() == "max" or rest[-1].lower().rstrip("x").replace(".", "", 1).isdigit()):
-            t = rest.pop().lower()
-            lev = "max" if t == "max" else float(t.rstrip("x"))
-        if not rest:
-            return (market, None, None, None) if lev is None and mode is None else \
-                f"Which setting? /run {escape(short(market))} lists them."
-        want = " ".join(" ".join(rest).replace(",", " ").split()).lower()
-        setting = next((n for n in BY_NAME if " ".join(n.replace(",", " ").split()).lower() == want), None)
-        if setting is None:
-            return f"Unknown setting {escape(' '.join(rest))}. /run {escape(short(market))} lists them."
-        return market, setting, lev, mode
+        words = []
+        for a in (x.strip("\"'“”") for x in args[1:]):
+            t = a.lower()
+            if t in ("paper", "live"):
+                mode = t
+            elif t == "max" or (t.endswith("x") and t[:-1].replace(".", "", 1).isdigit()):
+                lev = "max" if t == "max" else float(t[:-1])
+            else:
+                words.append(a)
+        if not words:
+            return (market, None, lev, None) if mode is None else \
+                f"Which setup? e.g. /run {short(market)} mid 0 {mode}"
+        try:
+            return market, su.parse(" ".join(words)), lev, mode
+        except ValueError as e:
+            return f"{e}\n/run {short(market)} opens the form"
+
+    def _default_setup(self, market: str) -> tuple[Any, float | str]:
+        """What the form opens with: the market's pick in the Most Volume list, else its most-volume backtest, else
+        Mid 0 Neutral; at the market's maximum leverage."""
+        from bot.scout import profiles
+        from bot.scout.pilot import setup_of
+        from bot.strategies import setup as su
+
+        assert self.pilot is not None
+        scan = self.pilot.latest_scan()
+        rows = [c for c in profiles.top(scan, profiles.DEFAULT, self.pilot.budget(), n=100) if c["market"] == market]
+        rows = rows or sorted((c for c in self.pilot.rows(market) if c.get("days")),
+                              key=lambda c: -float(c["volume_day"]))
+        for c in rows:
+            with contextlib.suppress(ValueError):
+                return setup_of(c), "max"
+        return su.Setup(), "max"
+
+    async def _form(self, ctx: Ctx, market: str, setup: Any = None, lev: float | str | None = None,
+                    limits: dict[str, float] | None = None, profile: str = "manual") -> None:
+        """The run form for one market (edited in place when it came from one of its buttons). profile: the list a
+        pick came from; the setup is judged by it while it stays in it (Pilot.review), else it is the owner's own."""
+        from bot.scout.pilot import stale_note
+
+        assert self.pilot is not None
+        if setup is None:
+            setup, lev0 = self._default_setup(market)
+            lev = lev or lev0
+        await self._fresh_balance()
+        try:
+            c = self._find(market, setup.name, lev or "max", profile)
+        except ValueError as e:
+            await self.reply(ctx, card("❌", "CANNOT RUN", codes(str(e))))
+            return
+        from bot.scout.scan import BY_NAME
+
+        lim = limits or {}
+        c = {**c, **lim, "in_menu": setup.name in BY_NAME}
+        live_ok = os.environ.get("BOT_PILOT_LIVE") == "1"
+        running = [m for m in ("paper", "live") if self.control.is_running(m)]
+        await self.reply(ctx, form_text(c, self.pilot.budget(), running, live_ok,
+                                        stale_note(self.pilot.latest_scan())),
+                         form_keyboard(market, setup, float(c["leverage"]), self._leverages(market),
+                                       lim.get("max_loss_usd") or 0.0, lim.get("volume_target_usd") or 0.0,
+                                       lim.get("take_profit_usd") or 0.0, live_ok, profile))
+
+    def _leverages(self, market: str) -> list[float]:
+        """The form's leverage buttons: the market's maximum and the ladder below it, and any the scan backtested."""
+        assert self.pilot is not None
+        return sorted({*self.pilot.leverages(market), *(float(r["leverage"]) for r in self.pilot.rows(market))},
+                      reverse=True)[:6]
+
+    @staticmethod
+    def _form_args(args: list[str]) -> tuple[str, Any, float, dict[str, float], str] | None:
+        """Button data of the form: market, setup id, leverage, run stop $, volume target $k, take profit $, list."""
+        from bot.scout.profiles import PROFILES
+        from bot.strategies import setup as su
+
+        if len(args) < 7 or args[6] not in PROFILES:
+            return None
+        s = su.from_sid(args[1])
+        try:
+            lev, sl, vol, tp = float(args[2]), float(args[3]), float(args[4]) * 1000, float(args[5])
+        except ValueError:
+            return None
+        if s is None:
+            return None
+        lim = {k: v for k, v in (("max_loss_usd", sl), ("volume_target_usd", vol), ("take_profit_usd", tp)) if v > 0}
+        return args[0], s, lev, lim, args[6]
 
     async def c_rm(self, ctx: Ctx, args: list[str]) -> None:
+        """A market button under /run: its run form."""
         if args and self.pilot is not None:
-            await self._settings(ctx, args[0])
+            await self._form(ctx, args[0])
 
-    async def _settings(self, ctx: Ctx, market: str) -> None:
-        assert self.pilot is not None
-        rows = self.pilot.rows(market)
-        if not rows:
-            await self.reply(ctx, f"{escape(market)} is not in the last scan.")
+    async def c_f(self, ctx: Ctx, args: list[str]) -> None:
+        """A field of the run form changed: the form again, with the new setup's backtest."""
+        got = self._form_args(args)
+        if got is None or self.pilot is None:
+            await self.c_old_button(ctx, args)
             return
-        await self.reply(ctx, f"🎯 <b>{escape(short(market))}</b> · setting (best leverage)",
-                         settings_keyboard(market, rows))
+        market, s, lev, lim, profile = got
+        await self._form(ctx, market, s, lev, lim, profile)
 
-    async def c_rs(self, ctx: Ctx, args: list[str]) -> None:
-        if len(args) >= 2 and self.pilot is not None:
-            await self._ladder(ctx, args[0], args[1], args[2] if len(args) > 2 else "manual")
-
-    async def _ladder(self, ctx: Ctx, market: str, sid: str, profile: str, star: float | None = None) -> None:
-        from bot.scout.pilot import setting_by_id
-
-        assert self.pilot is not None
-        setting = setting_by_id(sid)
-        if setting is None:
-            await self.reply(ctx, "Unknown setting. /run")
+    async def c_fd(self, ctx: Ctx, args: list[str]) -> None:
+        """📝 Paper / 🔴 LIVE on the run form."""
+        got = self._form_args(args[:7])
+        if got is None or self.pilot is None or len(args) < 8:
+            await self.c_old_button(ctx, args)
             return
-        rows = self.pilot.rows(market, setting)
-        have = {round(float(r["leverage"]), 2) for r in rows}
-        rows += [{"leverage": x, "not_backtested": True} for x in self.pilot.leverages(market) if round(x, 2) not in have]
-        rows.sort(key=lambda r: -float(r["leverage"]))
-        if not rows:
-            await self.reply(ctx, f"{escape(short(market))}: no market data yet. /run")
-            return
-        await self.reply(ctx, ladder_text(market, setting, rows, self.pilot.budget(), star),
-                         ladder_keyboard(market, sid, rows, profile))
+        market, s, lev, lim, profile = got
+        await self._deploy_flow(ctx, market, s.name, lev, profile, live=args[7] == "live", limits=lim)
 
-    async def c_rl(self, ctx: Ctx, args: list[str]) -> None:
-        if len(args) >= 3 and self.pilot is not None:
-            with contextlib.suppress(ValueError):
-                await self._run_screen(ctx, args[0], args[1], float(args[2]), args[3] if len(args) > 3 else "manual")
-
-    def _find(self, market: str, sid_or_name: str, lev: float | str, profile: str) -> dict[str, Any]:
+    def _find(self, market: str, setting: str, lev: float | str, profile: str) -> dict[str, Any]:
         """The scan row to run, judged by `profile` when it is in that list, else as the owner's own pick."""
-        from bot.scout.pilot import setting_by_id
         from bot.scout.profiles import profile_of, verdict
 
         assert self.pilot is not None
-        setting = setting_by_id(sid_or_name) or sid_or_name
         c: dict[str, Any] = self.pilot.find(market, setting, lev)
         p = profile_of(profile)
         if p.listed and not verdict(c, p, self.pilot.budget()):
@@ -552,106 +623,77 @@ class TelegramBot:
                 source="telegram", account_index=idx, equity=snap["equity"], free=snap["free"],
                 net_deposits=snap["net_deposits"])
 
-    async def _run_screen(self, ctx: Ctx, market: str, sid: str, lev: float | str, profile: str) -> None:
-        from bot.scout.pilot import setting_id, setting_of
-
-        assert self.pilot is not None
-        await self._fresh_balance()
-        try:
-            c = self._find(market, sid, lev, profile)
-        except ValueError as e:
-            await self.reply(ctx, escape(str(e)))
-            return
-        from bot.scout.pilot import stale_note
-
-        live_ok = os.environ.get("BOT_PILOT_LIVE") == "1"
-        running = [m for m in ("paper", "live") if self.control.is_running(m)]
-        stale = stale_note(self.pilot.latest_scan())
-        await self.reply(ctx, run_text(c, self.pilot.budget(), c["profile"], running, live_ok)
-                         + (f"\n{escape(stale)}" if stale else ""),
-                         run_keyboard(market, setting_id(setting_of(c)), float(c["leverage"]), c["profile"], live_ok))
-
-    async def c_rd(self, ctx: Ctx, args: list[str]) -> None:
-        """📝 Paper / 🔴 LIVE on the run screen: rd <market> <setting id> <leverage> <profile> <paper|live>."""
-        from bot.scout.pilot import setting_by_id
-
-        if len(args) < 5 or self.pilot is None:
-            return
-        setting = setting_by_id(args[1])
-        if setting is None:
-            await self.c_old_button(ctx, args)
-            return
-        with contextlib.suppress(ValueError):
-            await self._deploy_flow(ctx, args[0], setting, float(args[2]), args[3], live=args[4] == "live")
-
     async def c_golive(self, ctx: Ctx, args: list[str]) -> None:
         """🔴 Go LIVE on a running paper deployment: the same market, setting and leverage, with real money."""
         from bot.scout.pilot import setting_of
 
         a = self.pilot.active() if self.pilot is not None else None
         if not a or a["mode"] != "paper":
-            await self.reply(ctx, "No paper run to take live. /openpositions")
+            await self.reply(ctx, card("ℹ️", "NO PAPER RUN", codes("Nothing to take live · /openpositions")))
             return
         lev = (a.get("backtest") or {}).get("leverage") or float(a["config"].split(" @ ")[1].rstrip("x"))
+        limits = {k: float(a[k]) for k in ("max_loss_usd", "take_profit_usd", "volume_target_usd") if a.get(k)}
         await self._deploy_flow(ctx, a["market"], setting_of(a), float(lev), a.get("profile") or "manual", live=True,
-                                max_loss=a.get("max_loss_usd"))
+                                limits=limits)
 
     async def _deploy_flow(self, ctx: Ctx, market: str, setting: str, lev: float | str, profile: str, *,
-                           live: bool, max_loss: float | None = None) -> None:
+                           live: bool, limits: dict[str, float] | None = None) -> None:
         """Paper: a Confirm button. LIVE: BOT_PILOT_LIVE=1, a passing doctor, then a typed one-time code.
-        max_loss: the owner's loss limit for the run (sl=)."""
+        limits: the run's own limits, {max_loss_usd, take_profit_usd, volume_target_usd} (sl=, tp=, vol=)."""
+        from bot.scout.pilot import limit_lines, setting_of
+
         assert self.pilot is not None
         await self._fresh_balance()
         try:
             c = self._find(market, setting, lev, profile)
         except ValueError as e:
-            await self.reply(ctx, escape(str(e)))
+            await self.reply(ctx, card("❌", "CANNOT RUN", codes(str(e))))
             return
-        c = {**c, "max_loss_usd": max_loss}
-        what = f"{escape(short(c['market']))} · {escape(setting)} · {float(c['leverage']):g}x"
-        args_ = {"market": c["market"], "setting": setting, "lev": float(c["leverage"]), "profile": c["profile"],
-                 "live": live, "max_loss": max_loss}
+        limits = dict(limits or {})
+        c = {**c, **limits}
+        w = what(c)
+        args_ = {"market": c["market"], "setting": setting_of(c), "lev": float(c["leverage"]),
+                 "profile": c["profile"], "live": live, "limits": limits}
         mode = "live" if live else "paper"
         # alive, not just running: a bot that is closing has stopped its heartbeat but not exited yet
         alive = self.control.alive(mode)
         running = self.pilot.active() if alive else None
         paused = self.control.paused(mode)
-        notes = ([f"🛑 Stops for good once this run loses {escape(f'${max_loss:,.2f}')} (the daily stop and kill "
-                  "are raised to match; the position stop stays)"] if max_loss else []) + \
-            ([f"↩️ Replaces the running {mode.upper()} bot ({escape(short(running['market']))} · "
-              f"{escape(running['config'])}): it closes its orders and position first"] if running else
-             [f"↩️ Starts once the {mode.upper()} bot that is stopping has exited"] if alive else []) + \
-            ([f"▶️ Clears your pause on new orders ({escape(pause_where(paused))})"] if paused else [])
+        notes = codes(*limit_lines(c, ":"),
+                      f"Replaces the running {mode.upper()} bot ({short(running['market'])} · {running['config']}): "
+                      "it closes its orders and position first" if running else
+                      f"Starts once the {mode.upper()} bot that is stopping has exited" if alive else "",
+                      f"Clears your pause on new orders ({pause_where(paused)})" if paused else "")
         if not live:
-            await self._ask(ctx, "deploy", args_, f"📝 Paper · {what}?" + "".join(f"\n{n}" for n in notes))
+            await self._ask(ctx, "deploy", args_, card("📝", "PAPER RUN", codes(w, *size_lines(c)), notes))
             return
         if os.environ.get("BOT_PILOT_LIVE") != "1":
-            await self.reply(ctx, "LIVE is off on this server: BOT_PILOT_LIVE=1 in .env, then restart.")
+            await self.reply(ctx, card("🔒", "LIVE IS OFF", codes("BOT_PILOT_LIVE=1 in .env, then restart")))
             return
-        await self.reply(ctx, f"🩺 Checking the account for {what}…")
+        await self.reply(ctx, card("🩺", "Checking Account", codes(w)))
 
         async def go() -> None:
             try:   # checked from its own file: the running bot's session stays as it is until the owner confirms
                 path = self.pilot.write_session(c, live=True, path=self._state_dir() / "pilot_check.yaml")
                 ok, rep = await self.control.doctor(str(path), replacing=self.control.alive("live"))
             except Exception as e:
-                await self.api.send(ctx.chat_id, f"⚠️ doctor failed: {escape(redact_str(str(e))[:300])}")
+                await self.api.send(ctx.chat_id, card("⚠️", "CHECK FAILED", codes(redact_str(str(e))[:300])))
                 return
             if not ok:
-                await self.api.send(ctx.chat_id, f"❌ Not starting:\n<pre>{escape(rep[:3500])}</pre>")
+                await self.api.send(ctx.chat_id, cannot_start(w, rep))
                 return
             await self._ask(Ctx(ctx.chat_id, ctx.user_id, ctx.user), "deploy", args_,
-                            f"🔴 <b>LIVE</b> · {what}\n{escape(_sizes(c))}" + "".join(f"\n{n}" for n in notes),
-                            code=True)
+                            card("🔴", "LIVE RUN", codes(w, *size_lines(c)), notes, _warnings(rep)), code=True)
         self._spawn(go())
 
     async def c_pilotclose(self, ctx: Ctx, args: list[str]) -> None:
         a = self.pilot.active() if self.pilot is not None else None
         if not a:
-            await self.reply(ctx, "Nothing is deployed.")
+            await self.reply(ctx, card("ℹ️", "NOTHING DEPLOYED", codes("/top3 · /run")))
             return
-        await self._ask(ctx, "pilotclose", {}, f"Close {escape(short(a['market']))} and stop? Maker exit, then taker "
-                        "if it does not fill.")
+        await self._ask(ctx, "pilotclose", {}, card("⏹", "CLOSE AND STOP", codes(
+            f"{short(a['market'])} · {a['config'].replace(' @ ', ' · ')} · {a['mode'].upper()}",
+            "Maker exit, then taker if it does not fill")))
 
     # ------------------------------------------------------------------ balance and settings
     def _state_dir(self) -> Path:
@@ -693,30 +735,34 @@ class TelegramBot:
             return
         name, text = args[0].lower(), " ".join(args[1:])
         over = settings.load(self._state_dir())
-        now = settings.show(name, over[name]) if name in over else "default"
+        base = settings.defaults(self.control.app.sizing, 30, "auto")
+        now = settings.show(name, over[name]) if name in over else \
+            f"{settings.show(name, base[name])} (default)" if name in base else "default"
         if text.lower() == "default":
             if name not in settings.SETTINGS:
-                await self.reply(ctx, f"Unknown setting {escape(name)}. /settings lists them.")
+                await self.reply(ctx, card("❌", "UNKNOWN SETTING", codes(name, "/settings lists them")))
                 return
             await self._ask(ctx, "set", {"name": name, "value": None, "reset": True},
-                            f"Put <b>{escape(name)}</b> back to its default (now {escape(now)})?")
+                            card("⚙️", name.replace("_", " ").upper(), codes(f"Back to its default · now {now}")))
             return
         try:
             value = settings.parse(name, text)
             settings.effective_sizing(self.control.app.sizing, {**over, name: value})   # the whole must be valid
         except ValueError as e:
-            await self.reply(ctx, f"⚠️ {escape(str(e).splitlines()[-1])}")
+            await self.reply(ctx, card("❌", "CANNOT SET", codes(_reason(e))))
             return
         s = settings.SETTINGS[name]
         await self._ask(ctx, "set", {"name": name, "value": value, "reset": False},
-                        f"Set <b>{escape(name)}</b> to <b>{escape(settings.show(name, value))}</b> (now {escape(now)})?"
-                        f"\n{escape(s.help)}. Applies: {escape(s.applies)}.")
+                        card("⚙️", name.replace("_", " ").upper(), codes(f"Now {now}",
+                                                                           f"New {settings.show(name, value)}"),
+                             codes(s.help), codes(f"Applies {s.applies}")))
 
     async def c_scannow(self, ctx: Ctx, args: list[str]) -> None:
         if self.pilot is None:
-            await self.reply(ctx, self._scan_note(ctx.chat_id, "breakeven", force=True) or "🔎 Scan requested")
+            await self.reply(ctx, card("🔎", "SCAN REQUESTED",
+                                       codes(self._scan_note(ctx.chat_id, "volume", force=True))))
             return
-        await self._list(ctx, "breakeven", force=True)
+        await self._list(ctx, "volume", force=True)
 
     # ------------------------------------------------------------------ live dashboard
     def _dash_load(self) -> dict[str, Any] | None:
@@ -824,22 +870,23 @@ class TelegramBot:
                 self._dash_save(None)
 
     async def c_menu(self, ctx: Ctx, args: list[str]) -> None:
-        await self.reply(ctx, "☰ <b>Menu</b>", menu_keyboard())
+        """/start and /menu (the owner's "Bot Control" template) with every button."""
+        idx = self.pilot.account_index if self.pilot is not None else 0
+        await self.reply(ctx, dashboard.control_text(dashboard.collect(self.control, account=idx)), menu_keyboard())
 
     async def c_help(self, ctx: Ctx, args: list[str]) -> None:
         await self.reply(ctx, HELP, menu_keyboard())
 
     async def c_status(self, ctx: Ctx, args: list[str]) -> None:
         modes = [a.lower() for a in args if a.lower() in MODES] or self.control.known_modes()
-        text = status_text([self.control.view(m) for m in modes])
-        if self.pilot is not None:
-            text += "\n\n" + pilot_text(self.pilot)
+        text = status_text([self.control.view(m) for m in modes],
+                           running=running_block(self.pilot) if self.pilot is not None else None)
         await self.reply(ctx, text, refresh_keyboard("status"))
 
     async def _need_mode(self, ctx: Ctx, args: list[str], **kw: Any) -> tuple[str | None, list[str]]:
         mode, rest = self._mode(args, **kw)
         if mode is None:
-            await self.reply(ctx, "No bot has run here yet. /run")
+            await self.reply(ctx, card("ℹ️", "NO BOT YET", codes("No bot has run here yet · /run")))
         return mode, rest
 
     async def c_pnl(self, ctx: Ctx, args: list[str]) -> None:
@@ -864,26 +911,27 @@ class TelegramBot:
         n = int(args[0]) if args and args[0].isdigit() else 15
         rows = self.control.recent_decisions(min(n, 50))
         if not rows:
-            await self.reply(ctx, "No decisions logged yet.")
+            await self.reply(ctx, card("🧾", "NO DECISIONS YET"))
             return
         lines = []
         for r in rows:
             t = dt.datetime.fromtimestamp(int(r.get("ts", 0)) / 1e6, dt.UTC).strftime("%m-%d %H:%M:%S")
             where = "/".join(x for x in (r.get("venue"), r.get("market")) if x)
             lines.append(f"{t} {r.get('event', '')} {where}: {str(r.get('reason', ''))[:140]}")
-        await self.reply(ctx, "<b>Latest decisions</b>\n<pre>" + escape("\n".join(lines)) + "</pre>",
+        await self.reply(ctx, card("🧾", "LATEST DECISIONS", f"<pre>{escape(chr(10).join(lines))}</pre>"),
                          refresh_keyboard(f"logs {n}"))
 
     async def c_report(self, ctx: Ctx, args: list[str]) -> None:
         mode, rest = self._mode(args)
         date = rest[0] if rest else (dt.datetime.now(dt.UTC) - dt.timedelta(days=1)).strftime("%Y-%m-%d")
         rep = self.control.report(mode or "live", date) if mode else None
-        await self.reply(ctx, f"<b>Report {escape(date)} ({mode})</b>\n<pre>{escape(rep[:3500])}</pre>" if rep else
-                         f"No {mode or ''} report for {escape(date)} yet (written just after 00:00 UTC).")
+        await self.reply(ctx, card("🗓", f"REPORT {date} · {(mode or 'live').upper()}", f"<pre>{escape(rep[:3500])}</pre>")
+                         if rep else card("🗓", "NO REPORT YET",
+                                          codes(f"{date} · {(mode or 'live').upper()}", "Written just after 00:00 UTC")))
 
     async def c_ping(self, ctx: Ctx, args: list[str]) -> None:
         run = self.control.running_modes()
-        await self.reply(ctx, "pong · running: " + (", ".join(run) if run else "nothing"))
+        await self.reply(ctx, card("🏓", "PONG", codes("Running: " + (", ".join(run) if run else "nothing"))))
 
     async def c_alerts(self, ctx: Ctx, args: list[str]) -> None:
         p = self.prefs
@@ -894,10 +942,10 @@ class TelegramBot:
         elif len(args) >= 2 and args[0] == "pnl":
             p.pnl_alerts = args[1] == "on"
         p.save(self.prefs_path)
-        muted = f"muted until {dt.datetime.fromtimestamp(p.mute_until, dt.UTC):%H:%M} UTC" if p.muted() else "on"
-        text = (f"<b>Alerts</b> ({muted})\nCritical alerts (bot down, safe mode, loss limit) always come through.\n\n"
-                f"Fills: <b>{p.fills}</b> · PnL warnings: <b>{'on' if p.pnl_alerts else 'off'}</b> · "
-                f"daily digest: <b>{'on' if p.digest else 'off'}</b>")
+        muted = f"Muted until {dt.datetime.fromtimestamp(p.mute_until, dt.UTC):%H:%M} UTC" if p.muted() else "On"
+        text = card("🔔", "Alerts", codes(muted, "Critical alerts (bot down, safe mode, loss limit) always come"),
+                    codes(f"Fills {p.fills} · PnL warnings {'on' if p.pnl_alerts else 'off'} · daily digest "
+                          f"{'on' if p.digest else 'off'}"))
         kb: Keyboard = [
             [("Fills: each", "alerts fills each"), ("hourly", "alerts fills summary"), ("off", "alerts fills off")],
             [("PnL warnings " + ("off" if p.pnl_alerts else "on"), f"alerts pnl {'off' if p.pnl_alerts else 'on'}"),
@@ -910,12 +958,12 @@ class TelegramBot:
         minutes = int(args[0]) if args and args[0].isdigit() else 60
         self.prefs.mute_until = time.time() + minutes * 60
         self.prefs.save(self.prefs_path)
-        await self.reply(ctx, f"🔕 Muted {minutes} min (critical alerts still come). /unmute")
+        await self.reply(ctx, card("🔕", f"MUTED {minutes} MIN", codes("Critical alerts still come · /unmute")))
 
     async def c_unmute(self, ctx: Ctx, args: list[str]) -> None:
         self.prefs.mute_until = 0.0
         self.prefs.save(self.prefs_path)
-        await self.reply(ctx, "🔔 Alerts on.")
+        await self.reply(ctx, card("🔔", "ALERTS ON"))
 
     # ------------------------------------------------------------------ controls
     async def c_pause(self, ctx: Ctx, args: list[str]) -> None:
@@ -924,10 +972,11 @@ class TelegramBot:
             return
         market = rest[0].upper() if rest and rest[0].lower() != "all" else None
         self.control.set_pause(mode, market, f"Telegram ({ctx.user})")
-        note = "" if self.control.is_running(mode) else " (applies when it starts)"
-        await self.reply(ctx, f"⏸ <b>{mode.upper()}</b> · new orders paused on {market or 'all markets'}{note}. "
-                         "Exit orders keep working.",
-                         [[("▶️ Unpause", f"unpause {market or 'all'} {mode}"), ("📊 Status", f"status {mode}")]])
+        await self.reply(ctx, card("⏸", "NEW ORDERS PAUSED", codes((market or "All markets")
+                                                                   + (" · paper" if mode == "paper" else "")),
+                                   codes("Existing exit orders remain active.",
+                                         "" if self.control.is_running(mode) else "Applies when the bot starts.")),
+                         [[("▶️ Unpause", f"unpause {market or 'all'} {mode}"), ("🩺 Status", f"status {mode}")]])
 
     async def c_unpause(self, ctx: Ctx, args: list[str]) -> None:
         mode, rest = await self._need_mode(ctx, args)
@@ -935,18 +984,23 @@ class TelegramBot:
             return
         market = rest[0].upper() if rest and rest[0].lower() != "all" else None
         left = self.control.clear_pause(mode, market)
-        await self.reply(ctx, f"▶️ <b>{mode.upper()}</b> · quoting on {market or 'all markets'}"
-                         + (f" · still paused: {', '.join(left)}" if left else ""), refresh_keyboard(f"status {mode}"))
+        risk = _risk(self.control.view(mode))   # a safety stop is cleared by /resumeaftersl, not by an unpause
+        await self.reply(ctx, card("▶️", "NEW ORDERS RESUMED", codes((market or "All markets")
+                                                                     + (" · paper" if mode == "paper" else "")),
+                                   codes(f"Still paused: {pause_where(left)}" if left else "",
+                                         f"A safety stop still holds: {risk[0][:80]}" if risk else "",
+                                         "/resumeaftersl" if risk else "")),
+                         refresh_keyboard(f"status {mode}"))
 
     async def _ask(self, ctx: Ctx, action: str, args: dict[str, Any], desc: str, *, code: bool = False) -> None:
         pid = secrets.token_hex(4)
         p = Pending(pid, action, args, ctx.chat_id, desc)
-        if code:
+        if code:   # the owner's template: "Confirm within 2 min", then the code to type back
             p.code = f"{secrets.randbelow(900000) + 100000}"
-            await self.api.send(ctx.chat_id, f"{desc}\nSend <code>{p.code}</code> to confirm (2 min).",
+            await self.api.send(ctx.chat_id, f"{desc}\n\n{b('Confirm within 2 min')}\n\n{mono(p.code)}",
                                 keyboard=[[("✖️ Cancel", f"no {pid}")]])
         else:
-            await self.reply(ctx, f"❓ {desc}", confirm_keyboard(pid))
+            await self.reply(ctx, desc, confirm_keyboard(pid))
             p.message_id = ctx.message_id
         self.pending = {k: v for k, v in self.pending.items() if v.expires > time.time()}
         self.pending[pid] = p
@@ -954,10 +1008,10 @@ class TelegramBot:
     async def c_stop(self, ctx: Ctx, args: list[str]) -> None:
         mode, _ = self._mode(args, need_running=True)
         if not mode:
-            await self.reply(ctx, "No bot is running.")
+            await self.reply(ctx, card("ℹ️", "NO BOT RUNNING"))
             return
-        await self._ask(ctx, "stop", {"mode": mode}, f"Stop the <b>{mode.upper()}</b> bot? Quotes cancelled, "
-                        "position kept.")
+        await self._ask(ctx, "stop", {"mode": mode}, card("⏹", f"STOP {mode.upper()} BOT",
+                                                          codes("Quotes cancelled · positions kept")))
 
     async def c_resume(self, ctx: Ctx, args: list[str]) -> None:
         mode, rest = await self._need_mode(ctx, args)
@@ -965,50 +1019,54 @@ class TelegramBot:
             return
         venue = rest[0] if rest and rest[0] in VENUES else None
         await self._ask(ctx, "resume", {"mode": mode, "venue": venue},
-                        f"Clear the safety stops on <b>{mode.upper()}</b>? A daily stop re-arms from now: the rest of "
-                        "the UTC day may lose one more daily stop. Check /logs first.")
+                        card("▶️", "RESUME AFTER A STOP", codes(f"{mode.upper()} · clears safe mode, the daily stop "
+                                                                 "and the kill", "A daily stop re-arms from now"),
+                             codes("Check /logs first")))
 
     async def _run_session(self, ctx: Ctx, name: str, live: bool, sess: dict[str, Any]) -> None:
         """/run <session file> [live]: a session file from config/sessions (the pilot's own is pilot.yaml)."""
         mode = "live" if live else "paper"
         if self.control.is_running(mode):
-            await self.reply(ctx, f"A {mode} bot is running. /stop {mode} first.")
+            await self.reply(ctx, card("❌", "Cannot Start", codes(name),
+                                       section("Reason", codes(f"Another {mode.upper()} bot is already running.")),
+                                       section("Action", codes(f"/stop {mode}"))))
             return
         if not live:
-            await self._ask(ctx, "run", {"name": name, "live": False}, f"📝 Paper · <b>{escape(name)}</b>?")
+            await self._ask(ctx, "run", {"name": name, "live": False}, card("📝", "PAPER RUN", codes(name)))
             return
         if not sess.get("live_enabled"):
-            await self.reply(ctx, f"<b>{escape(name)}</b>: <code>live_enabled: false</code> in "
-                             f"config/sessions/{escape(name)}.yaml.")
+            await self.reply(ctx, card("❌", "Cannot Start", codes(name),
+                                       section("Reason", codes(f"live_enabled: false in config/sessions/{name}.yaml")),
+                                       section("Action", codes("Set live_enabled: true in that file"))))
             return
-        await self.reply(ctx, f"🩺 Checking <b>{escape(name)}</b>…")
+        await self.reply(ctx, card("🩺", "Checking Account", codes(name)))
         self._spawn(self._doctor_then_ask(ctx, name))
 
     async def _doctor_then_ask(self, ctx: Ctx, name: str) -> None:
         try:
             ok, rep = await self.control.doctor(name)
         except Exception as e:
-            await self.api.send(ctx.chat_id, f"⚠️ doctor failed: {escape(redact_str(str(e))[:300])}")
+            await self.api.send(ctx.chat_id, card("⚠️", "CHECK FAILED", codes(redact_str(str(e))[:300])))
             return
-        await self.api.send(ctx.chat_id, f"<pre>{escape(rep[:3500])}</pre>")
         if not ok:
-            await self.api.send(ctx.chat_id, "❌ Not starting: fix the FAIL lines above.")
+            await self.api.send(ctx.chat_id, cannot_start(name, rep))
             return
         await self._ask(Ctx(ctx.chat_id, ctx.user_id, ctx.user), "run", {"name": name, "live": True},
-                        f"🔴 <b>LIVE</b> · {escape(name)}", code=True)
+                        card("🔴", "LIVE RUN", codes(name), _warnings(rep)), code=True)
 
     async def c_doctor(self, ctx: Ctx, args: list[str]) -> None:
         if not args:
-            await self.reply(ctx, "Usage: /doctor &lt;session&gt;")
+            await self.reply(ctx, card("❔", "USAGE", codes("/doctor <session>")))
             return
-        await self.reply(ctx, f"🩺 Running doctor for <b>{escape(args[0])}</b>…")
+        await self.reply(ctx, card("🩺", "Running Doctor", codes(args[0])))
 
         async def go() -> None:
             try:
                 ok, rep = await self.control.doctor(args[0])
-                await self.api.send(ctx.chat_id, ("✅ READY" if ok else "❌ NOT READY") + f"\n<pre>{escape(rep[:3500])}</pre>")
+                await self.api.send(ctx.chat_id, card("✅" if ok else "❌", "READY" if ok else "NOT READY",
+                                                      f"<pre>{escape(rep[:3500])}</pre>"))
             except Exception as e:
-                await self.api.send(ctx.chat_id, f"⚠️ doctor failed: {escape(redact_str(str(e))[:300])}")
+                await self.api.send(ctx.chat_id, card("⚠️", "CHECK FAILED", codes(redact_str(str(e))[:300])))
         self._spawn(go())
 
     def _venue_mode(self, args: list[str]) -> tuple[str | None, str, list[str]]:
@@ -1019,31 +1077,34 @@ class TelegramBot:
     async def c_cancelall(self, ctx: Ctx, args: list[str]) -> None:
         mode, venue, _ = self._venue_mode(args)
         if mode in (None, "paper"):
-            await self.reply(ctx, "Cancel-all is for a real account. Paper: /pauseneworders or /stop.")
+            await self.reply(ctx, card("ℹ️", "PAPER BOT", codes("Cancel-all is for a real account",
+                                                                "Paper: /pauseneworders or /stop")))
             return
         await self._ask(ctx, "cancelall", {"mode": mode, "venue": venue},
-                        f"Cancel every order on {venue} ({'MAINNET' if mode == 'live' else 'testnet'})? A running "
-                        "bot re-quotes unless paused.")
+                        card("❌", "CANCEL ALL ORDERS", codes(f"{venue.title()} {'MAINNET' if mode == 'live' else 'testnet'}",
+                                                             "A running bot re-quotes unless paused.")))
 
     async def c_flatten(self, ctx: Ctx, args: list[str]) -> None:
         mode, venue, rest = self._venue_mode(args)
         if mode in (None, "paper"):
-            await self.reply(ctx, "Close-all is for a real account. Paper: /pauseneworders works the position off.")
+            await self.reply(ctx, card("ℹ️", "PAPER BOT", codes("Close-all is for a real account",
+                                                                "Paper: /pauseneworders works the position off")))
             return
         taker = any(a.lower() == "taker" for a in rest)
         await self._ask(ctx, "flatten", {"mode": mode, "venue": venue, "taker": taker},
-                        f"🧯 Close every position on {venue} ({'MAINNET' if mode == 'live' else 'testnet'}) with "
-                        f"reduce-only {'taker orders' if taker else 'maker orders at the touch'}? Pause first or it "
-                        "may re-open.", code=True)
+                        card("🧯", "CLOSE ALL POSITIONS", codes("Reduce-only orders will be used."),
+                             codes(f"{venue.title()} {'MAINNET' if mode == 'live' else 'testnet'} · "
+                                   f"{'taker (IOC) now' if taker else 'maker at the touch'}",
+                                   "Pause first or it may re-open")), code=True)
 
     # ------------------------------------------------------------------ confirmations
     async def c_ok(self, ctx: Ctx, args: list[str]) -> None:
         p = self.pending.get(args[0]) if args else None
         if p is None or p.expires < time.time() or p.chat_id != ctx.chat_id:
-            await self.reply(ctx, "Expired. Run it again.")
+            await self.reply(ctx, card("⌛", "EXPIRED", codes("Run it again")))
             return
         if p.code is not None:
-            await self.reply(ctx, "Type the code instead.")
+            await self.reply(ctx, card("🔢", "TYPE THE CODE", codes("This one needs the code, not a button")))
             return
         self.pending.pop(p.pid, None)
         await self._execute(ctx, p)
@@ -1051,7 +1112,7 @@ class TelegramBot:
     async def c_no(self, ctx: Ctx, args: list[str]) -> None:
         if args:
             self.pending.pop(args[0], None)
-        await self.reply(ctx, "Cancelled.")
+        await self.reply(ctx, card("✖️", "CANCELLED"))
 
     async def _code(self, ctx: Ctx, text: str) -> None:
         now = time.time()
@@ -1060,7 +1121,7 @@ class TelegramBot:
                 self.pending.pop(pid, None)
                 await self._execute(Ctx(ctx.chat_id, ctx.user_id, ctx.user), p)
                 return
-        await self.api.send(ctx.chat_id, "No action waits for that code.")
+        await self.api.send(ctx.chat_id, card("❔", "UNKNOWN CODE", codes("No action waits for that code")))
 
     async def _execute(self, ctx: Ctx, p: Pending) -> None:
         a = p.args
@@ -1068,46 +1129,50 @@ class TelegramBot:
         if p.action == "stop":
             self.control.request_stop(a["mode"], f"Telegram ({ctx.user})")
             self.watcher.note_stop_requested(a["mode"])
-            await self.reply(ctx, f"🛑 Stop sent to <b>{a['mode'].upper()}</b>.")
+            await self.reply(ctx, card("⏳", f"Stopping {a['mode'].upper()}…", codes("Quotes cancelled · positions kept")))
             self._spawn(self._ensure_stopped(ctx, a["mode"]))
         elif p.action == "deploy":
             try:
-                c = {**self._find(a["market"], a["setting"], a["lev"], a["profile"]), "max_loss_usd": a.get("max_loss")}
+                c = {**self._find(a["market"], a["setting"], a["lev"], a["profile"]), **(a.get("limits") or {})}
             except ValueError as e:
-                await self.reply(ctx, escape(str(e)))
+                await self.reply(ctx, card("❌", "CANNOT RUN", codes(str(e))))
                 return
-            await self.reply(ctx, f"🚀 Starting {escape(short(c['market']))} ({'LIVE' if a['live'] else 'paper'})…")
+            await self.reply(ctx, card("🚀", f"Starting {'LIVE' if a['live'] else 'PAPER'}", codes(what(c))))
 
             async def deploy() -> None:
                 try:
                     await self.pilot.deploy(c, live=bool(a["live"]), by=f"Telegram ({ctx.user})")
                 except Exception as e:
-                    await self.api.send(ctx.chat_id, f"⚠️ {escape(redact_str(str(e))[:400])}")
+                    await self.api.send(ctx.chat_id, card("⚠️", "START FAILED", codes(redact_str(str(e))[:400])))
             self._spawn(deploy())
         elif p.action == "pilotclose":
-            await self.reply(ctx, "⏹ Closing…")
+            act = self.pilot.active() if self.pilot is not None else None
+            await self.reply(ctx, card("⏳", "Closing…", codes(f"{short(act['market'])} · {act['config']}" if act else "",
+                                                               "Maker exit, then taker if it does not fill")))
 
             async def close() -> None:
                 try:
                     await self.pilot.close(by=f"Telegram ({ctx.user})")
                 except Exception as e:
-                    await self.api.send(ctx.chat_id, f"⚠️ {escape(redact_str(str(e))[:400])}")
+                    await self.api.send(ctx.chat_id, card("⚠️", "CLOSE FAILED", codes(redact_str(str(e))[:400])))
             self._spawn(close())
         elif p.action == "resume":
             self.control.request_resume(a["mode"], a.get("venue"))
             paused = self.control.paused(a["mode"])
             if paused:   # a resume clears the safety stops only; the owner's own pause is /unpause (2026-09-26)
-                await self.reply(ctx, f"▶️ Safety stops cleared on <b>{a['mode'].upper()}</b>, but new orders are "
-                                 f"still paused by you ({escape(pause_where(paused))}), so it will not quote. "
-                                 "/unpause to quote again.",
+                await self.reply(ctx, card("⏸", "STILL PAUSED", codes("Safety stops cleared",
+                                                                     f"New orders paused by you: {pause_where(paused)}"),
+                                           codes("/unpause to quote again")),
                                  [[("▶️ Unpause", f"unpause all {a['mode']}"), ("📊 Dashboard", "dashboard")]])
             else:
-                await self.reply(ctx, f"▶️ Resume sent to <b>{a['mode'].upper()}</b>: quoting restarts within a few "
-                                 "seconds. /dashboard")
+                act = self.pilot.active() if self.pilot is not None else None
+                await self.reply(ctx, card("▶️", "ORDERS RESUMED", codes(
+                    " · ".join(x for x in (a["mode"].upper(), short(act["market"]) if act else "", "quoting restarting")
+                               if x))))
         elif p.action == "run":
             self.control.clear_pause("live" if a["live"] else "paper", None)   # a new run starts quoting (see deploy)
             rec = self.control.start_run(a["name"], live=bool(a["live"]))
-            await self.reply(ctx, f"🚀 Starting <b>{escape(a['name'])}</b> ({'LIVE' if a['live'] else 'paper'})…")
+            await self.reply(ctx, card("🚀", f"Starting {'LIVE' if a['live'] else 'PAPER'}", codes(a["name"])))
             self._spawn(self._watch_start(ctx, rec, "live" if a["live"] else "paper"))
         elif p.action == "set":
             from bot.scout.capital import forget
@@ -1120,7 +1185,7 @@ class TelegramBot:
                 else:
                     settings.save(self._state_dir(), name, a["value"], self.control.app.sizing)
             except ValueError as e:
-                await self.reply(ctx, f"⚠️ {escape(str(e))}")
+                await self.reply(ctx, card("❌", "CANNOT SET", codes(str(e))))
                 return
             if settings.SETTINGS[name].field:   # a sizing setting: rescan at the new numbers now
                 forget(self._state_dir())
@@ -1128,41 +1193,71 @@ class TelegramBot:
             elif name in ("volume_cost", "crypto_lev"):   # re-rank now / backtest the new leverage now
                 (self._state_dir() / SCAN_NOW).touch()
             over = settings.load(self._state_dir())
-            shown = settings.show(name, over[name]) if name in over else "its default"
-            await self.reply(ctx, f"✅ <b>{escape(name)}</b> = {escape(shown)} · applies "
-                             f"{escape(settings.SETTINGS[name].applies)}", refresh_keyboard("settings"))
+            value = over[name] if name in over else settings.defaults(self.control.app.sizing, 30, "auto").get(name)
+            await self.reply(ctx, card("⚙️", name.replace("_", " ").upper(),   # the owner's /set template
+                                       codes(set_value(name, value) + ("" if name in over else " (default)"),
+                                             f"Applies {settings.SETTINGS[name].applies}"),
+                                       f"✅ {b('Saved')}"), refresh_keyboard("settings"))
         elif p.action in ("cancelall", "flatten"):
-            await self.reply(ctx, "⏳ Sending…")
+            await self.reply(ctx, card("⏳", "Cancelling orders…" if p.action == "cancelall" else "Closing positions…"))
 
             async def go() -> None:
                 try:
                     if p.action == "cancelall":
                         res = await self.control.cancel_all(a["mode"], a["venue"])
-                    else:
-                        res = await self.control.flatten(a["mode"], a["venue"], bool(a["taker"]))
-                    await self.api.send(ctx.chat_id, f"✅ {escape(res)}")
+                        left = res.get("open")
+                        await self.api.send(ctx.chat_id, card("✅", "ORDERS CANCELLED", codes(
+                            f"Active orders: {left if left is not None else 'unknown'}")))
+                        return
+                    res = await self.control.flatten(a["mode"], a["venue"], bool(a["taker"]))
+                    closed = int(res["positions"]) - int(res["open"])
+                    if not res["open"]:
+                        await self.api.send(ctx.chat_id, card("✅", "POSITIONS CLOSED",
+                                                              codes(f"Closed: {closed} · Open: 0")))
+                    else:   # maker orders at the touch take a while to fill: say what is still open
+                        await self.api.send(ctx.chat_id, card("🧯", "CLOSING POSITIONS", codes(
+                            f"Closed: {closed} · Open: {res['open']}",
+                            f"{res['orders']} reduce-only {'IOC' if res['taker'] else 'maker'} orders sent"),
+                            codes("/openpositions to check")))
                 except Exception as e:
-                    await self.api.send(ctx.chat_id, f"⚠️ {p.action} failed: {escape(redact_str(str(e))[:300])}")
+                    await self.api.send(ctx.chat_id, card("⚠️", "CANCEL FAILED" if p.action == "cancelall" else
+                                                          "CLOSE FAILED", codes(redact_str(str(e))[:300])))
             self._spawn(go())
 
     async def _ensure_stopped(self, ctx: Ctx, mode: str, wait_s: float = 25.0) -> None:
         await asyncio.sleep(wait_s)
         if self.control.is_running(mode) and self.control.signal_stop(mode):
-            await self.api.send(ctx.chat_id, f"{mode}: no stop after {wait_s:.0f} s, sent SIGINT (clean shutdown).")
+            await self.api.send(ctx.chat_id, card("⚠️", f"NO STOP AFTER {wait_s:.0f}S",
+                                                  codes(f"{mode.upper()} · sent SIGINT (clean shutdown)")))
 
     async def _watch_start(self, ctx: Ctx, rec: dict[str, Any], mode: str, wait_s: float = 90.0) -> None:
         t0 = time.time()
         while time.time() - t0 < wait_s:
             await asyncio.sleep(5)
             if self.control.is_running(mode):
-                await self.api.send(ctx.chat_id, f"🟢 <b>{escape(rec['name'])}</b> running ({mode}).")
+                await self.api.send(ctx.chat_id, card("🟢", f"{mode.upper()} STARTED", codes(rec["name"])))
                 return
             alive = next((r["alive"] for r in self.control.runs() if r["pid"] == rec["pid"]), False)
             if not alive:
                 break
         tail = self.control.log_tail(rec["log"])
-        await self.api.send(ctx.chat_id, f"❌ <b>{escape(rec['name'])}</b> did not start:\n"
-                            f"<pre>{escape(tail[-3000:])}</pre>")
+        await self.api.send(ctx.chat_id, card("❌", "DID NOT START", codes(rec["name"]),
+                                              f"<pre>{escape(tail[-3000:])}</pre>"))
+
+
+def _reason(e: Exception) -> str:
+    """The reason in an error: for a pydantic validation error its "Value error, ..." text, not the help link on its
+    last line (a refused /set showed only "For further information visit ...")."""
+    lines = [ln.strip() for ln in str(e).splitlines() if ln.strip() and not ln.strip().startswith("For further")]
+    for ln in lines:
+        if "error, " in ln:
+            return ln.split("error, ", 1)[1].split(" [type=")[0]
+    return lines[-1] if lines else type(e).__name__
+
+
+def _warnings(rep: str) -> list[str]:
+    """The doctor's warnings as a section of a confirmation (the failing checks never reach one)."""
+    return section("Warnings", codes(*(f"{area}: {msg}" for area, msg, _fix in doctor_checks(rep, "WARN"))))
 
 
 def _name(u: dict[str, Any] | None) -> str:

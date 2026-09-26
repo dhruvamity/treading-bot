@@ -26,7 +26,6 @@ class StrategyContext:
     params: Any  # MMSession
     inventory: Decimal = Decimal(0)  # signed base units on this venue/market
     entry_price: Decimal | None = None  # average entry of `inventory`
-    session_progress: float = 0.0
     quoting_allowed: bool = True
     quoting_block_reason: str = ""
     event_window: bool = False
