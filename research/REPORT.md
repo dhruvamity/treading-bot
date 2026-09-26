@@ -241,6 +241,29 @@ What the first hours show (early and noisy; updated hourly):
 - **QQQ is the only engine in profit; NVDA is close to flat.** The replay over the same window agrees on QQQ (+$0.49)
   and on the crypto losses (BTC −$5.07, ETH −$5.39, ZEC −$5.48 with 2 daily stops each).
 
+### Update after 4.75 hours (02:35 UTC)
+
+**Engines (`touch 0bp` at maximum leverage):** 9 of 12 are stopped for the day (8 on the 2% daily stop, SOL
+killed). QQQ went from +$0.55 to −$2.54 and stopped too. Only NVDA (−$1.63 on $25k) and GLD (−$1.10 on $4.5k) still
+quote; TSLA has not traded. Net across the 12: −$40.9 on $236k of volume, **$173 per $1M**.
+
+**Whole menu, live replay, 4 hours (22:17–02:17 UTC, overnight, US closed), $100 per run, farm stops 5/10/20%:**
+
+| Setting | At 20x (10 markets): turnover / h, cost per $1M, profitable markets | At 10x (16 markets): same |
+|---|---|---|
+| `mid0` (the hypothesis) | 105×, $70, 2 of 10 | 65×, $166, 2 of 16 |
+| `touch 0bp` / `join` | 77–83×, $115–144, 2–3 of 10 | 49–52×, $141–167, 3–5 of 16 |
+| `mid0 vgate` (new) | 49×, **$15**, 2 of 10 | 29×, $187, 2 of 16 |
+| `mid+1 skew` | 41×, **$13**, 4 of 10 | 29×, $197, 4 of 16 |
+| `mid+1` | 34×, **−$89 (profit)**, 5 of 10 | 25×, $136, 6 of 16 |
+| `grid+1 r0.25` | 29×, **−$161 (profit)**, 6 of 10 | 20×, $205, 7 of 16 |
+| `dgrid` | 32×, $51, 4 of 10 | 20×, $401, 5 of 16 |
+
+So far the live data repeats the synthetic ranking. Mid 0 has the most volume at a clear cost. Gating it by
+volatility cuts that cost by about 80% at 20x. Mid +1 and a tight Grid are the settings that made money at 20x.
+Four overnight hours are not enough to trust the sign; the US session (13:30 UTC onwards) is not covered by this
+run.
+
 ### Why it did not run earlier in this session
 
 Two things had stopped it:
