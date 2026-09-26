@@ -264,6 +264,33 @@ volatility cuts that cost by about 80% at 20x. Mid +1 and a tight Grid are the s
 Four overnight hours are not enough to trust the sign; the US session (13:30 UTC onwards) is not covered by this
 run.
 
+### Update after 7.9 hours (05:45 UTC)
+
+**Engines:** NVDA turned positive (+$1.00 on $70.9k, −$14 per $1M, quoting 99.6% of the time), and GLD too (+$0.20
+on $12.5k). The other 9 that traded are stopped for the day or killed. Total: −$36.0 on $289k, **$125 per $1M**.
+The replay over the same window agrees on 10 of 11 signs; the exception is NVDA (replay −$1.57 on $28.7k, with fewer
+touch fills).
+
+**Whole menu, 7 hours of live replay (22:17–05:17 UTC), cost per $1M and turnover:**
+
+| Setting | 20x (10 markets that allow it) | 10x (18 markets, incl. the alts capped at 10x) |
+|---|---|---|
+| `mid0` | $59, 76× / h | $145, 49× / h |
+| `touch 0bp` | $118, 53× / h | $187, 36× / h |
+| `mid0 vgate` (new) | **$6**, 44× / h | $120, 26× / h |
+| `mid+1 skew` | $28, 41× / h | $166, 25× / h |
+| `mid+1` | **−$36**, 30× / h | $165, 20× / h |
+| `mid+2` | **−$40**, 14× / h | $210, 10× / h |
+| `grid+1 r0.25` | **−$34**, 31× / h | $239, 17× / h |
+| `grid+3 r0.5` | **−$76**, 16× / h | $87, 13× / h |
+| `dgrid` | $58, 27× / h | $333, 15× / h |
+| `rgrid+1 r0.25` | $180, 39× / h | $300, 27× / h |
+
+The 20x markets (BTC, ETH, SOL, SPY, QQQ, NVDA, GLD, SLV, XRP and others) did far better than the alts capped at
+10x (HYPE, NEAR, ZEC, ENA and others), which lost with every setting. Among the 20x markets, the break-even line
+sits between Mid 0 and Mid +1: Mid 0 gated by volatility at about $6 per $1M, and Mid +1, Mid +2 and the tight
+grids in profit.
+
 ### Why it did not run earlier in this session
 
 Two things had stopped it:
