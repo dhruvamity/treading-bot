@@ -43,7 +43,7 @@ from bot.common import settings
 from bot.common.config import SizingDefaults
 from bot.common.sizing import INV_BUFFER
 from bot.scout import profiles
-from bot.scout.scan import BY_NAME
+from bot.scout.scan import BY_NAME, market_meta, max_leverage
 from bot.scout.sim import Config, Risk
 from bot.telegram.control import Control
 from bot.venues.base import Venue
@@ -317,23 +317,46 @@ class Pilot:
             next((r for r in rows if abs(float(r["leverage"]) - float(lev)) < 0.01), None)
         if c is None:
             levs = ", ".join(f"{r['leverage']:g}x" for r in sorted(rows, key=lambda r: -float(r["leverage"])))
-            raise ValueError(f"{market} {setting}: no backtest at {lev}{'' if lev == 'max' else 'x'} (has {levs})")
+            raise ValueError(f"{market} {setting}: no backtest at {lev if lev == 'max' else f'{float(lev):g}x'} "
+                             f"(has {levs}){self._lev_hint(market, lev, rows)}")
         if c.get("too_small"):
             raise ValueError(f"{market} at {c['leverage']:g}x needs ${c.get('min_capital_usd', 0):,.2f} of capital "
                              "(Arcus minimum order)")
         _in_menu(c)
         return {**c, "profile": "manual", "lev": f"{float(c['leverage']):g}x"}
 
-    def write_session(self, c: dict[str, Any], *, live: bool) -> Path:
+    def _lev_hint(self, market: str, lev: float | str, rows: list[dict[str, Any]]) -> str:
+        """Why a leverage above the backtested ones is missing: Arcus does not allow it, the owner's cap
+        (/set crypto_lev), or the scan has not tested it yet."""
+        if lev == "max" or float(lev) <= max(float(r["leverage"]) for r in rows):
+            return ""
+        try:
+            arcus = max_leverage(market_meta(self.scan_path.parent / "markets.json")[market])[0]
+        except (OSError, ValueError, KeyError):
+            return ""
+        if float(lev) > arcus:
+            return f". Arcus allows at most {arcus:g}x"
+        cap = settings.lev_caps(settings.load(self.root / self.control.app.state_dir)).get(market)
+        if cap is not None and float(lev) > cap:
+            return f". Capped at {cap:g}x by /set crypto_lev (Arcus allows {arcus:g}x)"
+        return f". The next scan backtests up to {arcus:g}x: /scannow"
+
+    def write_session(self, c: dict[str, Any], *, live: bool, path: Path | None = None) -> Path:
+        """The session file for candidate c (path: another file, e.g. to check a setup before it replaces the running
+        one). c["max_loss_usd"]: the owner's loss limit for the run (/run ... sl=X); each write is a new run_id."""
         cfg = BY_NAME[c.get("setting") or c["config"]]
         risk = Risk(**c["risk"]) if c.get("risk") else self.risk
         s = session_for(c["market"], cfg, risk, live=live, account_index=self.account_index,
                         sizing=self.control.app.sizing)
-        self.session_path.parent.mkdir(parents=True, exist_ok=True)
+        s["run_id"] = f"{c['market']}-{time.time_ns() // 1000}"
+        if c.get("max_loss_usd"):
+            s["max_loss_usd"] = float(c["max_loss_usd"])
+        p = path or self.session_path
+        p.parent.mkdir(parents=True, exist_ok=True)
         head = (f"# Written by the pilot {time.strftime('%Y-%m-%d %H:%M UTC', time.gmtime())} for: {describe(c)}\n"
                 "# Rewritten on every approval; edit the scout's menu or risk instead of this file.\n")
-        self.session_path.write_text(head + yaml.safe_dump(s, sort_keys=False))
-        return self.session_path
+        p.write_text(head + yaml.safe_dump(s, sort_keys=False))
+        return p
 
     async def approve(self, k: int, *, live: bool, by: str, profile: str = "breakeven", lev: str = "rec",
                       wait_close_s: float = 660.0, wait_start_s: float = 90.0) -> str:
@@ -360,7 +383,7 @@ class Pilot:
         rec = self.control.start_run(SESSION, live=live)
         st.update(active={"market": c["market"], "config": c["config"], "mode": mode, "since": time.time(), "by": by,
                           "backtest": c, "pid": rec["pid"], "log": rec["log"], "profile": c["profile"],
-                          "lev": c["lev"]}, go_streak=0)
+                          "lev": c["lev"], "max_loss_usd": c.get("max_loss_usd")}, go_streak=0)
         st.pop("paused_by_scout", None)
         st.pop("suggested", None)
         self.save(st)
@@ -370,7 +393,9 @@ class Pilot:
             if self.control.is_running(mode):
                 prof = profiles.profile_of(c["profile"])
                 self.event("deployed", f"🟢 {mode.upper()} · {c['market']} · {c['config']}\n{numbers(c)}"
-                           f"\n{prof.icon} {prof.title}{' · max leverage' if c['lev'] == 'max' else ''} · by {by}")
+                           + (f"\n🛑 Stops for good once this run loses ${float(c['max_loss_usd']):,.2f}"
+                              if c.get("max_loss_usd") else "")
+                           + f"\n{prof.icon} {prof.title}{' · max leverage' if c['lev'] == 'max' else ''} · by {by}")
                 if live:   # the live bot's independent watchdog (bot/ops.py); best effort, never blocks the deploy
                     with contextlib.suppress(Exception):
                         from bot import ops

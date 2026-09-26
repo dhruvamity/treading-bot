@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+from dataclasses import asdict
 from decimal import Decimal as D
 from pathlib import Path
 from typing import Any
@@ -245,6 +246,21 @@ def test_every_menu_setting_writes_a_valid_following_session(tmp_path: Path) -> 
         sess = load_session(p)
         assert sess.sizing is not None and sess.sizing.follow_equity and sess.capital_usd == 40
         assert json.loads(json.dumps(s))   # plain data only
+
+
+def test_a_loss_limit_and_a_new_run_id_go_into_the_session(tmp_path: Path) -> None:
+    from bot.common.config import AppConfig
+    from bot.scout.pilot import Pilot
+    from bot.telegram.control import Control
+
+    pilot = Pilot(tmp_path, Control(AppConfig(), root=tmp_path))
+    c = {"market": "BTC-USD", "config": "touch 0bp @ 20x", "setting": "touch 0bp", "volume_day": 3266,
+         "pnl_day": -0.76, "worst_day": -0.93, "days": 5, "risk": asdict(Risk.for_capital(28, 20, 20)),
+         "max_loss_usd": 30}
+    a = load_session(pilot.write_session(c, live=True, path=tmp_path / "check.yaml"))
+    b = load_session(pilot.write_session({**c, "max_loss_usd": None}, live=True))
+    assert a.max_loss_usd == 30 and b.max_loss_usd is None and a.run_id and b.run_id and a.run_id != b.run_id
+    assert (tmp_path / "check.yaml").exists() and pilot.session_path.exists()
 
 
 def test_the_live_scan_output_carries_the_capital() -> None:

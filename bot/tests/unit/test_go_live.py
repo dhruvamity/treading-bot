@@ -195,6 +195,10 @@ def test_doctor_blocks_the_mistakes(tmp_path: Path) -> None:
     try:
         Path(hb).write_text(json.dumps({"ts_us": time.time_ns() // 1000, "pid": other.pid}))
         rep = doctor([s], FakeArcus(geo_blocked=True, skew_s=9, keys=soon), env, tmp=tmp_path)
+        # Telegram's /run replaces the running bot, which closes its orders and position first
+        swap = doctor([s], FakeArcus(positions={btc_id: {"size": "0.001"}}), env, tmp=tmp_path, replacing=True)
+        assert levels(swap, "already running") == {"INFO"} and levels(swap, "arcus positions") == {"INFO"}
+        assert not swap.failed, swap.render()
     finally:
         other.kill()
         other.wait()

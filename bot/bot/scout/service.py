@@ -136,7 +136,8 @@ async def run_service(root: Path, pilot: Pilot, *, rest_url: str, ws_url: str, e
                                     free=snap["free"], net_deposits=snap["net_deposits"])
                 eq = snap["equity"] if snap and snap["equity"] > 0 and str(spec).lower() == "auto" else None
                 cap, src = choose(spec, eq, z)
-                cap, src, moved = settle(state_dir, cap, src, today=time.strftime("%Y-%m-%d", time.gmtime()))
+                cap, src, moved = settle(state_dir, cap, src, today=time.strftime("%Y-%m-%d", time.gmtime()),
+                                         net_deposits=snap["net_deposits"] if snap else None)
                 a = pilot.active()
                 n = scan_workers(want_workers, bool(pilot.control.running_modes()))
                 st = read_status(root)
@@ -144,7 +145,7 @@ async def run_service(root: Path, pilot: Pilot, *, rest_url: str, ws_url: str, e
                 res = await loop.run_in_executor(None, functools.partial(
                     scan, root / "data" / "scout", workers=n, ladder=ladder, capital=cap, pct=z.pct(),
                     capital_source=src, always={(a["market"], a["config"])} if a else None, stop=halt,
-                    volume_cost=settings.volume_cost(over)))
+                    volume_cost=settings.volume_cost(over), lev_caps=settings.lev_caps(over)))
                 save_scan(root, res)
                 hist = (st.get("history") or []) + [{"ts": time.time(), "took_s": res["took_s"], "workers": n,
                                                     "full": bool(res.get("day_jobs"))}]

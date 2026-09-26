@@ -214,6 +214,7 @@ HELP = """<b>Pick and run</b>
 /top3 🟢 breakeven · /volume 🔥 · /aggressive ⚡ · /maxvolume 🚀
 /run — any market, setting and leverage
 <code>/run BTC touch 0bp max paper</code>
+<code>/run BTC touch 0bp 20x live sl=30</code> stops for good at a $30 loss
 /openpositions — what runs · go LIVE · close
 
 <b>Watch</b>

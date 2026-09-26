@@ -73,6 +73,27 @@ SCAN_WAIT_S = 30 * 60                   # no scan running or queued this long af
 SCAN_GIVE_UP_S = 6 * 3600               # stop waiting for a scan after this long (a slow one is still running)
 
 
+MAX_LOSS_KEYS = ("sl=", "maxloss=", "max_loss=")
+
+
+def _take_max_loss(args: list[str]) -> tuple[list[str], float | str | None]:
+    """/run ... sl=30 (or sl=$30): (the other arguments, the dollar loss limit); a string is the error to show."""
+    rest, out = [], None
+    for a in args:
+        key = next((k for k in MAX_LOSS_KEYS if a.lower().startswith(k)), None)
+        if key is None:
+            rest.append(a)
+            continue
+        try:
+            v = float(a[len(key):].strip().lstrip("$").replace(",", ""))
+        except ValueError:
+            return args, f"sl= takes dollars, e.g. sl=30 (got {escape(a)})"
+        if not 0.5 <= v <= 1_000_000:
+            return args, "sl= must be between $0.50 and $1,000,000"
+        out = v
+    return rest, out
+
+
 @dataclass
 class Pending:
     pid: str
@@ -399,7 +420,8 @@ class TelegramBot:
     # ------------------------------------------------------------------ run any setup: market -> setting -> leverage
     async def c_run(self, ctx: Ctx, args: list[str]) -> None:
         """/run: pick a market, a setting and a leverage (the whole ladder), then Paper or LIVE. /run QQQ [setting]
-        [20x|max] [paper|live] jumps ahead; /run <session file> starts a session file as before."""
+        [20x|max] [paper|live] [sl=30] jumps ahead (sl: the most the run may lose, in dollars); /run <session file>
+        starts a session file as before."""
         from bot.scout.pilot import setting_id
 
         names = {x["name"]: x for x in self.control.sessions()}
@@ -412,11 +434,18 @@ class TelegramBot:
         if not args:
             await self.reply(ctx, "🎯 <b>Run any setup</b> · market", markets_keyboard(self.pilot.latest_scan()))
             return
+        args, max_loss = _take_max_loss(args)
+        if isinstance(max_loss, str):
+            await self.reply(ctx, max_loss)
+            return
         parsed = self._parse_run(args)
         if isinstance(parsed, str):
             await self.reply(ctx, parsed)
             return
         market, setting, lev, mode = parsed
+        if max_loss and (setting is None or lev is None or mode is None):
+            await self.reply(ctx, "With sl= give the whole setup: <code>/run BTC touch 0bp 20x live sl=30</code>")
+            return
         if setting is None:
             await self._settings(ctx, market)
         elif lev is None:
@@ -424,7 +453,7 @@ class TelegramBot:
         elif mode is None:
             await self._run_screen(ctx, market, setting_id(setting), lev, "manual")
         else:
-            await self._deploy_flow(ctx, market, setting, lev, "manual", live=mode == "live")
+            await self._deploy_flow(ctx, market, setting, lev, "manual", live=mode == "live", max_loss=max_loss)
 
     def _parse_run(self, args: list[str]) -> tuple[str, str | None, float | str | None, str | None] | str:
         """QQQ "touch 1bp" 20x live -> ("QQQ-USD", "touch 1bp", 20.0, "live"); a string is the error to show."""
@@ -535,22 +564,31 @@ class TelegramBot:
             await self.reply(ctx, "No paper run to take live. /openpositions")
             return
         lev = (a.get("backtest") or {}).get("leverage") or float(a["config"].split(" @ ")[1].rstrip("x"))
-        await self._deploy_flow(ctx, a["market"], setting_of(a), float(lev), a.get("profile") or "manual", live=True)
+        await self._deploy_flow(ctx, a["market"], setting_of(a), float(lev), a.get("profile") or "manual", live=True,
+                                max_loss=a.get("max_loss_usd"))
 
     async def _deploy_flow(self, ctx: Ctx, market: str, setting: str, lev: float | str, profile: str, *,
-                           live: bool) -> None:
-        """Paper: a Confirm button. LIVE: BOT_PILOT_LIVE=1, a passing doctor, then a typed one-time code."""
+                           live: bool, max_loss: float | None = None) -> None:
+        """Paper: a Confirm button. LIVE: BOT_PILOT_LIVE=1, a passing doctor, then a typed one-time code.
+        max_loss: the owner's loss limit for the run (sl=)."""
         assert self.pilot is not None
         try:
             c = self._find(market, setting, lev, profile)
         except ValueError as e:
             await self.reply(ctx, escape(str(e)))
             return
+        c = {**c, "max_loss_usd": max_loss}
         what = f"{escape(short(c['market']))} · {escape(setting)} · {float(c['leverage']):g}x"
         args_ = {"market": c["market"], "setting": setting, "lev": float(c["leverage"]), "profile": c["profile"],
-                 "live": live}
+                 "live": live, "max_loss": max_loss}
+        mode = "live" if live else "paper"
+        running = self.pilot.active() if self.control.is_running(mode) else None
+        notes = ([f"🛑 Stops for good once this run loses {escape(f'${max_loss:,.2f}')} (the daily stop and kill "
+                  "are raised to match; the position stop stays)"] if max_loss else []) + \
+            ([f"↩️ Replaces the running {mode.upper()} bot ({escape(short(running['market']))} · "
+              f"{escape(running['config'])}): it closes its orders and position first"] if running else [])
         if not live:
-            await self._ask(ctx, "deploy", args_, f"📝 Paper · {what}?")
+            await self._ask(ctx, "deploy", args_, f"📝 Paper · {what}?" + "".join(f"\n{n}" for n in notes))
             return
         if os.environ.get("BOT_PILOT_LIVE") != "1":
             await self.reply(ctx, "LIVE is off on this server: BOT_PILOT_LIVE=1 in .env, then restart.")
@@ -558,9 +596,9 @@ class TelegramBot:
         await self.reply(ctx, f"🩺 Checking the account for {what}…")
 
         async def go() -> None:
-            try:
-                self.pilot.write_session(c, live=True)
-                ok, rep = await self.control.doctor("pilot")
+            try:   # checked from its own file: the running bot's session stays as it is until the owner confirms
+                path = self.pilot.write_session(c, live=True, path=self._state_dir() / "pilot_check.yaml")
+                ok, rep = await self.control.doctor(str(path), replacing=self.control.is_running("live"))
             except Exception as e:
                 await self.api.send(ctx.chat_id, f"⚠️ doctor failed: {escape(redact_str(str(e))[:300])}")
                 return
@@ -568,7 +606,8 @@ class TelegramBot:
                 await self.api.send(ctx.chat_id, f"❌ Not starting:\n<pre>{escape(rep[:3500])}</pre>")
                 return
             await self._ask(Ctx(ctx.chat_id, ctx.user_id, ctx.user), "deploy", args_,
-                            f"🔴 <b>LIVE</b> · {what}\n{escape(_sizes(c))}", code=True)
+                            f"🔴 <b>LIVE</b> · {what}\n{escape(_sizes(c))}" + "".join(f"\n{n}" for n in notes),
+                            code=True)
         self._spawn(go())
 
     async def c_pilotclose(self, ctx: Ctx, args: list[str]) -> None:
@@ -891,7 +930,8 @@ class TelegramBot:
             return
         venue = rest[0] if rest and rest[0] in VENUES else None
         await self._ask(ctx, "resume", {"mode": mode, "venue": venue},
-                        f"Clear the safety stops on <b>{mode.upper()}</b>? Check /logs first.")
+                        f"Clear the safety stops on <b>{mode.upper()}</b>? A daily stop re-arms from now: the rest of "
+                        "the UTC day may lose one more daily stop. Check /logs first.")
 
     async def _run_session(self, ctx: Ctx, name: str, live: bool, sess: dict[str, Any]) -> None:
         """/run <session file> [live]: a session file from config/sessions (the pilot's own is pilot.yaml)."""
@@ -997,7 +1037,7 @@ class TelegramBot:
             self._spawn(self._ensure_stopped(ctx, a["mode"]))
         elif p.action == "deploy":
             try:
-                c = self._find(a["market"], a["setting"], a["lev"], a["profile"])
+                c = {**self._find(a["market"], a["setting"], a["lev"], a["profile"]), "max_loss_usd": a.get("max_loss")}
             except ValueError as e:
                 await self.reply(ctx, escape(str(e)))
                 return
@@ -1020,7 +1060,8 @@ class TelegramBot:
             self._spawn(close())
         elif p.action == "resume":
             self.control.request_resume(a["mode"], a.get("venue"))
-            await self.reply(ctx, f"▶️ Resume sent to <b>{a['mode'].upper()}</b>.")
+            await self.reply(ctx, f"▶️ Resume sent to <b>{a['mode'].upper()}</b>: quoting restarts within a few "
+                             "seconds. /dashboard")
         elif p.action == "run":
             rec = self.control.start_run(a["name"], live=bool(a["live"]))
             await self.reply(ctx, f"🚀 Starting <b>{escape(a['name'])}</b> ({'LIVE' if a['live'] else 'paper'})…")
@@ -1041,7 +1082,7 @@ class TelegramBot:
             if settings.SETTINGS[name].field:   # a sizing setting: rescan at the new numbers now
                 forget(self._state_dir())
                 (self._state_dir() / SCAN_NOW).touch()
-            elif name == "volume_cost":         # the lists re-rank at once; the scan re-checks the new entrants' 24 h
+            elif name in ("volume_cost", "crypto_lev"):   # re-rank now / backtest the new leverage now
                 (self._state_dir() / SCAN_NOW).touch()
             over = settings.load(self._state_dir())
             shown = settings.show(name, over[name]) if name in over else "its default"

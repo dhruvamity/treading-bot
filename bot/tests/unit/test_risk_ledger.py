@@ -6,6 +6,7 @@ import asyncio
 import json
 from decimal import Decimal as D
 from pathlib import Path
+from typing import Any
 
 import pytest
 
@@ -158,6 +159,60 @@ def test_kill_take_profit_and_kill_usd() -> None:
     ds = r.on_pnl(venue=Venue.ARCUS, session_id="s", session_pnl=D(0), session_margin=D(35), stop_loss_pct=10,
                   take_profit_pct=None, day_pnl=D(0), capital=D(50), equity=D("45.9"), ts_us=T0, kill_usd=D(4))
     assert any(d.action is RiskAction.STOP_ALL for d in ds)  # $4.10 below the peak > the $4 kill
+
+
+def test_resume_after_a_daily_stop_rearms_it_from_there() -> None:
+    """2026-09-26, live BTC: /resumeaftersl after the daily stop was sent, but the stop was never cleared."""
+    r = RiskEngine(limits=RiskLimitsCfg())
+
+    def pnl(x: str) -> list[str]:
+        return [d.trigger for d in r.on_pnl(
+            venue=Venue.ARCUS, session_id="s", session_pnl=D(x), session_margin=D(30), stop_loss_pct=100,
+            take_profit_pct=None, day_pnl=D(x), capital=D(30), equity=D(30) + D(x), ts_us=T0,
+            daily_stop_usd=D("0.60"), kill_usd=D(10))]
+    assert pnl("-0.61") == ["daily_loss"]
+    assert r.quoting_allowed(Venue.ARCUS, "BTC", T0) == (False, "daily loss stop")
+    r.resume(Venue.ARCUS, all_=True)
+    assert r.quoting_allowed(Venue.ARCUS, "BTC", T0)[0]
+    assert pnl("-0.85") == []                            # $0.24 since the resume: under another $0.60
+    assert pnl("-1.25") == ["daily_loss"]                # $0.64 since the resume
+    assert not r.quoting_allowed(Venue.ARCUS, "BTC", T0)[0]
+    r.roll_day(T0 + 86_400_000_000)
+    assert not r.day_rearm and Venue.ARCUS not in r.venue_stopped_day
+
+
+def test_a_run_loss_limit_replaces_the_session_daily_and_kill_stops() -> None:
+    """/run ... sl=30: only the run's $30 limit (and the position stop) ends it; a resume cannot take it further."""
+    r = RiskEngine(limits=RiskLimitsCfg())
+
+    def pnl(x: str) -> list[str]:
+        return [d.trigger for d in r.on_pnl(
+            venue=Venue.ARCUS, session_id="s", session_pnl=D(x), session_margin=D(32), stop_loss_pct=10,
+            take_profit_pct=None, day_pnl=D(x), capital=D(32), equity=D(100) + D(x), ts_us=T0,
+            daily_stop_usd=D("0.64"), kill_usd=D("3.2"), run_pnl=D(x), run_limit_usd=D(30))]
+    assert pnl("-29.99") == []            # well past the $3.20 session stop and kill and the $0.64 daily stop
+    assert pnl("-30") == ["run_loss"] and "its limit is $30.00" in str(r.all_stopped)
+    assert not r.quoting_allowed(Venue.ARCUS, "BTC", T0)[0]
+    r.resume(all_=True)
+    assert pnl("-30.5")[0] == "run_loss"
+
+
+def test_the_run_loss_survives_a_restart(tmp_path: Path) -> None:
+    from types import SimpleNamespace
+
+    from bot.core.engine import SessionEngine
+    from bot.core.state import StateStore
+
+    st = StateStore(tmp_path / "s.sqlite")
+
+    def engine(run_id: str) -> Any:
+        return SimpleNamespace(session=SimpleNamespace(run_id=run_id), state=st, _run_carry=None, _run_saved_us=0)
+    a = engine("BTC-USD-1")
+    assert SessionEngine._run_total(a, D(-4), T0) == D(-4)
+    assert SessionEngine._run_total(a, D(-6), T0 + 6_000_000) == D(-6)           # saved every 5 s
+    assert SessionEngine._run_total(engine("BTC-USD-1"), D(-1), T0) == D(-7)     # the same run after a restart
+    assert SessionEngine._run_total(engine("BTC-USD-2"), D(-1), T0) == D(-1)     # a new run starts from zero
+    assert SessionEngine._run_total(engine(""), D(-1), T0) == D(-1)              # no run id: this process only
 
 
 def test_kill_safety_pause_and_resume() -> None:

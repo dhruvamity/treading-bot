@@ -10,7 +10,8 @@ exactly what the live engine does with the account's equity.
 Every new capital means backtesting the whole week again, so settle() only moves the scan's capital when it matters:
 a fixed amount, or a change of kind (paper -> a funded account), applies at once; the account's equity moving applies
 only once it is 25% or more away from the capital in use, and at most once per UTC day (the live bot re-sizes daily
-too). The capital in use is kept in state/scout_capital.json.
+too), unless money came in or went out (a deposit or withdrawal) or the equity is half or twice the capital in use:
+then at once. The capital in use is kept in state/scout_capital.json.
 """
 
 from __future__ import annotations
@@ -65,9 +66,10 @@ def kind_of(source: str) -> str:
     return "fixed" if source.startswith("fixed") else "account" if source.startswith("account") else "paper"
 
 
-def settle(state_dir: Path | str, capital: float, source: str, *, today: str, band: float = BAND
-           ) -> tuple[float, str, bool]:
-    """(capital to scan at, its source, whether it changed) given this scan's candidate (see the module docstring)."""
+def settle(state_dir: Path | str, capital: float, source: str, *, today: str, band: float = BAND,
+           net_deposits: float | None = None) -> tuple[float, str, bool]:
+    """(capital to scan at, its source, whether it changed) given this scan's candidate (see the module docstring).
+    net_deposits: the account's deposits less withdrawals now; a change since the capital was set moves it today."""
     p = Path(state_dir) / STATE
     try:
         prev: dict[str, Any] | None = json.loads(p.read_text())
@@ -76,13 +78,18 @@ def settle(state_dir: Path | str, capital: float, source: str, *, today: str, ba
     if prev and prev.get("kind") == kind_of(source) and prev.get("usd"):
         held = float(prev["usd"])
         near = held / band <= capital <= held * band
-        if kind_of(source) != "fixed" and (near or prev.get("day") == today):
+        was = prev.get("net_deposits")
+        moved = net_deposits is not None and was is not None and abs(net_deposits - float(was)) >= 1
+        far = not held / 2 <= capital <= held * 2
+        if kind_of(source) != "fixed" and (near or (prev.get("day") == today and not moved and not far)):
+            if net_deposits is not None and was is None:   # an older file: remember the deposits from now on
+                p.write_text(json.dumps({**prev, "net_deposits": net_deposits}))
             return held, str(prev.get("source") or source), False
         if kind_of(source) == "fixed" and abs(capital - held) < 1e-9:
             return held, source, False
     p.parent.mkdir(parents=True, exist_ok=True)
     p.write_text(json.dumps({"usd": capital, "source": source, "kind": kind_of(source), "day": today,
-                             "ts": time.time()}))
+                             "ts": time.time(), "net_deposits": net_deposits}))
     return capital, source, True
 
 

@@ -135,6 +135,9 @@ class SessionEngine:
         self._refused_at: deque[int] = deque()           # pre-trade refusals in the last minute
         self._refused_alert_us: dict[str, int] = {}      # last alert per check
         self.session_start_equity: Decimal | None = None
+        self.run_pnl: Decimal | None = None             # the whole run's PnL when it has a loss limit (sl=)
+        self._run_carry: Decimal | None = None          # ... that earlier processes of the same run made
+        self._run_saved_us = 0
         self.day_start_equity: dict[str, Decimal] = {}
         self.inflight_intents: dict[tuple[Venue, str], int] = {}
         self._fill_usd_5m: deque[tuple[int, float]] = deque()
@@ -523,11 +526,14 @@ class SessionEngine:
         self.day_start_equity.setdefault(day, equity)
         self.risk.roll_day(now_us)
         s = self.session
+        if s.max_loss_usd:
+            self.run_pnl = self._run_total(equity - self.session_start_equity, now_us)
         for d in self.risk.on_pnl(venue=self.venue, session_id=self.sid, session_pnl=equity - self.session_start_equity,
                                   session_margin=self.size_capital, stop_loss_pct=s.stop_loss_pct,
                                   take_profit_pct=s.take_profit_pct, day_pnl=equity - self.day_start_equity[day],
                                   capital=self.size_capital, equity=equity, ts_us=now_us,
-                                  daily_stop_usd=_usd(s.daily_stop_usd), kill_usd=_usd(s.kill_usd)):
+                                  daily_stop_usd=_usd(s.daily_stop_usd), kill_usd=_usd(s.kill_usd),
+                                  run_pnl=self.run_pnl, run_limit_usd=_usd(s.max_loss_usd)):
             await self.execute(d, now_us)
         # liquidation distance (A6.7)
         pos = self.state.position(self.venue, self.base)
@@ -540,6 +546,18 @@ class SessionEngine:
                                                       sigma_1h=view.sigma_1h())
             if dl:
                 await self.execute(dl, now_us)
+
+    def _run_total(self, pnl: Decimal, now_us: int) -> Decimal:
+        """The run's PnL across restarts: what earlier processes of this run (the pilot's run_id) made, kept in kv
+        and saved every 5 s, plus this process's. A session without a run_id counts this process only."""
+        key = f"run_pnl:{self.session.run_id}" if self.session.run_id else ""
+        if self._run_carry is None:
+            self._run_carry = Decimal(self.state.kv_get(key) or 0) if key else Decimal(0)
+        total = self._run_carry + pnl
+        if key and now_us - self._run_saved_us >= 5 * US_PER_S:
+            self._run_saved_us = now_us
+            self.state.kv_set(key, str(total))
+        return total
 
     async def execute(self, d: RiskDecision, now_us: int) -> None:
         self.stats.risk_events.append(d)
@@ -561,7 +579,7 @@ class SessionEngine:
             self.clock.begin_exit(now_us)
             if d.action is RiskAction.STOP_ALL:
                 self.stopped = True
-                await self.flatten_all(now_us, "drawdown stop")
+                await self.flatten_all(now_us, "run loss limit" if d.trigger == "run_loss" else "drawdown stop")
             return
         if d.action is RiskAction.REDUCE_HALF and d.venue and d.market:
             pos = self.state.position(d.venue, d.market)

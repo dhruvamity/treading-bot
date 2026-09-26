@@ -117,7 +117,9 @@ def _new_market_checks(r: Report, s: MMSession, m: Market, calendar: TradingCale
 async def run_doctor(sessions: list[MMSession], *, mode: RunMode, app: AppConfig, secrets: SecretStore,
                      calendar: TradingCalendar, arcus_rest: Any, markets: dict[Venue, dict[str, Market]],
                      adopt_positions: bool = False, now_us: int | None = None,
-                     account_index: int | None = None) -> Report:
+                     account_index: int | None = None, replacing: bool = False) -> Report:
+    """replacing: Telegram's /run is about to replace the running bot, which closes its orders and position before
+    this one starts, so a running bot and its position are expected here."""
     r = Report()
     live = mode is RunMode.LIVE
     need_keys = mode is not RunMode.PAPER
@@ -153,8 +155,12 @@ async def run_doctor(sessions: list[MMSession], *, mode: RunMode, app: AppConfig
         hb_path = app.heartbeat_for(mode.value)
         hb = read_heartbeat_age_s(hb_path)
         if hb < 30 and heartbeat_process_alive(hb_path):
-            r.add("FAIL", "already running", f"a {mode.value} bot wrote a heartbeat {hb:.0f} s ago",
-                  "stop it first (sudo systemctl stop bot); two bots on one account fight each other")
+            if replacing:
+                r.add("INFO", "already running", f"the running {mode.value} bot is closed (orders and position) "
+                                                 "before this one starts")
+            else:
+                r.add("FAIL", "already running", f"a {mode.value} bot wrote a heartbeat {hb:.0f} s ago",
+                      "stop it first (/stop, or bot down); two bots on one account fight each other")
 
     # ---- environment
     try:
@@ -187,13 +193,13 @@ async def run_doctor(sessions: list[MMSession], *, mode: RunMode, app: AppConfig
 
     # ---- Arcus account (with no sessions named: the credentials and the key's own subaccount)
     await _arcus_checks(r, sessions, idx, secrets=secrets, rest=arcus_rest, markets=markets, testnet=testnet,
-                        miss=miss, live=live, adopt=adopt_positions, now_ms=now // 1000)
+                        miss=miss, live=live, adopt=adopt_positions, now_ms=now // 1000, replacing=replacing)
     return r
 
 
 async def _arcus_checks(r: Report, sessions: list[MMSession], idx: int, *, secrets: SecretStore, rest: Any,
                         markets: dict[Venue, dict[str, Market]], testnet: bool, miss: str, live: bool, adopt: bool,
-                        now_ms: int) -> None:
+                        now_ms: int, replacing: bool = False) -> None:
     try:
         address = arcus_address(secrets, testnet)
         privs = arcus_private_keys(secrets, testnet)
@@ -298,7 +304,9 @@ async def _arcus_checks(r: Report, sessions: list[MMSession], idx: int, *, secre
     open_pos = {by_id.get(int(k), str(k)): Decimal(str(p.get("size") or 0)) for k, p in pos.items()
                 if Decimal(str(p.get("size") or 0)) != 0}
     for b, sz in sorted(open_pos.items()):
-        if b in bases and not adopt:
+        if b in bases and replacing:
+            r.add("INFO", "arcus positions", f"{b} position {sz}: the running bot closes it before this one starts")
+        elif b in bases and not adopt:
             r.add("FAIL" if live else "WARN", "arcus positions",
                   f"an open {b} position ({sz}) exists; the bot would treat it as its own inventory and trade it down",
                   "close it first, or start with --adopt-positions if the bot should manage it")

@@ -290,12 +290,14 @@ class Control:
             return ""
 
     # ------------------------------------------------------------------ venue actions (real accounts)
-    async def doctor(self, name: str) -> tuple[bool, str]:
+    async def doctor(self, name: str, *, replacing: bool = False) -> tuple[bool, str]:
+        """The live pre-start checks for a session (a name in config/sessions, or a path). replacing: the running live
+        bot is closed before this one starts (Telegram's /run), so it is not a failure here."""
         from bot.cli import _doctor, resolve_session
         from bot.core.livelock import RunMode
 
         s = load_session(resolve_session(name))
-        rep = await _doctor([s], RunMode.LIVE)
+        rep = await _doctor([s], RunMode.LIVE, replacing=replacing)
         return (not rep.failed), rep.render()
 
     async def cancel_all(self, mode: str, venue: str) -> str:

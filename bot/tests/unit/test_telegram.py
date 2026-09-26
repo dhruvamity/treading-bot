@@ -9,7 +9,8 @@ import time
 from pathlib import Path
 from typing import Any
 
-from bot.common.config import AppConfig, load_app, load_arcus_config, load_session
+from bot.common import settings
+from bot.common.config import AppConfig, SizingDefaults, load_app, load_arcus_config, load_session
 from bot.common.secrets import SecretStore
 from bot.core.calendar import TradingCalendar
 from bot.core.heartbeat import write_heartbeat
@@ -435,10 +436,57 @@ async def test_run_any_market_setting_and_leverage_from_the_command(tmp_path: Pa
     await bot.handle(press(f"ok {next(iter(bot.pending))}"))
     await asyncio.sleep(0.05)
     assert calls == [("BTC-USD", "touch 0bp", 20, False, "manual")]    # runs as the owner's pick, never paused
+    (tmp_path / "data" / "scout" / "markets.json").write_text(json.dumps({"markets": [
+        {"marketDisplayName": "BTC-USD", "initialMarginFraction": "0.025"}]}))       # Arcus allows 40x on BTC
     for bad, why in (("/run DOGE", "Unknown market"), ("/run BTC grid 99bp", "Unknown setting"),
-                     ("/run BTC touch 0bp 7x", "no backtest at 7")):
+                     ("/run BTC touch 0bp 7x", "no backtest at 7x (has 20x, 10x)"),
+                     ("/run BTC touch 0bp 60x", "Arcus allows at most 40x"),
+                     ("/run BTC touch 0bp 40x live", "The next scan backtests up to 40x: /scannow")):
         await bot.handle(msg(bad))
         assert why in api.texts(), bad
+    settings.save(tmp_path / "state", "crypto_lev", 20.0, SizingDefaults())
+    await bot.handle(msg("/run BTC touch 0bp 40x live"))
+    assert "Capped at 20x by /set crypto_lev (Arcus allows 40x)" in api.texts()
+
+
+async def test_run_with_a_loss_limit_replaces_the_running_live_bot(tmp_path: Path, monkeypatch: Any) -> None:
+    """2026-09-26: /run while a live bot sat on its daily stop failed the "already running" check; and the owner
+    wants to set the most a run may lose (sl=30)."""
+    rows = [_cand("BTC-USD", "touch 0bp", lev=20, go=False)]
+    bot, api, pilot, _calls = _with_pilot(tmp_path, rows, top=[])
+    st = pilot.state()
+    st["active"] = {"market": "QQQ-USD", "config": "touch 1bp @ 20x", "mode": "live", "since": time.time()}
+    pilot.save(st)
+    monkeypatch.setenv("BOT_PILOT_LIVE", "1")
+    pilot.control.is_running = lambda mode: mode == "live"  # type: ignore[method-assign]
+    written: list[Path | None] = []
+    pilot.write_session = lambda c, live, path=None: written.append(path) or tmp_path / "x.yaml"  # type: ignore[method-assign,assignment,func-returns-value]
+    checked: list[bool] = []
+
+    async def doctor(name: str, *, replacing: bool = False) -> tuple[bool, str]:
+        checked.append(replacing)
+        return True, "all good"
+    pilot.control.doctor = doctor  # type: ignore[method-assign]
+    deployed: list[dict[str, Any]] = []
+
+    async def deploy(c: dict[str, Any], *, live: bool, by: str) -> str:
+        deployed.append(c)
+        return "ok"
+    pilot.deploy = deploy  # type: ignore[method-assign]
+    for bad, why in (("/run BTC touch 0bp 20x sl=30", "With sl= give the whole setup"),
+                     ("/run BTC touch 0bp 20x live sl=abc", "sl= takes dollars"),
+                     ("/run BTC touch 0bp 20x live sl=0", "between $0.50")):
+        await bot.handle(msg(bad))
+        assert why in api.texts(), bad
+    await bot.handle(msg("/run BTC touch 0bp 20x live sl=$30"))
+    await asyncio.sleep(0.05)
+    assert checked == [True] and written == [tmp_path / "state" / "pilot_check.yaml"]   # pilot.yaml left alone
+    text = api.sent[-1][1]
+    assert "Stops for good once this run loses $30.00" in text and "Replaces the running LIVE bot (QQQ" in text
+    p = next(iter(bot.pending.values()))
+    await bot.handle(msg(p.code))
+    await asyncio.sleep(0.05)
+    assert deployed and deployed[0]["max_loss_usd"] == 30 and deployed[0]["market"] == "BTC-USD"
 
 
 async def test_a_paper_deployment_goes_live_with_the_same_setup(tmp_path: Path, monkeypatch: Any) -> None:
@@ -452,9 +500,9 @@ async def test_a_paper_deployment_goes_live_with_the_same_setup(tmp_path: Path, 
     await bot.handle(msg("/openpositions"))
     assert "golive" in _buttons(api)
     monkeypatch.setenv("BOT_PILOT_LIVE", "1")
-    pilot.write_session = lambda c, live: tmp_path / "pilot.yaml"  # type: ignore[method-assign,assignment]
+    pilot.write_session = lambda c, live, path=None: tmp_path / "pilot.yaml"  # type: ignore[method-assign,assignment]
 
-    async def doctor(name: str) -> tuple[bool, str]:
+    async def doctor(name: str, *, replacing: bool = False) -> tuple[bool, str]:
         return True, "all good"
     pilot.control.doctor = doctor  # type: ignore[method-assign]
     await bot.handle(press("golive"))

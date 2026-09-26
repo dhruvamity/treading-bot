@@ -10,7 +10,7 @@ risk:
   liq_distance_sigma: 4.0
   liq_resume_sigma: 6.0
   heartbeat_timeout_s: 60.0
-  max_leverage_mm: 50.0           # Arcus maximum; each session's leverage_max (the market max, BTC/ETH 20x) binds
+  max_leverage_mm: 50.0           # Arcus maximum; each session's leverage_max (the market max; /set crypto_lev caps BTC and ETH) binds
 sizing:                          # every dollar figure is a share of the capital (bot/common/sizing.py)
   capital_usd: auto              # auto: the Arcus subaccount's equity, re-read before each scan and at 00:00 UTC
                                  # by the bot; or a fixed amount (e.g. 250) to size for money not deposited yet
