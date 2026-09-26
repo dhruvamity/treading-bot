@@ -331,7 +331,10 @@ def profile_text(scan: dict[str, Any] | None, profile: str, budget: float, now: 
         return "No scan yet. On the server: <code>bot up</code>."
     top = P.top(scan, p, budget) if p.budget else list(scan.get("top") or [])
     cap = (scan.get("capital") or {}).get("usd")
-    head = (f"{p.icon} <b>{p.title}</b> · scan {ago(now - scan['ts_us'] / 1e6)} ago"
+    from bot.scout.pilot import stale_note
+
+    stale = stale_note(scan, now)
+    head = (f"{p.icon} <b>{p.title}</b> · scan {ago(now - scan['ts_us'] / 1e6)} ago" + (" ⚠️" if stale else "")
             + (f" · {money(float(cap))}" if cap else "")
             + (f" · ≤${budget:.2f}/1k" if p.budget and not p.any_cost else ""))
     if top:
@@ -349,7 +352,11 @@ def profile_text(scan: dict[str, Any] | None, profile: str, budget: float, now: 
         if near:
             body += "\nClosest: " + "\n".join(f"· {escape(short(c['market']))} {escape(c['config'])}: "
                                               f"{escape(c['reasons'][0][:80])}" for c in near)
-    return head + "\n" + body + (f"\n{note}" if note else "")
+    pend = scan.get("pending") or []
+    if pend:   # over the scan's time budget: backtested by the next scans, busiest markets first
+        body += (f"\n⏳ {len(pend)} market{'s' if len(pend) > 1 else ''} not backtested at this capital yet (next scan): "
+                 + escape(", ".join(short(m) for m in pend[:6])) + ("…" if len(pend) > 6 else ""))
+    return head + "\n" + body + (f"\n{escape(stale)}" if stale else "") + (f"\n{note}" if note else "")
 
 
 def profile_keyboard(profile: str, top: list[dict[str, Any]]) -> Keyboard:
@@ -408,6 +415,9 @@ def ladder_text(market: str, setting: str, rows: list[dict[str, Any]], budget: f
     lines = []
     for c in rows:
         lev = f"{float(c['leverage']):g}x"
+        if c.get("not_backtested"):
+            lines.append(f"{lev:>5}  not backtested: sized from the account")
+            continue
         if c.get("too_small"):
             lines.append(f"{lev:>5}  needs {usd(c.get('min_capital_usd'), sign=False)} of capital")
             continue
@@ -420,7 +430,8 @@ def ladder_text(market: str, setting: str, rows: list[dict[str, Any]], budget: f
     head = f"🎯 <b>{escape(short(market))} · {escape(setting)}</b> · {days}d of data"
     table = f"{'lev':>5} {'vol/d':>7} {'pnl/d':>6} {'worst':>6} {'24h':>6}\n" + "\n".join(lines)
     legend = "🟢 breakeven 🔥 volume ⚡ aggressive 🚀 max" + (" · ⭐ list pick" if star is not None else "")
-    return f"{head}\n<pre>{escape(table)}</pre>\n<i>{legend}</i>"
+    hint = f"Any other leverage: /run {short(market)} {setting} 33x"
+    return f"{head}\n<pre>{escape(table)}</pre>\n<i>{legend}</i>\n{escape(hint)}"
 
 
 def ladder_keyboard(market: str, sid: str, rows: list[dict[str, Any]], profile: str) -> Keyboard:
@@ -434,12 +445,17 @@ def run_text(c: dict[str, Any], budget: float, profile: str, running: list[str],
     """The run screen: sizes (in and outside US hours), the backtest, the lists it is in, what it replaces."""
     from bot.scout.profiles import profile_of
 
-    ins = lists_of(c, budget)
-    lines = [x for x in (_sizes(c),
-                         f"Backtest {kusd(c['volume_day'])}/day · {usd(c['pnl_day'])}/day · worst "
-                         f"{usd(c['worst_day'])} · {c['days']}d",
-                         (f"Last 24 h {usd(c['recent_pnl'])}" if c.get("recent_checked", True) else "Last 24 h not "
-                          "re-checked") + (f" · {cost_text(c)}" if cost_text(c) else "")) if x]
+    if c.get("volume_day") is None:   # the owner's pick at a leverage the last scan did not test
+        ins, lines = [], [x for x in (_sizes(c), "Not backtested at this leverage yet: sized from the account now") if x]
+    else:
+        ins = lists_of(c, budget)
+        at = "" if c.get("backtested", True) or not c.get("backtest_capital_usd") else \
+            f" (at {money(float(c['backtest_capital_usd']))} capital)"
+        lines = [x for x in (_sizes(c),
+                             f"Backtest{at} {kusd(c['volume_day'])}/day · {usd(c['pnl_day'])}/day · worst "
+                             f"{usd(c['worst_day'])} · {c['days']}d",
+                             (f"Last 24 h {usd(c['recent_pnl'])}" if c.get("recent_checked", True) else "Last 24 h "
+                              "not re-checked") + (f" · {cost_text(c)}" if cost_text(c) else "")) if x]
     p = profile_of(profile)
     notes = ["In " + ", ".join(f"{x.icon} {x.title}" for x in ins) if ins else "In no list"]
     notes.append(f"Runs as {p.icon} {p.title}" + ("" if p.listed else ": the scout never pauses it for its numbers"))

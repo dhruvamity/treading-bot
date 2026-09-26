@@ -336,8 +336,10 @@ def test_pilot_session_file_is_a_valid_session(tmp_path: Path) -> None:
 
         p.write_text(yaml.safe_dump(s))
         sess = load_session(p)
-        assert sess.market == "NVDA" and sess.daily_stop_usd == 2 and sess.pos_stop_usd == 1  # type: ignore[union-attr]
-        assert sess.kill_usd == 10 and not sess.live_enabled  # type: ignore[union-attr]
+        want = Risk().with_stops(cfg.stops)                    # the Risk's dollar stops, or the setting's own
+        assert sess.market == "NVDA" and sess.daily_stop_usd == want.daily_stop_usd  # type: ignore[union-attr]
+        assert sess.pos_stop_usd == want.pos_stop_usd and sess.kill_usd == want.kill_usd  # type: ignore[union-attr]
+        assert not sess.live_enabled  # type: ignore[union-attr]
 
 
 async def test_pilot_offers_pauses_resumes_and_suggests(tmp_path: Path) -> None:
@@ -436,17 +438,27 @@ async def test_run_any_market_setting_and_leverage_from_the_command(tmp_path: Pa
     await bot.handle(press(f"ok {next(iter(bot.pending))}"))
     await asyncio.sleep(0.05)
     assert calls == [("BTC-USD", "touch 0bp", 20, False, "manual")]    # runs as the owner's pick, never paused
-    (tmp_path / "data" / "scout" / "markets.json").write_text(json.dumps({"markets": [
-        {"marketDisplayName": "BTC-USD", "initialMarginFraction": "0.025"}]}))       # Arcus allows 40x on BTC
     for bad, why in (("/run DOGE", "Unknown market"), ("/run BTC grid 99bp", "Unknown setting"),
-                     ("/run BTC touch 0bp 7x", "no backtest at 7x (has 20x, 10x)"),
-                     ("/run BTC touch 0bp 60x", "Arcus allows at most 40x"),
-                     ("/run BTC touch 0bp 40x live", "The next scan backtests up to 40x: /scannow")):
+                     ("/run BTC touch 0bp 7x", "no backtest at 7x (has 20x, 10x)")):   # no market list: scan rows only
         await bot.handle(msg(bad))
         assert why in api.texts(), bad
-    settings.save(tmp_path / "state", "crypto_lev", 20.0, SizingDefaults())
-    await bot.handle(msg("/run BTC touch 0bp 40x live"))
-    assert "Capped at 20x by /set crypto_lev (Arcus allows 40x)" in api.texts()
+    # 2026-09-26: a direct run waited hours for a scan at the new capital. With the market list it runs any leverage
+    # up to the Arcus maximum, sized for the capital the scout uses now (a deposit moves it at once)
+    (tmp_path / "data" / "scout" / "markets.json").write_text(json.dumps({"markets": [
+        {"marketDisplayName": "BTC-USD", "status": "ONLINE", "initialMarginFraction": "0.025", "tickSize": "0.1",
+         "stepSize": "0.0001", "minOrderNotional": "5", "minOrderSize": "0.0001", "markPrice": "86000"}]}))
+    (tmp_path / "state" / "scout_capital.json").write_text(json.dumps({"usd": 100}))
+    settings.save(tmp_path / "state", "crypto_lev", 20.0, SizingDefaults())   # caps the scan, not the owner's pick
+    await bot.handle(msg("/run BTC touch 0bp 60x"))
+    assert "Arcus allows at most 40x" in api.texts()
+    await bot.handle(msg("/run BTC touch 0bp 40x"))
+    assert "Not backtested at this leverage yet" in api.texts() and "max position $4,000" in api.texts()
+    await bot.handle(msg("/run BTC touch 0bp 20x"))
+    assert "Backtest (at $28 capital)" in api.texts() and "max position $2,000" in api.texts()
+    await bot.handle(msg("/run BTC touch 0bp 40x paper"))
+    await bot.handle(press(f"ok {list(bot.pending)[-1]}"))
+    await asyncio.sleep(0.05)
+    assert calls[-1] == ("BTC-USD", "touch 0bp", 40, False, "manual")
 
 
 async def test_run_with_a_loss_limit_replaces_the_running_live_bot(tmp_path: Path, monkeypatch: Any) -> None:
@@ -565,3 +577,57 @@ async def test_the_renamed_commands_work_and_the_old_names_still_do(tmp_path: Pa
     assert "report" in api.sent[-1][1].lower()
     await bot.handle(msg("/closeall"))
     assert "real account" in api.sent[-1][1]                 # paper: close-all is refused, as flatten was
+
+
+async def test_a_mistyped_doctor_session_answers_instead_of_ending_the_bot(tmp_path: Path) -> None:
+    """/doctor with a session name that does not exist reached the CLI's sys.exit: SystemExit is not an Exception,
+    so it went past the handler and ended the Telegram bot."""
+    app = _app(tmp_path)
+    bot, api, _ctl = _bot(tmp_path, app)
+    await bot.handle(msg("/doctor no_such_session"))
+    await asyncio.sleep(0.05)
+    assert "doctor failed: no session called" in api.texts() and "no_such_session" in api.texts()
+
+
+async def test_an_old_scan_is_a_warning_not_a_refusal(tmp_path: Path) -> None:
+    """"the last scan is over 90 minutes old" refused every list pick while a long scan ran; now it only warns."""
+    rows = [_cand("QQQ-USD", "touch 1bp", lev=20)]
+    bot, api, _pilot, _calls = _with_pilot(tmp_path, rows)
+    p = tmp_path / "data" / "scout" / "latest.json"
+    scan = json.loads(p.read_text())
+    scan["ts_us"] -= 3 * 3600 * 1_000_000
+    p.write_text(json.dumps(scan))
+    await bot.handle(msg("/top3"))
+    assert "scan 3.0 h old" in api.texts() and "You can still run" in api.texts()
+    await bot.handle(press("pick breakeven 1"))
+    assert "over 90 minutes" not in api.texts() and "20x" in api.edits[-1][2]
+
+
+async def test_run_any_leverage_below_the_maximum_without_a_backtest(tmp_path: Path, monkeypatch: Any) -> None:
+    """2026-09-26: `/run SPY touch 0bp 33x live sl=30` answered "no backtest at 33x (has 50x, 20x, ...)". The scan
+    now backtests the maximum only; any leverage up to it runs, sized for the balance, marked as not backtested."""
+    from bot.scout.pilot import setting_id
+
+    rows = [_cand("SPY-USD", "touch 0bp", lev=50, at_max=True, go=False)]
+    bot, api, pilot, _calls = _with_pilot(tmp_path, rows, top=[])
+    (tmp_path / "data" / "scout" / "markets.json").write_text(json.dumps({"markets": [
+        {"marketDisplayName": "SPY-USD", "status": "ONLINE", "initialMarginFraction": "0.02",
+         "offHoursInitialMarginFraction": "0.03", "tickSize": "0.01", "stepSize": "0.001", "minOrderNotional": "5",
+         "minOrderSize": "0.001", "markPrice": "770"}]}))
+    (tmp_path / "state" / "scout_capital.json").write_text(json.dumps({"usd": 100}))
+    monkeypatch.setenv("BOT_PILOT_LIVE", "1")
+    pilot.control.is_running = lambda mode: False  # type: ignore[method-assign]
+    pilot.write_session = lambda c, live, path=None: tmp_path / "x.yaml"  # type: ignore[method-assign,assignment]
+
+    async def doctor(name: str, *, replacing: bool = False) -> tuple[bool, str]:
+        return True, "all good"
+    pilot.control.doctor = doctor  # type: ignore[method-assign]
+    await bot.handle(msg("/run SPY touch 0bp 33x live sl=30"))
+    await asyncio.sleep(0.05)
+    text = api.sent[-1][1]
+    assert "no backtest" not in api.texts() and "LIVE" in text and "SPY · touch 0bp · 33x" in text
+    assert "Stops for good once this run loses $30.00" in text
+    await bot.handle(press(f"rs SPY-USD {setting_id('touch 0bp')} manual"))     # the leverage screen
+    screen = api.edits[-1][2] if api.edits else api.sent[-1][1]
+    assert "20x  not backtested" in screen and "Any other leverage: /run SPY touch 0bp 33x" in screen
+    assert any(d.startswith("rl SPY-USD ") and d.split()[3] == "20" for d in _buttons(api))

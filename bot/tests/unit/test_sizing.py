@@ -85,14 +85,15 @@ def _meta(market: str, price: float, imf: float, off_imf: float, min_size: float
 def test_scanner_sizes_at_the_capital_and_skips_leverages_it_cannot_fund(tmp_path: Path) -> None:
     sndk = _meta("SNDK-USD", 1803.89, 0.1, 0.15, 0.01)          # minimum order $18.04
     mi = MarketInfo(0.01, 0.01, 5.0, 0.01)
-    rs = Scanner(tmp_path, capital=10).risks_for(sndk, mi)
+    assert [r["leverage"] for r in Scanner(tmp_path, capital=10).risks_for(sndk, mi)] == [10]   # default: the max only
+    rs = Scanner(tmp_path, capital=10, ladder=True).risks_for(sndk, mi)
     assert [r["leverage"] for r in rs] == [10, 5, 2]
     assert all(r["capital_usd"] == 10 and r["pos_stop_usd"] == pytest.approx(0.1) for r in rs)
     need = {r["leverage"]: r["min_capital_usd"] for r in rs}
     assert need[10] == pytest.approx(8.12, abs=0.01) and need[2] == pytest.approx(27.06, abs=0.01)
     ok = [r["leverage"] for r in rs if r["used_usd"] >= r["min_capital_usd"]]
     assert ok == [10]                                            # $10 funds SNDK only at its maximum
-    big = Scanner(tmp_path, capital=100_000).risks_for(sndk, mi, order_max=3_000)
+    big = Scanner(tmp_path, capital=100_000, ladder=True).risks_for(sndk, mi, order_max=3_000)
     assert {r["order_usd"] for r in big} == {3_000}              # every rung stops at the ceiling
     assert [round(r["used_usd"]) for r in big] == [750, 1500, 3750]
 
@@ -179,11 +180,29 @@ def test_the_engine_follows_equity_up_to_what_the_scout_covered(tmp_path: Path) 
     eng.resize(now + 86_400_000_000)
     assert s.order_size_usd == pytest.approx(1_000)
     eng.state.kv_set("sizing_ok", "1000.00:BTC")                 # the scout found it GO at $1,000
-    eng.resize(now + 86_400_000_000 + 3_600_000_000)
-    assert s.order_size_usd == pytest.approx(1_000)              # same UTC day: sizes stay put
-    eng.resize(now + 2 * 86_400_000_000)                         # 00:00 UTC: re-read
+    eng.resize(now + 86_400_000_000 + 1_800_000_000)
+    assert s.order_size_usd == pytest.approx(1_000)              # checked at most once an hour
+    eng.resize(now + 86_400_000_000 + 3_600_000_000)             # an hour on: 8x what it was sized for -> re-size
     assert eng.size_capital == D("1000") and s.order_size_usd == pytest.approx(8_000)
     assert (s.pos_stop_usd, s.daily_stop_usd, s.kill_usd) == pytest.approx((10, 20, 100))
+
+
+def test_the_owners_own_pick_follows_the_balance_and_resizes_on_a_deposit(tmp_path: Path) -> None:
+    """2026-09-26: a deposit mid-run changed nothing until 00:00 UTC, and the owner's own pick stayed at 1.25x the
+    capital it started with for good. Now it follows the balance (cap_to_backtest false), within the hour of a move of
+    25% or more; smaller moves wait for 00:00 UTC."""
+    now = 1_790_000_000_000_000
+    eng, s = _engine(tmp_path, 140)
+    assert s.sizing is not None
+    s.sizing.cap_to_backtest = False
+    eng.resize(now)
+    assert eng.size_capital == D("140")                               # not 1.25x the $100 backtest
+    eng.set_account(Venue.ARCUS, D("160"), D("160"))                  # +14%: nothing within the day
+    eng.resize(now + 3_600_000_000)
+    assert eng.size_capital == D("140")
+    eng.set_account(Venue.ARCUS, D("450"), D("450"))                  # a deposit
+    eng.resize(now + 2 * 3_600_000_000)
+    assert eng.size_capital == D("450") and "follows the balance" in eng.decisions.records[-1]["reason"]
 
 
 def test_the_engine_shrinks_with_losses_and_stops_quoting_under_the_minimum(tmp_path: Path) -> None:
@@ -260,6 +279,8 @@ def test_a_loss_limit_and_a_new_run_id_go_into_the_session(tmp_path: Path) -> No
     a = load_session(pilot.write_session(c, live=True, path=tmp_path / "check.yaml"))
     b = load_session(pilot.write_session({**c, "max_loss_usd": None}, live=True))
     assert a.max_loss_usd == 30 and b.max_loss_usd is None and a.run_id and b.run_id and a.run_id != b.run_id
+    own = load_session(pilot.write_session({**c, "profile": "manual"}, live=True))
+    assert a.sizing and a.sizing.cap_to_backtest and own.sizing and not own.sizing.cap_to_backtest
     assert (tmp_path / "check.yaml").exists() and pilot.session_path.exists()
 
 
@@ -269,3 +290,50 @@ def test_the_live_scan_output_carries_the_capital() -> None:
     line = capital_line({"capital": {"usd": 250, "source": "account equity $262.10", "pct": Pct().__dict__}})
     assert "$250.00" in line and "position 1%" in line and "kill 10%" in line
     assert asyncio.iscoroutinefunction(__import__("bot.scout.capital", fromlist=["x"]).account_equity)
+
+
+def test_a_run_is_sized_for_the_balance_now_not_the_scans_capital(tmp_path: Path) -> None:
+    """2026-09-26: after a deposit a run sized for the capital the morning's scan used. The scan's capital now holds
+    for the UTC day (a new one re-runs every recorded day); runs size from the latest logged balance instead."""
+    import time
+
+    from bot.common import settings
+    from bot.common.config import AppConfig
+    from bot.core.balances import BalanceLog
+    from bot.scout.capital import STATE, choose
+    from bot.scout.pilot import Pilot
+    from bot.telegram.control import Control
+
+    app = AppConfig(state_dir="state")
+    pilot = Pilot(tmp_path, Control(app, root=tmp_path))
+    (tmp_path / "state").mkdir()
+    (tmp_path / "state" / STATE).write_text(json.dumps({"usd": 30, "day": "2026-09-26"}))
+    log = BalanceLog(tmp_path / "state" / "balances.jsonl")
+    log.record(source="scout", equity=130.0, ts=time.time() - 7 * 3600)    # too old: the scan's capital stands
+    assert pilot.capital_now() == 30
+    log.record(source="telegram", equity=130.0)
+    log.record(source="bot", equity=5000.0, account_index=3)               # another subaccount: not ours
+    z = settings.effective_sizing(app.sizing, {})
+    assert pilot.capital_now() == choose("auto", 130.0, z)[0] > 30
+    settings.save(tmp_path / "state", "max_capital", 50.0, app.sizing)     # the owner's cap applies
+    assert pilot.capital_now() == 50
+
+
+def test_a_setting_can_carry_its_own_stops_into_the_backtest_and_the_session(tmp_path: Path) -> None:
+    """2026-09-26 research: deep quotes on the anchored perps only held up with room for the reversion (3/6/15 of the
+    capital, not the default 1/2/10). The setting carries those stops into its backtest and into the live session."""
+    from bot.scout.scan import BY_NAME
+
+    cfg = BY_NAME["deep 3bp, no pause, 3% stop"]
+    r = Risk.for_capital(100, 25, 16.67, min_capital=0.9)
+    own = r.with_stops(cfg.stops)
+    assert (own.pos_stop_usd, own.daily_stop_usd, own.kill_usd) == pytest.approx((3.0, 6.0, 15.0))
+    assert own.order_usd == r.order_usd and r.with_stops(None) is r            # sizes unchanged; no stops: as it was
+    p = tmp_path / "x.yaml"
+    p.write_text(yaml.safe_dump(session_for("QQQ-USD", cfg, r, live=False)))
+    s = load_session(p)
+    assert s.sizing is not None and (s.sizing.position_stop_pct, s.sizing.daily_stop_pct, s.sizing.kill_pct) == \
+        pytest.approx((3.0, 6.0, 15.0))
+    assert (s.pos_stop_usd, s.daily_stop_usd, s.kill_usd) == pytest.approx((3.0, 6.0, 15.0))
+    p.write_text(yaml.safe_dump(session_for("QQQ-USD", BY_NAME["deep 3bp, no pause"], r, live=False)))
+    assert load_session(p).pos_stop_usd == pytest.approx(r.pos_stop_usd)       # no own stops: the owner's

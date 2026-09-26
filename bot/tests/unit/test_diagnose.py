@@ -92,3 +92,30 @@ def test_diagnose_counts_orders_refused_by_the_bots_own_checks(tmp_path: Path) -
     assert "free_collateral ×180 (sell 180) · 09-25 20:01:40 → 09-25 20:05:59, refusing for 3m08s" in text
     assert "last: needs $20.50, free $12.00" in text and "SPY" not in text   # a 10 s break counts as 10 s
     assert "oi_cap ×1 (buy 1)" in text
+
+
+def test_diagnose_replays_the_runs_setup_beside_the_run(tmp_path: Path) -> None:
+    """--replay: the scout's backtest of the run's own setup on the same window, with the sizes the engine traded,
+    under each fill model, beside what the run did (the gap between the backtest's assumptions and the run)."""
+    from dataclasses import asdict
+
+    from bot.core.diagnose import find_setup
+    from bot.scout.sim import Risk
+
+    db = _run(tmp_path)
+    (tmp_path / "markets.json").write_text(json.dumps({"markets": [
+        {"marketDisplayName": "QQQ-USD", "status": "ONLINE", "tickSize": "0.01", "stepSize": "0.001",
+         "minOrderNotional": "5", "minOrderSize": "0.001"}]}))
+    with (tmp_path / "logs" / "decisions.jsonl").open("a") as f:
+        f.write(json.dumps({"ts": T0, "event": "resize", "market": "QQQ", "reason": "sized for $100",
+                            "data": {"capital": 100, "order": 223.5, "cap": 447, "cap_off": 447, "pos_stop": 1,
+                                     "daily_stop": 2, "kill": 10}}) + "\n")
+    events = tmp_path / "pilot_events.jsonl"
+    setup = {"market": "QQQ-USD", "setting": "touch 1bp", "leverage": 25.0, "risk": asdict(Risk.for_capital(28, 25))}
+    events.write_text(json.dumps({"ts": T0 / S - 60, "kind": "deployed", "text": "x", "setup": setup}) + "\n")
+    assert find_setup(events, "QQQ-USD", T0 + 600 * S) == setup and find_setup(events, "BTC-USD", T0 + 600 * S) is None
+    text = diagnose(db=db, logs=tmp_path / "logs", tape_root=tmp_path / "tape", markets_json=tmp_path / "markets.json",
+                    start_us=T0, end_us=T0 + 600 * S, setup=setup)
+    assert "Replay    touch 1bp @ 25x: order $224, cap $447" in text and "(the engine's sizes)" in text
+    assert "the run      volume $      223  fills    1" in text
+    assert "backtest through" in text and "backtest queue (scan)" in text and "backtest front" in text

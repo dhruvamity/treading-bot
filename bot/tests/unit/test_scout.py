@@ -14,7 +14,19 @@ import pytest
 
 from bot.core.book import L2Book
 from bot.core.marketdata import MarketView
-from bot.scout.sim import BUY, SELL, AnchorPolicy, Book, Config, MarketInfo, MidPolicy, Risk, Sim, Window
+from bot.scout.sim import (
+    BUY,
+    SELL,
+    AnchorPolicy,
+    Book,
+    Config,
+    MarketInfo,
+    MidPolicy,
+    Risk,
+    Sim,
+    SimParams,
+    Window,
+)
 from bot.scout.tape import US_DAY, DayTape, TapeStore, day_start_us
 from bot.strategies import make_strategy
 from bot.strategies.base import StrategyContext
@@ -370,3 +382,21 @@ def test_orders_refused_by_our_own_checks_are_counted_and_alerted_once() -> None
     q = sim.run_sync(ev).stats["t"]["quotes"]
     assert q.refused > 100 and q.refused_why.startswith("free_collateral") and q.bid == 0 and q.ask == 0
     assert len(warned) == 1 and "refused" in warned[0] and "free_collateral" in warned[0]
+
+
+def test_research_fill_models_and_a_faster_decision_step() -> None:
+    """SimParams.queue (research): an order that joins the best price waits behind the size shown there, so prints AT
+    our price fill it only once they have used up that queue; "through" never counts them, "front" always does.
+    Window(step_ms): the bot deciding more often than once a second (a faster live loop)."""
+    t = tape(lambda s: 100.0, 1800, sweep_bps=0.0, size=0.5)     # every 5 s a taker prints 0.5 at the touch only (1.0 shown)
+    touch = Config("touch 0bp", "mid", style="normal", spacing_bps=0, safety=False)
+    risk = Risk(order_usd=10, cap_usd=50)
+    w = Window(t, T0, T0 + 1800 * S, warmup_s=0)
+    through = Sim(touch, risk, MI).run(w)
+    queue = Sim(touch, risk, MI, SimParams(queue=True)).run(w)
+    front = Sim(touch, risk, MI, SimParams(front_of_queue=True)).run(w)
+    assert through.maker_fills == 0 < queue.maker_fills < front.maker_fills
+    fast = Sim(touch, risk, MI, SimParams(queue=True)).run(Window(t, T0, T0 + 1800 * S, warmup_s=0, step_ms=250))
+    assert abs(fast.quoting_s - queue.quoting_s) <= 1 and fast.hours == queue.hours and fast.maker_fills > 0
+    with pytest.raises(ValueError):
+        Window(t, T0, T0 + 60 * S, warmup_s=0, step_ms=300)

@@ -6,6 +6,9 @@ Sources, all on the machine the bot runs on:
 - the scout's recorded tape of the same market (data/scout/tape): the best bid and ask when each order was placed,
   and every taker trade in the window.
 
+With `setup` (--replay): the scout's backtest of the run's own setup on the same recorded window, next to what the
+run did, under each fill model: the gap between what the backtest assumes and what happened.
+
 It answers, in order: were orders sent and acknowledged; were any rejected (why); how long a buy and a sell rested;
 where they rested against the best price; what blocked quoting (pauses, and orders the bot's own checks refused
 before sending); and how many taker trades went through a price the bot was resting at (fills the backtest would
@@ -96,7 +99,7 @@ def load_decisions(logs: Path, start_us: int, end_us: int, base: str | None) -> 
 
 
 def diagnose(*, db: Path, logs: Path, tape_root: Path, markets_json: Path | None, start_us: int, end_us: int,
-             base: str | None = None, mode: str = "live") -> str:
+             base: str | None = None, mode: str = "live", setup: dict[str, Any] | None = None) -> str:
     got = load_orders(db, start_us, end_us, base)
     orders = [r for r in got if not r.get("_fill")]
     fills = [r for r in got if r.get("_fill")]
@@ -193,7 +196,79 @@ def diagnose(*, db: Path, logs: Path, tape_root: Path, markets_json: Path | None
                    "while you had no order on that side")
     elif market:
         out.append(f"Market    no recorded tape for {market} in this window (is the scout recording on this machine?)")
+    if setup is not None and market:
+        out += replay(setup, fills, dec, tape_root, markets_json, market, start_us, end_us)
     return "\n".join(out)
+
+
+def find_setup(events: Path, market: str, before_us: int) -> dict[str, Any] | None:
+    """The setup of the last run the pilot deployed on `market` before `before_us` (state/pilot_events.jsonl)."""
+    try:
+        lines = events.read_text().splitlines()
+    except OSError:
+        return None
+    best = None
+    for ln in lines:
+        try:
+            e = json.loads(ln)
+        except ValueError:
+            continue
+        s = e.get("setup") or {}
+        if e.get("kind") == "deployed" and s.get("market") == market and e.get("ts", 0) * US_PER_S < before_us:
+            best = s
+    return best
+
+
+def replay(setup: dict[str, Any], fills: list[dict[str, Any]], dec: list[dict[str, Any]], tape_root: Path,
+           markets_json: Path | None, market: str, start_us: int, end_us: int) -> list[str]:
+    """The run's setup backtested on the same tape window, beside the run: volume, fills, PnL, the first daily stop.
+    Sizes are the ones the engine traded (its `resize` decision), else the deployed candidate's."""
+    from dataclasses import replace
+
+    from bot.scout.scan import BY_NAME, load_holidays, load_markets, market_meta, session_mask
+    from bot.scout.sim import Risk, Sim, SimParams, Window
+
+    cfg = BY_NAME.get(str(setup.get("setting")))
+    if cfg is None or not setup.get("risk") or markets_json is None:
+        return [f"Replay    cannot: setting {setup.get('setting')!r} or its sizes are unknown"]
+    risk = Risk(**setup["risk"])
+    sized = next((d.get("data") or {} for d in reversed(dec) if d.get("event") == "resize"
+                  and (d.get("data") or {}).get("order")), None)
+    if sized:
+        risk = replace(risk, capital_usd=float(sized["capital"]), used_usd=float(sized["capital"]),
+                       order_usd=float(sized["order"]), cap_usd=float(sized["cap"]),
+                       cap_off_usd=float(sized.get("cap_off") or sized["cap"]), pos_stop_usd=float(sized["pos_stop"]),
+                       daily_stop_usd=float(sized["daily_stop"]), kill_usd=float(sized["kill"]))
+    mi = load_markets(markets_json).get(market)
+    meta = market_meta(markets_json).get(market, {})
+    store = TapeStore(tape_root)
+    tape = store.load_range(market, start_us - 2 * 3600 * US_PER_S, end_us)
+    if mi is None or not len(tape.bbo["ts"]):
+        return [f"Replay    no market data or tape for {market}"]
+    hol = load_holidays(full_only=True)
+    w = Window(tape, start_us, end_us, rth=session_mask(meta.get("regularTradingHours"), hol), holidays=hol)
+    live_vol = sum(float(f["price"]) * float(f["size"]) for f in fills)
+    sign = {"buy": 1.0, "sell": -1.0}
+    pos = sum(sign.get(str(f["side"]), 0.0) * float(f["size"]) for f in fills)
+    cash = -sum(sign.get(str(f["side"]), 0.0) * float(f["price"]) * float(f["size"]) for f in fills)
+    fees = 0.0   # the fills table's fee is not loaded here; maker fills pay none on Arcus
+    k = int(np.searchsorted(tape.bbo["ts"], end_us, side="right")) - 1
+    mid_end = float((tape.bbo["bid"][k] + tape.bbo["ask"][k]) / 2) if k >= 0 else 0.0
+    live_pnl = cash + pos * mid_end - fees
+    stop = next((int(d["ts"]) for d in dec if str(d.get("event")) == "risk:stop_venue_day"), None)
+    out = [f"Replay    {setup.get('setting')} @ {float(setup.get('leverage') or 0):g}x: order ${risk.order_usd:,.0f}, cap "
+           f"${risk.cap_usd:,.0f}, stops ${risk.pos_stop_usd:.2f}/${risk.daily_stop_usd:.2f}/${risk.kill_usd:.2f}"
+           + (" (the engine's sizes)" if sized else " (the deployed sizes)"),
+           f"  the run      volume ${live_vol:>9,.0f}  fills {len(fills):4d}  PnL {live_pnl:+7.2f} (marked at the end"
+           f"{', starting flat' if fills else ''})  daily stop {_utc(stop) if stop else '-'}"]
+    for name, sp in (("through", SimParams()), ("queue (scan)", SimParams(queue=True)),
+                     ("front", SimParams(front_of_queue=True))):
+        r = Sim(cfg, risk.with_stops(cfg.stops), mi, sp).run(w)
+        vol = r.maker_usd + r.taker_usd
+        out.append(f"  backtest {name:13s} ${vol:>9,.0f}  fills {r.maker_fills + r.taker_fills:4d}  PnL {r.pnl:+7.2f}"
+                   f"  daily stop {_utc(r.first_day_stop_us) if r.first_day_stop_us else '-'}"
+                   + (f"  ({vol / live_vol:.1f}x the run's volume)" if live_vol else ""))
+    return out
 
 
 def _side(d: dict[str, Any]) -> str:

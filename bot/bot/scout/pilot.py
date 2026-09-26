@@ -7,8 +7,8 @@ Files (paths relative to the project root):
   config/sessions/pilot.yaml    the session the runner starts with, rewritten on each approval
 
 Four lists (bot/scout/profiles.py): breakeven (the scan's GO top 3), volume and aggressive (the most volume within
-the owner's cost per $1,000, /set volume_cost) and max (the most volume at any cost). A pick runs at any leverage of
-its ladder: judged by its list when that rung is in the list, else as the owner's own pick.
+the owner's cost per $1,000, /set volume_cost) and max (the most volume at any cost). The scan backtests each market's
+maximum leverage; a pick runs at any leverage: judged by its list at the backtested one, else as the owner's own pick.
 
 After every scan, review():
 - nothing running: post the breakeven top 3 when its #1 changes, at most every OFFER_EVERY_S (/top3 shows the lists
@@ -18,12 +18,14 @@ After every scan, review():
   and offer the current top 3. It unpauses by itself once it is back in its list on two scans in a row;
 - another GO candidate with at least 1.5x its maker volume: suggest a switch. The bot never switches on its own.
 Approving a different candidate closes the current position first (runner "close" command), then starts the new one.
-Besides the lists' top 3, the owner can deploy any backtested market x setting x leverage (find(), profile "manual"):
-the scout reports on it but never pauses it for failing a list, only when its market goes offline.
+Besides the lists' top 3, the owner can deploy any market x menu setting x leverage up to the Arcus maximum (find(),
+profile "manual"), without waiting for a scan: it is sized for the capital the scout uses now, with the backtest shown
+when there is one. The scout reports on it but never pauses it for failing a list, only when its market goes offline.
 
 Sizes follow the account: the scout scans at the subaccount's equity (bot/scout/capital.py) and the engine re-sizes
-from it at start and at 00:00 UTC (bot/common/sizing.py), never above 1.25x the last capital a GO scan covered. Each
-GO review records that capital (kv "sizing_ok"), so the sizes grow with the account as long as the backtest agrees.
+from it at start and at 00:00 UTC (bot/common/sizing.py), never above 1.25x the capital the run was sized for (a list
+pick: the last capital a GO scan covered; the owner's pick: the capital when it started). Each GO review records that
+capital (kv "sizing_ok"), so the sizes grow with the account as long as the backtest agrees.
 """
 
 from __future__ import annotations
@@ -34,6 +36,7 @@ import hashlib
 import json
 import os
 import time
+from dataclasses import asdict
 from pathlib import Path
 from typing import Any
 
@@ -41,9 +44,9 @@ import yaml
 
 from bot.common import settings
 from bot.common.config import SizingDefaults
-from bot.common.sizing import INV_BUFFER
+from bot.common.sizing import INV_BUFFER, min_capital
 from bot.scout import profiles
-from bot.scout.scan import BY_NAME, market_meta, max_leverage
+from bot.scout.scan import BY_NAME, load_markets, market_meta, max_leverage, venue_min
 from bot.scout.sim import Config, Risk
 from bot.telegram.control import Control
 from bot.venues.base import Venue
@@ -66,6 +69,7 @@ def session_for(market: str, cfg: Config, risk: Risk, *, live: bool, account_ind
     backtest used. Outside an RWA perp's session the cap and the order size shrink with the off-hours margin.
     The `sizing` block holds the recipe behind those numbers, so the engine can re-size them from the account's
     equity (bot/common/sizing.py): leverage for the sizes, the stops in % of the capital, the liquidity ceiling."""
+    risk = risk.with_stops(cfg.stops)   # a setting's own stops (the session's sizing keeps them as % of the capital)
     off = risk.off_scale()
     z = sizing or SizingDefaults()
     used = risk.used
@@ -121,10 +125,25 @@ def describe(c: dict[str, Any]) -> str:
     return f"{c['market']} · {c['config']} · {numbers(c)}"
 
 
+def stale_note(scan: dict[str, Any] | None, now: float | None = None) -> str:
+    """A warning when the last scan is older than MAX_SCAN_AGE_S (the scout stopped, or a long scan is running)."""
+    if not scan:
+        return ""
+    age = (now or time.time()) - scan["ts_us"] / 1e6
+    if age <= MAX_SCAN_AGE_S:
+        return ""
+    return (f"⚠️ The lists are from a scan {age / 3600:.1f} h old: is the scout running (bot status)? A long scan at a "
+            "new capital also keeps the last one up until it ends. You can still run.")
+
+
 def numbers(c: dict[str, Any]) -> str:
-    """Sizes and backtest numbers of a scan row."""
+    """Sizes and backtest numbers of a scan row (or of the owner's pick: find() says whether they are at this size)."""
     size = f"${c['order_usd']:,.0f} orders · max position ${1.25 * c['cap_usd']:,.0f} · " if c.get("order_usd") else ""
-    return (f"{size}backtest ${c['volume_day']:,.0f}/day, {_signed(c['pnl_day'])}/day, worst "
+    if c.get("volume_day") is None:
+        return f"{size}not backtested at this leverage yet"
+    at = "" if c.get("backtested", True) or not c.get("backtest_capital_usd") else \
+        f" at ${float(c['backtest_capital_usd']):,.0f} capital"
+    return (f"{size}backtest{at} ${c['volume_day']:,.0f}/day, {_signed(c['pnl_day'])}/day, worst "
             f"{_signed(c['worst_day'])} ({c['days']}d)")
 
 
@@ -277,18 +296,17 @@ class Pilot:
             return list((scan or {}).get("top") or [])
         return profiles.top(scan, prof, self.budget())
 
-    def fresh_scan(self) -> dict[str, Any]:
-        """The last scan, if it is recent enough to deploy from."""
+    def last_scan(self) -> dict[str, Any]:
+        """The last scan, however old: an old one is a warning on the run screen (stale_note), never a reason not to
+        run (it refused everything once the scan was 90 minutes old, e.g. during a long scan)."""
         scan = self.latest_scan()
         if not scan:
-            raise ValueError("no scan yet: start `bot scout run` and wait for the first scan")
-        if time.time() - scan["ts_us"] / 1e6 > MAX_SCAN_AGE_S:
-            raise ValueError("the last scan is over 90 minutes old; is `bot scout run` running?")
+            raise ValueError("no scan yet: start `bot scout run` and wait for the first scan (or /run any setup)")
         return scan
 
     def pick(self, k: int, profile: str = "breakeven", lev: str = "rec") -> dict[str, Any]:
         """Candidate k of a list; lev "max": the same market and setting at the market's maximum leverage."""
-        scan = self.fresh_scan()
+        scan = self.last_scan()
         prof = profiles.profile_of(profile)
         top = self.top(prof.key)
         if not 1 <= k <= len(top):
@@ -300,7 +318,19 @@ class Pilot:
                 raise ValueError(f"{c['market']} has no maximum-leverage backtest for {c.get('setting') or c['config']}")
             c = m
         _in_menu(c)
-        return {**c, "profile": prof.key, "lev": lev}
+        # sized for the account now, like the owner's own pick; the list's backtest rides along
+        return {**self.find(c["market"], setting_of(c), float(c["leverage"])), "profile": prof.key, "lev": lev}
+
+    def leverages(self, market: str) -> list[float]:
+        """The leverages the run screen offers: the market's Arcus maximum, then 20x, 10x, 5x and 2x below it (the
+        scan backtests the maximum only; any other leverage runs sized from the account)."""
+        from bot.scout.scan import LADDER
+
+        meta = self._meta().get(market)
+        if meta is None:
+            return []
+        top = max_leverage(meta)[0]
+        return [top] + [x for x in LADDER if x < top - 1e-9]
 
     def rows(self, market: str, setting: str | None = None) -> list[dict[str, Any]]:
         """The last scan's backtests of one market (one setting), every leverage, highest leverage first."""
@@ -308,38 +338,96 @@ class Pilot:
                        and (setting is None or setting_of(c) == setting)), key=lambda c: -float(c["leverage"]))
 
     def find(self, market: str, setting: str, lev: float | str) -> dict[str, Any]:
-        """Any backtested setup: market, menu setting, leverage (a number, or "max"). The owner's own pick."""
-        scan = self.fresh_scan()
-        rows = [c for c in scan.get("all") or [] if c["market"] == market and setting_of(c) == setting]
-        if not rows:
-            raise ValueError(f"{market} {setting}: not in the last scan")
+        """The owner's own pick: any menu setting on any market at any leverage up to the Arcus maximum ("max": that
+        maximum), sized for the capital the scout uses now. It never waits for a scan: the backtest at that leverage
+        and capital rides along when the last scan has one (c["backtested"]), else the run is marked not backtested
+        at this size, and the live engine sizes it from the account like any other run."""
+        if setting not in BY_NAME:
+            raise ValueError(f"{setting!r} is not a menu setting")
+        rows = [c for c in (self.latest_scan() or {}).get("all") or [] if c["market"] == market
+                and setting_of(c) == setting]
+        meta = self._meta().get(market)
+        if meta is None:   # no market list (yet): only what the last scan backtested can run
+            return self._scan_row(market, setting, lev, rows)
+        if meta.get("status") not in (None, "ONLINE"):
+            raise ValueError(f"{market} is not an online Arcus market")
+        top, off = max_leverage(meta)
+        want = top if lev == "max" else float(lev)
+        if want > top + 1e-9:
+            raise ValueError(f"{market}: Arcus allows at most {top:g}x")
+        if want < 1:
+            raise ValueError("leverage must be at least 1x")
+        cap_now = self.capital_now()
+        row = next((r for r in rows if abs(float(r["leverage"]) - want) < 0.01), None)
+        liq = next((float(r["risk"].get("liq_ceiling_usd") or 0) for r in rows if r.get("risk")), 0.0) or None
+        mi = load_markets(self.scan_path.parent / "markets.json").get(market)
+        vmin = venue_min(mi, meta) if mi is not None else 5.0
+        z = settings.effective_sizing(self.control.app.sizing, settings.load(self.root / self.control.app.state_dir))
+        risk = Risk.for_capital(cap_now, want, min(off, want), pct=z.pct(), order_max=liq,
+                                min_capital=round(min_capital(vmin, min(off, want)), 2),
+                                exit_taker_after_s=self.risk.exit_taker_after_s, cooldown_s=self.risk.cooldown_s)
+        if risk.used < risk.min_capital_usd:
+            raise ValueError(f"{market} at {want:g}x needs ${risk.min_capital_usd:,.2f} of capital (Arcus minimum "
+                             f"order); sizing for ${cap_now:,.2f}")
+        same = row is not None and abs(float(row.get("capital_usd") or 0) - risk.capital_usd) < 0.01
+        c = {**(row or {}), "market": market, "setting": setting, "config": f"{setting} @ {want:g}x",
+             "leverage": want, "leverage_off": min(off, want), "at_max": abs(want - top) < 0.01,
+             "risk": asdict(risk), "capital_usd": risk.capital_usd, "used_usd": risk.used,
+             "order_usd": risk.order_usd, "cap_usd": risk.cap_usd, "cap_off_usd": risk.cap_off_usd,
+             "backtested": same, "backtest_capital_usd": float(row["capital_usd"]) if row else None}
+        return {**c, "profile": "manual", "lev": f"{want:g}x"}
+
+    def _scan_row(self, market: str, setting: str, lev: float | str, rows: list[dict[str, Any]]) -> dict[str, Any]:
+        """A backtested row of the last scan at that leverage ("max": the market's maximum), as it was sized."""
         c = next((r for r in rows if r.get("at_max")), None) if lev == "max" else \
             next((r for r in rows if abs(float(r["leverage"]) - float(lev)) < 0.01), None)
         if c is None:
-            levs = ", ".join(f"{r['leverage']:g}x" for r in sorted(rows, key=lambda r: -float(r["leverage"])))
+            levs = ", ".join(f"{r['leverage']:g}x" for r in rows) or "none"
             raise ValueError(f"{market} {setting}: no backtest at {lev if lev == 'max' else f'{float(lev):g}x'} "
-                             f"(has {levs}){self._lev_hint(market, lev, rows)}")
+                             f"(has {levs})")
         if c.get("too_small"):
             raise ValueError(f"{market} at {c['leverage']:g}x needs ${c.get('min_capital_usd', 0):,.2f} of capital "
                              "(Arcus minimum order)")
         _in_menu(c)
         return {**c, "profile": "manual", "lev": f"{float(c['leverage']):g}x"}
 
-    def _lev_hint(self, market: str, lev: float | str, rows: list[dict[str, Any]]) -> str:
-        """Why a leverage above the backtested ones is missing: Arcus does not allow it, the owner's cap
-        (/set crypto_lev), or the scan has not tested it yet."""
-        if lev == "max" or float(lev) <= max(float(r["leverage"]) for r in rows):
-            return ""
+    def capital_now(self) -> float:
+        """The capital to size a run for now: the latest balance of this subaccount (state/balances.jsonl: the scout
+        before each scan, the live bot every 5 minutes, Telegram before a /run) under the owner's sizing settings
+        (/set capital, trade_share, max_capital). Else the scan's capital (state/scout_capital.json, then the last
+        scan's), else a fixed sizing.capital_usd."""
+        from bot.core.balances import BalanceLog
+        from bot.scout.capital import STATE, choose
+
+        state = self.root / self.control.app.state_dir
+        over = settings.load(state)
+        z = settings.effective_sizing(self.control.app.sizing, over)
+        spec = over.get("capital") or z.capital_usd
+        if str(spec).lower() != "auto":
+            return choose(spec, None, z)[0]
+        rows = [r for r in BalanceLog(state / "balances.jsonl").rows(since=time.time() - 6 * 3600)
+                if int(r.get("account") or 0) == self.account_index and float(r.get("equity") or 0) > 0]
+        if rows:
+            return choose(spec, float(rows[-1]["equity"]), z)[0]
         try:
-            arcus = max_leverage(market_meta(self.scan_path.parent / "markets.json")[market])[0]
-        except (OSError, ValueError, KeyError):
-            return ""
-        if float(lev) > arcus:
-            return f". Arcus allows at most {arcus:g}x"
-        cap = settings.lev_caps(settings.load(self.root / self.control.app.state_dir)).get(market)
-        if cap is not None and float(lev) > cap:
-            return f". Capped at {cap:g}x by /set crypto_lev (Arcus allows {arcus:g}x)"
-        return f". The next scan backtests up to {arcus:g}x: /scannow"
+            usd = float(json.loads((self.root / self.control.app.state_dir / STATE).read_text())["usd"])
+            if usd > 0:
+                return usd
+        except (OSError, ValueError, KeyError, TypeError):
+            pass
+        scan = self.latest_scan() or {}
+        if (scan.get("capital") or {}).get("usd"):
+            return float(scan["capital"]["usd"])
+        spec = self.control.app.sizing.capital_usd
+        if str(spec).lower() != "auto":
+            return float(spec)
+        raise ValueError("no capital known yet: start `bot scout run` so it can read the account")
+
+    def _meta(self) -> dict[str, dict[str, Any]]:
+        try:
+            return market_meta(self.scan_path.parent / "markets.json")
+        except (OSError, ValueError):
+            return {}
 
     def write_session(self, c: dict[str, Any], *, live: bool, path: Path | None = None) -> Path:
         """The session file for candidate c (path: another file, e.g. to check a setup before it replaces the running
@@ -349,6 +437,7 @@ class Pilot:
         s = session_for(c["market"], cfg, risk, live=live, account_index=self.account_index,
                         sizing=self.control.app.sizing)
         s["run_id"] = f"{c['market']}-{time.time_ns() // 1000}"
+        s["sizing"]["cap_to_backtest"] = c.get("profile") != "manual"   # the owner's own pick follows the balance
         if c.get("max_loss_usd"):
             s["max_loss_usd"] = float(c["max_loss_usd"])
         p = path or self.session_path
@@ -392,10 +481,15 @@ class Pilot:
             await asyncio.sleep(3)
             if self.control.is_running(mode):
                 prof = profiles.profile_of(c["profile"])
+                cfg = BY_NAME[setting_of(c)]
+                setup = {"market": c["market"], "setting": setting_of(c), "leverage": float(c["leverage"]),
+                         "mode": mode, "max_loss_usd": c.get("max_loss_usd"),
+                         "risk": asdict(Risk(**c["risk"]).with_stops(cfg.stops)) if c.get("risk") else None}
                 self.event("deployed", f"🟢 {mode.upper()} · {c['market']} · {c['config']}\n{numbers(c)}"
                            + (f"\n🛑 Stops for good once this run loses ${float(c['max_loss_usd']):,.2f}"
                               if c.get("max_loss_usd") else "")
-                           + f"\n{prof.icon} {prof.title}{' · max leverage' if c['lev'] == 'max' else ''} · by {by}")
+                           + f"\n{prof.icon} {prof.title}{' · max leverage' if c['lev'] == 'max' else ''} · by {by}",
+                           setup=setup)   # what `bot diagnose --replay` backtests against the live run
                 if live:   # the live bot's independent watchdog (bot/ops.py); best effort, never blocks the deploy
                     with contextlib.suppress(Exception):
                         from bot import ops

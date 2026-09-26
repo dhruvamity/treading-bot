@@ -407,8 +407,10 @@ class BotRunner:
         for e in self.engines:
             pnl = self.ledger.breakdown(e.venue, e.base, marks.get((e.venue, e.base))).net
             start = e.day_start_equity.get(day)
+            day_pnl = e.day_pnl if e.day_pnl is not None and start is not None else \
+                (e.capital + pnl - start if start is not None else None)
             sessions.append({"session": e.sid, "market": e.base, "venue": e.venue.value, "mode": e.last_mode,
-                             "pnl": str(pnl), "day_pnl": str(e.capital + pnl - start) if start is not None else None,
+                             "pnl": str(pnl), "day_pnl": str(day_pnl) if day_pnl is not None else None,
                              "capital": str(e.capital), "size_capital": str(e.size_capital),
                              "stops": {k: getattr(e.session, f, None) for k, f in (
                                  ("position", "pos_stop_usd"), ("daily", "daily_stop_usd"), ("kill", "kill_usd"))},

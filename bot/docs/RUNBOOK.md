@@ -186,8 +186,8 @@ Don't paste trailing `# comments` into zsh: by default it passes them to the com
 ("no such service: #").
 
 - Seed it with the history from the laptop first: copy `data/scout/tape/` (a few hundred MB) into the same place.
-- Scans use all cores but one by default, at the lowest CPU priority, and one core while a trading bot runs on the
-  same machine; `SCOUT_WORKERS=2 docker compose up -d` caps them. Each 30-minute scan re-runs the last 24 h only for
+- Scans use all cores but one by default, at the lowest CPU priority, and all cores but two while a trading bot
+  runs on the same machine; `SCOUT_WORKERS=2 docker compose up -d` caps them. Each 30-minute scan re-runs the last 24 h only for
   the setups that pass on their full days; the full search over every setup runs once a day.
 - `SCOUT_CAPITAL=500 docker compose up -d` ranks for a $500 account. The default, `auto`, reads the subaccount's
   equity, but the container has no keys, so it uses the $100 paper capital (`sizing` in `config/app.yaml`).

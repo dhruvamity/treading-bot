@@ -366,11 +366,13 @@ class RiskEngine:
                                       "manual (bot resume) after investigation"))
 
     def resume(self, venue: Venue | None = None, *, all_: bool = False) -> None:
-        """Manual resume (Telegram /resumeaftersl, `bot resume`). With all_: the drawdown stop, and a daily stop,
-        which re-arms from the day PnL now: the rest of the UTC day may lose one more daily stop. A run that reached
-        its own loss limit stops again at the next check."""
+        """Manual resume (Telegram /resumeaftersl, `bot resume`). With all_: the drawdown stop, which re-arms from the
+        equity now (the peak is forgotten: it would fire again at once), and a daily stop, which re-arms from the day
+        PnL now: the rest of the UTC day may lose one more daily stop. A run that reached its own loss limit stays
+        stopped (SessionEngine.resume_if_cleared)."""
         if all_:
             self.all_stopped = None
+            self.equity_peak.clear()
             for v in [venue] if venue else list(self.venue_stopped_day):
                 day = self.venue_stopped_day.pop(v, None)
                 if day is not None:

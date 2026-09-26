@@ -412,8 +412,24 @@ def cmd_diagnose(a: argparse.Namespace) -> None:
     end = when(a.until) if a.until else time.time_ns() // 1000
     start = when(a.since) if a.since else end - int(a.hours * 3600 * 1_000_000)
     base = a.market.upper().removesuffix("-USD") if a.market else None
+    setup = None
+    if a.replay:
+        from bot.core.diagnose import find_setup
+
+        market = f"{base}-USD" if base else None
+        setup = find_setup(Path(app.state_dir) / "pilot_events.jsonl", market, end) if market else None
+        if a.setting or setup is None:   # by hand: the setting and the capital / leverage it ran at
+            from dataclasses import asdict
+
+            from bot.scout.sim import Risk
+
+            if not (a.setting and a.capital and a.leverage and market):
+                raise SystemExit("--replay: no deployed setup found; give --market, --setting, --capital and --leverage")
+            setup = {"market": market, "setting": a.setting, "leverage": a.leverage,
+                     "risk": asdict(Risk.for_capital(a.capital, a.leverage))}
     print(diagnose(db=Path(app.state_db_for(a.mode)), logs=Path(app.logs_dir), tape_root=Path("data/scout/tape"),
-                   markets_json=Path("data/scout/markets.json"), start_us=start, end_us=end, base=base, mode=a.mode))
+                   markets_json=Path("data/scout/markets.json"), start_us=start, end_us=end, base=base, mode=a.mode,
+                   setup=setup))
 
 
 def cmd_keys(a: argparse.Namespace) -> None:
@@ -522,7 +538,7 @@ def cmd_scout(a: argparse.Namespace) -> None:
               "Ctrl-C stops it")
         try:
             _run(run_service(root, Pilot(root, Control(app)), rest_url=cfg.rest.mainnet, ws_url=cfg.ws.mainnet,
-                             every_min=a.every_min, workers=a.workers, ladder=not a.max_only, depth=a.depth,
+                             every_min=a.every_min, workers=a.workers, ladder=a.ladder, depth=a.depth,
                              capital=a.capital, sizing=app.sizing))
         finally:
             with contextlib.suppress(OSError):
@@ -541,7 +557,7 @@ def cmd_scout(a: argparse.Namespace) -> None:
         cap, src = choose(spec, eq, z)
         n = scan_workers(a.workers if a.workers != "auto" else over.get("scan_workers"),
                          bool(Control(app).running_modes()))
-        res = scan(root / "data" / "scout", workers=n, markets=a.markets or None, ladder=not a.max_only,
+        res = scan(root / "data" / "scout", workers=n, markets=a.markets or None, ladder=a.ladder,
                    capital=cap, pct=z.pct(), capital_source=src, shortlist=not a.full,
                    volume_cost=settings.volume_cost(over))
         save_scan(root, res)
@@ -731,8 +747,9 @@ def build_parser() -> argparse.ArgumentParser:
                     help="scan: re-run the last 24 h for every setting, not only those passing on their full days")
     sp.add_argument("--markets", nargs="*")
     sp.add_argument("--limit", type=int, default=25)
-    sp.add_argument("--max-only", action="store_true",
-                    help="test each market at its maximum leverage only (default: the max, then 20x, 10x, 5x, 2x)")
+    sp.add_argument("--ladder", action="store_true",
+                    help="also backtest 20x, 10x, 5x and 2x below each market's maximum (5x the work; default: the "
+                         "maximum only, and Telegram's /run runs any leverage)")
     sp.add_argument("--depth", action="store_true",
                     help="run: also record the top 10 book levels (queue-position data for larger orders; more disk)")
     sp.add_argument("--capital",
@@ -760,6 +777,12 @@ def build_parser() -> argparse.ArgumentParser:
     sp.add_argument("--since", help="window start, UTC: 2026-09-25 20:00")
     sp.add_argument("--until", help="window end, UTC (default now)")
     sp.add_argument("--market", help="e.g. QQQ (default: the market with the most orders)")
+    sp.add_argument("--replay", action="store_true",
+                    help="also backtest the run's own setup on the same window (from the pilot's deployed event and the "
+                         "engine's sizes) and show it beside the run under each fill model")
+    sp.add_argument("--setting", help="--replay by hand: the menu setting the run used")
+    sp.add_argument("--capital", type=float, help="--replay by hand: the capital it was sized for")
+    sp.add_argument("--leverage", type=float, help="--replay by hand: its leverage")
     sp = add("keys", cmd_keys, "your API keys as the venue sees them: subaccount, status, expiry")
     sp.add_argument("--testnet", action="store_true")
     sp = add("guardian", cmd_guardian, "run the independent guardian process")

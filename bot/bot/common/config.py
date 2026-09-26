@@ -187,6 +187,8 @@ class SizingCfg(_Model):
     daily_stop_pct: float = 2.0
     kill_pct: float = 10.0
     min_capital_usd: float = 0.0         # below this the venue minimum order, not the capital, would set the size
+    cap_to_backtest: bool = True         # at most 1.25x the capital a backtest covered (the lists' picks); False: the
+                                         # owner's own pick follows the balance (trade share, max capital, sl= still apply)
 
     @model_validator(mode="after")
     def _checks(self) -> SizingCfg:

@@ -64,7 +64,7 @@ interval without editing files). [Section 9](#9-the-telegram-bot) has them all.
 ```mermaid
 flowchart LR
     A[Arcus WebSocket<br/>best bid/offer + trades<br/>all perps] --> B[Scout recorder<br/>data/scout/tape]
-    B --> C[Backtest every 30 min<br/>22 settings x leverage ladder<br/>x every market]
+    B --> C[Backtest every 30 min<br/>30 settings at max leverage<br/>x every market]
     C --> D[GO checks + ranking<br/>data/scout/report.txt]
     D --> E[Top 3 offered<br/>CLI or Telegram]
     E -->|you approve| F[Pilot writes<br/>config/sessions/pilot.yaml]
@@ -216,7 +216,7 @@ best per market (any leverage up to the max):
 
 | Column | Meaning |
 |---|---|
-| setting | The strategy setting ([section 7.2](#72-the-scout-menu-22-settings)) and the leverage it was sized at |
+| setting | The strategy setting ([section 7.2](#72-the-scout-menu-30-settings)) and the leverage it was sized at |
 | order | Dollar size of each order |
 | fills/d, volume/d | Average maker fills and maker volume (USD) per full day |
 | pnl/d, worst | Average and worst daily PnL in USD, after fees and after closing any leftover position |
@@ -331,9 +331,10 @@ Completed days are cached in `data/scout/cache/`, so a scan only re-runs the cur
 
 ### 4.3 Leverage and order size
 
-Every market is tested at its **maximum Arcus leverage** (1 / `initialMarginFraction`, e.g. SPY 50x, QQQ/GLD/SLV 25x,
-NVDA 20x, most stocks and alts 10x) and then at 20x, 10x, 5x and 2x below it. **BTC and ETH are capped at 20x**
-(`LEV_CAPS` in `bot/scout/scan.py`). The leverage sets the size:
+Every market is tested at its **maximum Arcus leverage** only (1 / `initialMarginFraction`, e.g. BTC 40x, SPY 50x,
+QQQ/GLD/SLV 25x, NVDA 20x, most stocks and alts 10x; `/set crypto_lev` can cap BTC and ETH). `/run` runs any other
+leverage without a backtest at it; `bot scout run --ladder` also backtests 20x, 10x, 5x and 2x (5x the work). The
+leverage sets the size:
 
 | Quantity | Rule | QQQ at 10x, $100 capital |
 |---|---|---|
@@ -345,7 +346,7 @@ NVDA 20x, most stocks and alts 10x) and then at 20x, 10x, 5x and 2x below it. **
 
 Leverage does not create fills by itself; it lets you post bigger orders, and bigger orders capture more of each
 taker order that reaches them. The stops grow with the **capital**, not with the leverage, so at high leverage a
-small price move reaches them. That trade-off is exactly what the ladder measures.
+small price move reaches them.
 
 ### 4.4 GO checks
 
@@ -405,18 +406,22 @@ the backtest and the live bot size from exactly the same number and cached backt
 
 **The scout's capital settles** (`state/scout_capital.json`): every new capital means backtesting the whole week
 again, so the scout keeps scanning at the capital it has while the balance stays within 25% of it, and moves at most
-once per UTC day when it leaves that band. A fixed amount, the first deposit (paper → a funded account), or a
-Telegram `/set` of a sizing setting applies at once. Every reading of the balance is kept
+once per UTC day when it leaves that band, at the day's first scan (never mid-day: that re-runs every recorded day).
+A fixed amount, the first deposit (paper → a funded account), or a Telegram `/set` of a sizing setting applies at
+once. Runs do not wait for it: `/run` reads the balance first and sizes for it. Every reading of the balance is kept
 ([the balance history](#balance-history)).
 
 **How the live bot follows the account** (sessions written by the pilot have `sizing.follow_equity: true`):
-1. At start and at every 00:00 UTC it reads the equity and re-computes the order size, caps and dollar stops.
-2. It never sizes above **1.25×** the capital the setup was last backtested at. Every scan in which the running
-   setup is still GO records the capital it used, so growth is followed one validated step at a time. A deposit that
-   doubles the account takes effect after the scout has confirmed the setup at the new size.
+1. At start, at every 00:00 UTC, and within the day once the equity has moved 25% or more from what the sizes were
+   taken on (a deposit, a withdrawal, a large loss; checked hourly) it re-computes the order size, caps and dollar
+   stops from the equity.
+2. Every run starts sized for the balance when you start it. **Your own pick** (`/run`) then follows the balance.
+   **A list's pick** grows past **1.25×** its starting capital only as far as the scans confirm it: every scan in
+   which it is still GO records the capital it used, so growth is followed one validated step at a time.
 3. Your Telegram settings (`trade_share`, `capital`, `max_capital`, the stops) apply at the same re-size.
-4. Losses shrink the sizes the same way (at the next 00:00 UTC), and the stops shrink with them.
-5. If the equity falls below the setup's **least capital**, it stops quoting and closes what is left.
+4. Losses shrink the sizes the same way, and the stops shrink with them.
+5. If the equity falls below the setup's **least capital**, it stops quoting and closes what is left (re-checked
+   hourly, so a deposit lifts it).
 
 <a id="balance-history"></a>**The balance history** (`state/balances.jsonl`): the scout logs the account before every
 scan, the live bot every 5 minutes, and Telegram's `/balance` each time you ask. Each row has the time, the equity,
@@ -576,16 +581,19 @@ drawdown 10%.
 - **Requote tolerance.** A live order is kept (keeping its queue place) while it is within max(2 ticks,
   0.25 × half-spread) of the wanted price and within 20% of the wanted size; otherwise it is replaced.
 
-### 7.2 The scout menu (22 settings)
+### 7.2 The scout menu (30 settings)
 
-Every setting runs at every leverage on the ladder, so the report labels look like `deep 3bp, skew @ 10x`.
+Every setting runs at each market's maximum leverage, so the report labels look like `deep 3bp, skew @ 25x`.
 
 | Menu name | Live strategy | What it quotes |
 |---|---|---|
 | `deep 1bp`, `1.5bp`, `2bp`, `3bp`, `5bp` | mid, passive, κ 0 | one bid and one ask at mid ± d bps |
 | `deep 1.5bp, no pause`, `deep 3bp, no pause` | same, safety pause off | as above, also through volatile moments |
+| `deep 3bp, no pause, 3% stop` | same, with its own stops: 3% position, 6% day, 15% kill of the capital | deep quotes on the anchored perps (SPY, QQQ, NVDA, GLD) only held up with room for the reversion ([research note](bot/docs/notes/2026-09-26-fast-volume-research.md), section 5); a `/set` of a stop still overrides it |
 | `deep 3bp, skew` | mid, passive, κ 1 | as `deep 3bp`, quotes shifted against inventory |
 | `deep 2bp x2`, `deep 4bp x2` | mid, passive, 2 levels | levels at d and d + 3 bps each side |
+| `deep 1.5bp x2`, `deep 1.5bp x2, no pause`, `deep 3bp x2, skew`, `deep 3bp, no pause, skew`, `deep 3bp x2, no pause, skew` | mid, passive | the most volume at breakeven or better on the stock and ETF perps at max leverage (research note, section 2) |
+| `grid 3bp x2`, `grid 3bp x4` | grid (static), safety pause off, 0.2% re-centre | a fixed grid around a centre; SPY's best at 50x over five days, poor on crypto |
 | `touch 0bp` | mid, normal | joins the best bid and ask ("Mid 0") |
 | `touch 1bp` | mid, normal | mid ± max(1 bp, half the spread): at the touch when the spread is over 2 bps |
 | `improve touch` | mid, aggressive | one tick inside the best bid and ask |
@@ -717,7 +725,8 @@ A session is one YAML file in `bot/config/sessions/`. The pilot writes `pilot.ya
 | `signal`, `auto_spacing` | Signal's settings; the Grid/RGrid spacing when `spacing_bps: auto` |
 
 To change the account-wide numbers the scout uses (capital, stops), edit `Risk` in `bot/scout/sim.py`; to change the
-leverage caps or ladder, edit `LEV_CAPS` / `LADDER` in `bot/scout/scan.py`. App-wide limits are in
+leverage cap for BTC and ETH, `/set crypto_lev`; the ladder below the maximum (`--ladder`), `LADDER` in
+`bot/scout/scan.py`. App-wide limits are in
 `config/app.yaml`. Event dates are in `config/calendars/events.csv` (keep FOMC 30 days and CPI 14 days ahead).
 
 ---
@@ -749,8 +758,8 @@ Send `/menu` for buttons. Telegram's `/` list shows the everyday commands; the r
 | `/volume` | 🔥 The most volume for at most your cost per $1,000 traded (`/set volume_cost`), any setting |
 | `/aggressive` | ⚡ The same, only quotes at or inside the best bid/ask ("improve touch", "touch 0bp", "touch 1bp") |
 | `/maxvolume` | 🚀 The most volume whatever it costs; every safety check still applies (no kill or liquidation in the backtest, enough fills, 3 full days of data, market not trending now). Its last 24 h may not be re-checked: the card says so |
-| ▶️ **k** | That setup's whole **leverage ladder** (every rung's volume, PnL, worst day, last 24 h and the lists it is in; ⭐ the list's pick) → pick any rung → the run screen (sizes, also outside US hours; the backtest; warnings) → **📝 Paper** or **🔴 LIVE** |
-| `/run` | 🎯 **Any** market, setting and leverage: market → setting → ladder → run screen. Or in one line: `/run BTC touch 0bp max live`, `/run QQQ "touch 1bp" 20x paper`. A setup that is in no list runs as **your pick**: the scout reports on it but never pauses it for its numbers, only if Arcus takes the market offline |
+| ▶️ **k** | That setup's **leverages**: the backtested one (volume, PnL, worst day, last 24 h, the lists it is in; ⭐ the list's pick) and 20x/10x/5x/2x below it, not backtested → pick one → the run screen (sizes, also outside US hours; the backtest; warnings) → **📝 Paper** or **🔴 LIVE** |
+| `/run` | 🎯 **Any** market, setting and leverage up to the Arcus maximum: market → setting → ladder → run screen. Or in one line: `/run BTC touch 0bp max live`, `/run QQQ "touch 1bp" 20x paper`, `/run BTC touch 0bp 20x live sl=30` (stops for good at a $30 loss). It never waits for a scan: it sizes for the capital the scout uses now and shows the backtest when there is one ("not backtested at this leverage yet", or "at $X capital" when the last scan ran at another capital). A setup that is in no list runs as **your pick**: the scout reports on it but never pauses it for its numbers, only if Arcus takes the market offline |
 | `/openpositions` | What is deployed: state, today's PnL and volume vs the backtest, the last check, **🔴 Go LIVE with this setup** (on a paper run), **Close & stop** |
 | `/dashboard` | A live screen that updates itself every 10 s, pinned at the top of the chat: today's volume (and its maker pace vs the backtest), how much of the day it quoted and what blocked it (e.g. "Quoting 39% · safety pause 61%"), how often it rested at the best bid and ask (else how many ticks behind), today's PnL, the position, and your capital's profit or loss (equity minus deposits). ⏹ stops it, ▶️ starts it again; a newer `/dashboard` replaces the old one |
 | `/status` | Is it running, today's PnL, fills, volume |
@@ -778,7 +787,7 @@ Send `/menu` for buttons. Telegram's `/` list shows the everyday commands; the r
 
 A list asks the scout for a scan only when the last one is older than 1.5× `scan_every`, or on 🔄 Scan. A scan that
 is already running or queued is not started again, and the ETA under the list comes from the last scans' measured
-times (at the same number of CPU workers; one worker while a bot runs, so several times slower). The fresh list is
+times (at the same number of CPU workers; all cores but two while a bot runs). The fresh list is
 posted once when the scan finishes.
 
 | Setting | Values | What it changes |
@@ -788,7 +797,8 @@ posted once when the scan finishes.
 | `max_capital` | dollars or `none` | Never size for more than this |
 | `position_stop`, `daily_stop`, `kill` | % of the capital | The stops ([6.1](#61-the-stops-backtest-and-live)); must stay position ≤ daily ≤ kill. Changing them means a full re-backtest (slow, low priority) |
 | `scan_every` | 10–240 (minutes) | Time between scans |
-| `scan_workers` | `auto` or 1–32 | CPU cores a scan may use (always one while a bot runs on the machine) |
+| `scan_workers` | `auto` or 1–32 | CPU cores a scan may use (at most all cores but two while a bot runs on the machine) |
+| `scan_budget` | 5–240 (minutes) | Most time one scan spends backtesting full days, busiest markets first (default 30); the rest continues in the next scan, and a market not backtested at the current capital yet shows as ⏳ under the lists |
 | `volume_cost` | $0.01–$5 per $1,000 | The most the Volume and Aggressive Mid lists may cost: dollars lost per $1,000 traded (default $0.15, about 1.5 bp). The lists re-rank at once; the next scan also re-checks the last 24 h of the setups it lets in |
 
 The scout picks up a change at its next scan (a sizing change triggers one at once); the running bot at its next
@@ -837,8 +847,8 @@ running it first closes its position and stops.
 |---|---|
 | `bot up` / `bot down [--all]` / `bot status [--json]` | Start or stop the background services (scout, Telegram, guardian); one status screen |
 | `bot dashboard [--once]` | The live dashboard in the terminal, redrawn every 10 s (same numbers as Telegram's `/dashboard`) |
-| `bot scout run [--workers auto\|N] [--every-min M] [--depth] [--max-only] [--capital auto\|USD]` | Record everything and scan every M minutes (the daemon; `bot up` runs it), at the account's equity or a fixed capital |
-| `bot scout scan [--markets …] [--max-only] [--capital auto\|USD] [--full]` | One scan now, printed as a table (`--full`: re-run the last 24 h for every setting) |
+| `bot scout run [--workers auto\|N] [--every-min M] [--depth] [--ladder] [--capital auto\|USD]` | Record everything and scan every M minutes (the daemon; `bot up` runs it), at the account's equity or a fixed capital |
+| `bot scout scan [--markets …] [--ladder] [--capital auto\|USD] [--full]` | One scan now, printed as a table (`--full`: re-run the last 24 h for every setting) |
 | `bot scout limits [--markets …]` | Per market: the least capital it can run on, the order ceiling, and the capital it can fully use |
 | `bot scout import PATH` | One-off import of older recordings |
 | `bot pilot status` / `approve N [--live]` / `close` | See, deploy, or close the one deployment |
@@ -852,7 +862,7 @@ running it first closes its position and stops.
 | `bot run SESSION [--live] [--yes] [--seconds N]` | Run a session (paper by default) |
 | `bot status [--mode live\|paper\|testnet]` | Heartbeat, open orders, positions |
 | `bot report [--date D] [--mode M]` | Daily report: Net = spread capture + inventory PnL + funding − fees − liquidation loss |
-| `bot diagnose [--mode live] [--hours N \| --since "2026-09-25 20:00" --until …] [--market QQQ]` | Why a run filled what it filled: orders sent and acknowledged, rejects and their reasons, how long a buy and a sell rested, where they rested against the best price, what blocked quoting, and how many taker trades went through a price you rested at or traded while you had no order out. Read-only |
+| `bot diagnose [--mode live] [--hours N \| --since "2026-09-25 20:00" --until …] [--market QQQ] [--replay]` | Why a run filled what it filled: orders sent and acknowledged, rejects and their reasons, how long a buy and a sell rested, where they rested against the best price, what blocked quoting, and how many taker trades went through a price you rested at or traded while you had no order out. `--replay` also backtests the run's own setup on the same minutes, beside the run, under each fill model: where the backtest and the run differ (for a run from before 2026-09-26 give `--setting`, `--capital` and `--leverage`). Read-only |
 | `bot resume [--venue V] [--all]` | Clear safe mode / stops |
 | `bot cancel-all --venue arcus [--market M] [--yes]` | Cancel all open orders (asks to confirm) |
 | `bot flatten --venue arcus [--taker]` | Close all positions, reduce-only (asks to confirm) |
@@ -896,8 +906,8 @@ Files: `data/scout/tape/<MARKET>/<YYYY-MM-DD>/{bbo,trades,depth}-*.npz`. Arcus s
 Each scan (the first one 10 s after start):
 
 1. Takes every market with at least one full recorded UTC day.
-2. Backtests **all 22 settings** ([7.2](#72-the-scout-menu-22-settings)) at **every leverage on the ladder**: the
-   market's maximum, then 20x, 10x, 5x and 2x (BTC and ETH at most 20x). It sizes them for the **capital** in
+2. Backtests **all 30 settings** ([7.2](#72-the-scout-menu-30-settings)) at each market's **maximum leverage**
+   (`--ladder`: also 20x, 10x, 5x and 2x). It sizes them for the **capital** in
    `SCOUT_CAPITAL` (default `auto`: the Docker container has no keys, so that means the $100 paper capital; set
    `SCOUT_CAPITAL=500` to rank for a $500 account). With today's 58 markets that is 178
    market-leverage pairs and **3,916 backtests per window**.

@@ -117,6 +117,19 @@ class Ledger:
         if rem != 0:
             b.fifo.append((rem, price))
 
+    def sync_position(self, venue: Venue, base: str, size: Decimal, mark: Decimal) -> Decimal:
+        """Make the book hold `size` (the position the bot knows: restored at start, adopted, reconciled with the
+        venue), as if the difference traded at `mark`: no PnL now, and PnL from here on moves with the real position.
+        Without it a restart while holding a position left the book flat, and closing the position booked a phantom
+        opposite one whose PnL moved with the price. Returns the difference (0 when they already agree)."""
+        b = self.books[(venue, base)]
+        diff = size - b.position
+        if diff:
+            b.cash -= diff * mark
+            self._fifo(b, diff, mark)
+            b.position = size
+        return diff
+
     def on_funding(self, venue: Venue, base: str, payment: Decimal) -> None:
         self.books[(venue, base)].funding += payment
 

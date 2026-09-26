@@ -444,3 +444,77 @@ def test_alerter_rate_limit_and_redaction() -> None:
 
     asyncio.run(go())
     assert "abab" not in a.sent[0][2]
+
+
+def test_the_pnl_book_follows_a_position_restored_at_start() -> None:
+    """A restart while holding 0.004 BTC left the PnL book flat; selling the position then booked a phantom short whose
+    PnL moved with the price (daily stop, kill and run limit all read it). The engine now syncs the book first."""
+    lg = Ledger()
+    assert lg.sync_position(Venue.ARCUS, "BTC", D("0.004"), D("86000")) == D("0.004")
+    assert lg.breakdown(Venue.ARCUS, "BTC", D("86000")).net == 0              # no PnL at the sync itself
+    lg.on_fill(fill(Side.SELL, "86100", "0.004"), D("86100"))
+    assert lg.breakdown(Venue.ARCUS, "BTC", D("86100")).net == D("0.4")
+    assert lg.breakdown(Venue.ARCUS, "BTC", D("90000")).net == D("0.4")       # flat: the price no longer moves it
+    assert lg.sync_position(Venue.ARCUS, "BTC", D(0), D("90000")) == 0
+
+
+def test_a_restart_keeps_the_days_pnl_and_its_daily_stop(tmp_path: Path) -> None:
+    """A crash or a restart mid-day started the day's PnL at zero and lifted a daily stop; now they carry over within
+    the same run (kv day:<run_id>). A new run starts fresh."""
+    from types import SimpleNamespace
+
+    from bot.core.engine import SessionEngine
+    from bot.core.state import StateStore
+
+    st = StateStore(tmp_path / "s.sqlite")
+    day = "2026-09-26"
+
+    def engine(run_id: str) -> Any:
+        return SimpleNamespace(session=SimpleNamespace(run_id=run_id), state=st, risk=RiskEngine(), venue=Venue.ARCUS,
+                               _day_carry={}, _day_saved=None, _day_saved_us=0, day_pnl=None,
+                               _day_key=lambda: f"day:{run_id}" if run_id else "")
+    a = engine("BTC-USD-1")
+    SessionEngine._restore_day(a, day)
+    a.day_pnl = D("-0.61")
+    a.risk.venue_stopped_day[Venue.ARCUS] = day
+    SessionEngine._save_day(a, day, T0)
+    b = engine("BTC-USD-1")                                              # the same run after a restart
+    SessionEngine._restore_day(b, day)
+    assert b._day_carry[day] == D("-0.61")
+    assert b.risk.quoting_allowed(Venue.ARCUS, "BTC", T0) == (False, "daily loss stop")
+    c = engine("BTC-USD-2")                                              # a new run: fresh
+    SessionEngine._restore_day(c, day)
+    assert c._day_carry[day] == 0 and c.risk.quoting_allowed(Venue.ARCUS, "BTC", T0)[0]
+    d = engine("BTC-USD-1")                                              # the next UTC day: fresh
+    SessionEngine._restore_day(d, "2026-09-27")
+    assert d._day_carry["2026-09-27"] == 0 and Venue.ARCUS not in d.risk.venue_stopped_day
+
+
+def test_a_resume_after_a_kill_quotes_again_but_not_past_the_run_limit() -> None:
+    """/resumeaftersl after the drawdown kill cleared the risk engine's stop, but the engine stayed stopped, and the
+    drawdown (the old peak) would have fired again at once. A run past its own loss limit (sl=) stays stopped."""
+    from types import SimpleNamespace
+
+    from bot.common.logging import DecisionLog
+    from bot.core.engine import SessionEngine
+    from bot.core.scheduler import SessionState
+
+    r = RiskEngine(limits=RiskLimitsCfg())
+
+    def pnl(eq: str) -> list[str]:
+        return [d.trigger for d in r.on_pnl(venue=Venue.ARCUS, session_id="s", session_pnl=D(0), session_margin=D(30),
+                                            stop_loss_pct=100, take_profit_pct=None, day_pnl=D(0), capital=D(30),
+                                            equity=D(eq), ts_us=T0, kill_usd=D(3))]
+    assert pnl("30") == [] and pnl("26.9") == ["drawdown"]
+    e = SimpleNamespace(stopped=True, risk=r, session=SimpleNamespace(max_loss_usd=None), run_pnl=None,
+                        clock=SimpleNamespace(state=SessionState.EXITING), decisions=DecisionLog(), venue=Venue.ARCUS,
+                        base="BTC", sid="s")
+    SessionEngine.resume_if_cleared(e, T0)
+    assert e.stopped                                   # not resumed yet
+    r.resume(all_=True)
+    SessionEngine.resume_if_cleared(e, T0)
+    assert not e.stopped and e.clock.state is SessionState.RUNNING
+    assert pnl("26.9") == []                           # re-armed from the equity at the resume
+    e.stopped, e.session.max_loss_usd, e.run_pnl = True, 5.0, D("-5.2")
+    SessionEngine.resume_if_cleared(e, T0)
+    assert e.stopped and "its limit is $5.00" in str(r.all_stopped)
