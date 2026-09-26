@@ -113,7 +113,7 @@ def test_bar_and_sparkline() -> None:
 
 def test_position_card_shows_entry_mark_and_stop(tmp_path: Path) -> None:
     app = _app(tmp_path)
-    db = _running(tmp_path, app, "live", account=_acct(49.77, 50.00))
+    db = _running(tmp_path, app, "live", account=_acct(49.77, 50.00), day_pnl="-0.23")   # the run's day = the account's
     st = StateStore(db)
     snap = json.loads(st.kv_get("status") or "{}")
     snap["markets"] = [{"venue": "arcus", "market": "QQQ", "position": "-0.1503", "mark": "745.80", "quoting": True},
@@ -131,6 +131,20 @@ def test_position_card_shows_entry_mark_and_stop(tmp_path: Path) -> None:
     assert html.count("Short <b>0.1503 QQQ</b> ≈ $112.09") == 1           # the market listed twice shows once
     assert "745.69 → 745.80 · <b>-$0.02</b> · stop -$0.28" in html
     assert "PnL <b>-$0.23</b> · -0.46% · 41% of day stop" in html
+    # 2026-09-26: a new run with sl=10 showed "229% of day stop": the whole account's day (earlier runs too) against
+    # the run's un-lifted $2.20 stop. The run's own day counts, against the stop in force.
+    from bot.core.runner import _stops
+
+    st = StateStore(db)
+    snap = json.loads(st.kv_get("status") or "{}")
+    snap["sessions"][0]["stops"] = _stops(SimpleNamespace(pos_stop_usd=1.1, daily_stop_usd=2.2, kill_usd=11.0,
+                                                          max_loss_usd=10.0))
+    snap["sessions"][0]["day_pnl"] = "-0.05"
+    st.kv_set("status", json.dumps(snap))
+    st.close()
+    assert snap["sessions"][0]["stops"] == {"position": 1.1, "daily": 10.0, "kill": 11.0}
+    html = dashboard.render(dashboard.collect(Control(app, root=tmp_path)))
+    assert "PnL <b>-$0.23</b> · -0.46% · 0% of day stop (this run)" in html
 
 
 def test_deposits_never_count_as_profit(tmp_path: Path) -> None:
@@ -308,7 +322,7 @@ def test_status_is_a_card_and_lists_a_market_once(tmp_path: Path) -> None:
     from bot.telegram.views import orders_text, positions_text, status_text
 
     app = _app(tmp_path)
-    db = _running(tmp_path, app, "live", account=_acct(49.77, 50.00))
+    db = _running(tmp_path, app, "live", account=_acct(49.77, 50.00), day_pnl="-0.23")   # the run's day = the account's
     st = StateStore(db)
     snap = json.loads(st.kv_get("status") or "{}")
     snap["markets"] = [{"venue": "arcus", "market": "QQQ", "position": "-0.1503", "mark": "745.80", "quoting": True},

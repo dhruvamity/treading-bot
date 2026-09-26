@@ -93,7 +93,10 @@ class Watcher:
         name = mode.upper()
         # ---- bot up / down
         if m.running and not v.running:
-            if now - m.stop_requested_at < 300:
+            # a stop on purpose: /stop here, a close or a replace by the pilot (up to 10 min of closing), or a bot
+            # whose last heartbeat says it pulled its quotes and stopped (2026-09-26: a replace said "LIVE DOWN")
+            asked = max(m.stop_requested_at, self.control.stop_asked.get(mode, 0.0))
+            if now - asked < 900 or v.stopped:
                 await self._say(f"⏹ <b>{name}</b> stopped.")
             else:
                 await self._say(f"🔴 <b>{name} DOWN</b> · no heartbeat {ago(v.heartbeat_age_s)} · resting quotes stay "

@@ -160,3 +160,52 @@ queue $18.8k and $16.6k. Found:
   the book only 29% (bid) and 62% (ask) of the time: each requote is a cancel and a new order (~180 ms to acknowledge),
   which no model has. One 19-minute run is one data point: `bot diagnose --replay` now prints this comparison for any
   run (the pilot records each run's setup, and the engine the sizes it traded).
+
+## 7. Two live BTC runs against the backtest, and the position stop at 40x
+
+`bot diagnose --replay` on the server, `touch 0bp`, both runs on 2026-09-26 (UTC):
+
+| | Run 1: ~$30 at 20x, 00:10–00:45 | Run 2: about $100 at 40x, `sl=30`, 07:02–07:38 |
+|---|---|---|
+| Live | $4,493, 31 fills, −$0.57 (1.3 bp) | $57,836, 53 fills, −$4.39 incl. $0.58 fees (0.76 bp) |
+| Backtest, queue fills (the scan) | $3,893, 33 fills, −$0.73 (1.9 bp); daily stop 5.5 min before the run's | not comparable: replayed with a $2.20 daily stop, the run had $30 |
+| Backtest, through-only | $6,112, 50 fills, −$0.63 | same problem |
+| Backtest, front of queue | $7,957, 64 fills, −$0.78 | same problem |
+
+What differs between the backtest and the account:
+
+- **Volume and fills: the queue model holds up** (run 1: 0.87x the volume, 33 fills for 31). Through-only and
+  front-of-queue miss in opposite directions, and their paths split at the daily stop.
+- **Cost: both live runs were cheaper than every backtest** (1.3 bp and 0.76 bp live; 1.9–2.8 bp in the replays;
+  1.7–2.0 bp steady state below). The scan is conservative on BTC cost by roughly 1.5–2.5x. Two runs and about 70
+  minutes are not enough to correct the model; each new run adds a point.
+- **Requotes and margin (fixed).** Arcus requotes are a cancel then a new order. Until the venue confirmed the
+  cancel, the bot's own pre-trade check counted the old order as still resting beside its replacement. So a buy that
+  reduced a short looked like it opened a position (~$80 of margin wanted, ~$50 free), and it was refused 14 times in run
+  2. Orders whose cancel is out no longer count. The backtest never had this.
+- **The replay ignored `sl=` (fixed).** A run's loss limit lifts its daily stop and kill; the replay kept $2.20, so its
+  backtest stopped at 07:06 while the run went on. `--sl 30` (or the deployed setup, for new runs) applies it.
+- **One side off the book.** In run 2 the sell side rested 32% of the time and the buy side 64%; 54% of the market's
+  taker volume ($301k) traded while the bot had no order on that side. This comes from the inventory cap (two filled
+  orders per side at 40x) and the position-stop pause.
+- **Order acknowledgement** took a median 180 ms (the backtest assumes 150 ms): close enough.
+
+**The position stop is too tight at 40x.** At about $100 the default position stop is 1% of the capital, about $1. On
+a $3.5k position that is a 3 bp move. Over 4 full BTC days (09-20 to 09-23), queue fills, the 40x order and cap of a ~$100 account, no daily
+stop and a large balance, so this is the cost over a whole day rather than the first minutes:
+
+| Position stop | Cost | Volume a day | Position stops a day | Taker share | Hours quoting |
+|---|---|---|---|---|---|
+| 1% (about $1, today) | 1.97 bp | $4.98M | 316 | 10% | 15.4 |
+| 2% | 1.76 bp | $5.58M | 129 | 3% | 18.8 |
+| **3% (about $3)** | **1.70 bp** | **$5.95M** | **48** | **1%** | **20.2** |
+| 5% | 1.69 bp | $6.15M | 9 | 0% | 20.9 |
+
+It is better on every one of the 4 days (0.25–0.33 bp). Each position stop crosses the spread (taker fee plus slip)
+and pauses quoting. At 3% the loss limit (`sl=`) still bounds the run, so for the same dollars lost, 3% buys about 16%
+more volume. Smaller orders ($880 or $440) cost about the same as 3% (1.70–1.80 bp), with less volume. **Use
+`/set position_stop 3`** before a BTC run at 40x. It applies from the next `/run` on any market (the owner's settings
+are global); the anchored stock setting `deep 3bp, no pause, 3% stop` already uses 3%.
+
+At 40x, a ~$100 account holding the full position is liquidated after losing roughly two thirds of it (the backtest
+without a daily stop was, within 21 minutes of quoting). Keep `sl=` under about a third of the balance at 40x.

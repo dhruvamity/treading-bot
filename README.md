@@ -771,9 +771,9 @@ Send `/menu` for buttons. Telegram's `/` list shows the everyday commands; the r
 
 | Command | What it does |
 |---|---|
-| `/pauseneworders [MARKET]`, `/unpause [MARKET]` | Stop / restart placing new orders; orders that close a position keep working |
+| `/pauseneworders [MARKET]`, `/unpause [MARKET]` | Stop / restart placing new orders; orders that close a position keep working. The pause survives restarts; a new `/run` clears it (its confirm screen says so) |
 | `/stop` | Shut the bot down: quotes cancelled, positions kept (Confirm button) |
-| `/resumeaftersl` | Trade again after a safety stop (safe mode, the kill or the daily stop), once you know why (Confirm button) |
+| `/resumeaftersl` | Trade again after a safety stop (safe mode, the kill or the daily stop), once you know why (Confirm button). It does not lift your own pause: `/unpause` does (the reply says when one holds) |
 | `/cancelall` | Cancel every open order on the account (Confirm button) |
 | `/closeall [taker]` | Close every position, maker or with IOC (typed code) |
 
@@ -862,7 +862,7 @@ running it first closes its position and stops.
 | `bot run SESSION [--live] [--yes] [--seconds N]` | Run a session (paper by default) |
 | `bot status [--mode live\|paper\|testnet]` | Heartbeat, open orders, positions |
 | `bot report [--date D] [--mode M]` | Daily report: Net = spread capture + inventory PnL + funding − fees − liquidation loss |
-| `bot diagnose [--mode live] [--hours N \| --since "2026-09-25 20:00" --until …] [--market QQQ] [--replay]` | Why a run filled what it filled: orders sent and acknowledged, rejects and their reasons, how long a buy and a sell rested, where they rested against the best price, what blocked quoting, and how many taker trades went through a price you rested at or traded while you had no order out. `--replay` also backtests the run's own setup on the same minutes, beside the run, under each fill model: where the backtest and the run differ (for a run from before 2026-09-26 give `--setting`, `--capital` and `--leverage`). Read-only |
+| `bot diagnose [--mode live] [--hours N \| --since "2026-09-25 20:00" --until …] [--market QQQ] [--replay]` | Why a run filled what it filled: orders sent and acknowledged, rejects and their reasons, how long a buy and a sell rested, where they rested against the best price, what blocked quoting, and how many taker trades went through a price you rested at or traded while you had no order out. `--replay` also backtests the run's own setup on the same minutes, beside the run, under each fill model: where the backtest and the run differ (for a run from before 2026-09-26 give `--setting`, `--capital` and `--leverage`; `--sl 30` for a run started with `sl=30`, which lifts its daily stop and kill). Read-only |
 | `bot resume [--venue V] [--all]` | Clear safe mode / stops |
 | `bot cancel-all --venue arcus [--market M] [--yes]` | Cancel all open orders (asks to confirm) |
 | `bot flatten --venue arcus [--taker]` | Close all positions, reduce-only (asks to confirm) |

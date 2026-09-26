@@ -247,3 +247,31 @@ async def test_a_refused_modify_is_not_retried_every_tick(tmp_path: object) -> N
     mods = [x for x in ad.sent if x.startswith("modify")]  # type: ignore[attr-defined]
     assert len(mods) == 2 and getattr(ad, "resync_requested", False)   # once, then once more after the back-off
     assert len(mods) <= 10 / IN_FLIGHT_MAX_S
+
+
+def test_a_requotes_old_half_does_not_count_as_resting(tmp_path: object) -> None:
+    """2026-09-26, BTC 40x live, short ~$2,870 with ~$50 free: Arcus requotes go out as cancel + place, and until the
+    venue confirmed the cancel the old buy still counted as resting next to its replacement. The reducing buy then
+    looked like it opened a position (~$80 of margin wanted) and was refused 14 times."""
+    from pathlib import Path
+
+    from bot.common.errors import PreTradeReject
+    from bot.venues.base import TIF, OrderRequest
+    from tests.unit.test_sizing import _engine
+
+    eng, _ = _engine(Path(str(tmp_path)), 100)
+    st = eng.state
+    st.positions[(Venue.ARCUS, "BTC")] = D("-0.0334")                     # short ~$2,870
+    eng.set_account(Venue.ARCUS, D("100"), D("45"))
+    old = OrderRequest(Venue.ARCUS, "BTC", Side.BUY, D("85990.0"), D("0.0334"), TIF.POST_ONLY, False, "old")
+    st.on_intent(old, "s")
+    new = OrderRequest(Venue.ARCUS, "BTC", Side.BUY, D("85991.0"), D("0.0362"), TIF.POST_ONLY, False, "new")
+    eng.risk.market_limits[(Venue.ARCUS, "BTC")].position_cap_usd = D(4400)
+    try:
+        eng.risk.check(new, M)
+        raise AssertionError("the old buy still counts as resting: the new one must look like it opens")
+    except PreTradeReject as e:
+        assert e.check == "free_collateral"
+    eng.om.cancelling["old"] = eng.om._now()                               # its cancel went out in this sync
+    assert eng.risk.ctx.open_notional(Venue.ARCUS, "BTC", Side.BUY) == 0
+    eng.risk.check(new, M)                                                 # reduces the short, $6 of margin at most

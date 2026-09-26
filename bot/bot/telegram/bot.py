@@ -29,7 +29,7 @@ from bot.common.logging import Log, redact_str
 from bot.core.balances import BalanceLog
 from bot.telegram import dashboard
 from bot.telegram.api import Keyboard, TelegramAPI, TelegramError, split_html
-from bot.telegram.control import MODES, Control
+from bot.telegram.control import MODES, Control, pause_where
 from bot.telegram.views import (
     COMMANDS,
     HELP,
@@ -612,11 +612,16 @@ class TelegramBot:
         args_ = {"market": c["market"], "setting": setting, "lev": float(c["leverage"]), "profile": c["profile"],
                  "live": live, "max_loss": max_loss}
         mode = "live" if live else "paper"
-        running = self.pilot.active() if self.control.is_running(mode) else None
+        # alive, not just running: a bot that is closing has stopped its heartbeat but not exited yet
+        alive = self.control.alive(mode)
+        running = self.pilot.active() if alive else None
+        paused = self.control.paused(mode)
         notes = ([f"🛑 Stops for good once this run loses {escape(f'${max_loss:,.2f}')} (the daily stop and kill "
                   "are raised to match; the position stop stays)"] if max_loss else []) + \
             ([f"↩️ Replaces the running {mode.upper()} bot ({escape(short(running['market']))} · "
-              f"{escape(running['config'])}): it closes its orders and position first"] if running else [])
+              f"{escape(running['config'])}): it closes its orders and position first"] if running else
+             [f"↩️ Starts once the {mode.upper()} bot that is stopping has exited"] if alive else []) + \
+            ([f"▶️ Clears your pause on new orders ({escape(pause_where(paused))})"] if paused else [])
         if not live:
             await self._ask(ctx, "deploy", args_, f"📝 Paper · {what}?" + "".join(f"\n{n}" for n in notes))
             return
@@ -628,7 +633,7 @@ class TelegramBot:
         async def go() -> None:
             try:   # checked from its own file: the running bot's session stays as it is until the owner confirms
                 path = self.pilot.write_session(c, live=True, path=self._state_dir() / "pilot_check.yaml")
-                ok, rep = await self.control.doctor(str(path), replacing=self.control.is_running("live"))
+                ok, rep = await self.control.doctor(str(path), replacing=self.control.alive("live"))
             except Exception as e:
                 await self.api.send(ctx.chat_id, f"⚠️ doctor failed: {escape(redact_str(str(e))[:300])}")
                 return
@@ -1090,9 +1095,17 @@ class TelegramBot:
             self._spawn(close())
         elif p.action == "resume":
             self.control.request_resume(a["mode"], a.get("venue"))
-            await self.reply(ctx, f"▶️ Resume sent to <b>{a['mode'].upper()}</b>: quoting restarts within a few "
-                             "seconds. /dashboard")
+            paused = self.control.paused(a["mode"])
+            if paused:   # a resume clears the safety stops only; the owner's own pause is /unpause (2026-09-26)
+                await self.reply(ctx, f"▶️ Safety stops cleared on <b>{a['mode'].upper()}</b>, but new orders are "
+                                 f"still paused by you ({escape(pause_where(paused))}), so it will not quote. "
+                                 "/unpause to quote again.",
+                                 [[("▶️ Unpause", f"unpause all {a['mode']}"), ("📊 Dashboard", "dashboard")]])
+            else:
+                await self.reply(ctx, f"▶️ Resume sent to <b>{a['mode'].upper()}</b>: quoting restarts within a few "
+                                 "seconds. /dashboard")
         elif p.action == "run":
+            self.control.clear_pause("live" if a["live"] else "paper", None)   # a new run starts quoting (see deploy)
             rec = self.control.start_run(a["name"], live=bool(a["live"]))
             await self.reply(ctx, f"🚀 Starting <b>{escape(a['name'])}</b> ({'LIVE' if a['live'] else 'paper'})…")
             self._spawn(self._watch_start(ctx, rec, "live" if a["live"] else "paper"))

@@ -66,6 +66,7 @@ class Dash:
     positions: list[dict[str, Any]] = field(default_factory=list)   # views.positions_of: market, size, mark, entry
     open_orders: int = 0
     stops: dict[str, float] = field(default_factory=dict)          # position / daily / kill, in dollars
+    bot_day_pnl: float | None = None   # the running bot's own day PnL (what its daily stop counts: this run only)
     run: dict[str, Any] | None = None                              # {pnl, limit}: the run's loss limit (sl=)
     quotes: dict[str, Any] = field(default_factory=dict)            # engine QuoteStats of the day (first session)
     # capital
@@ -138,6 +139,8 @@ def collect(control: Control, *, now: float | None = None, account: int = 0,
                 d.quotes = s["quotes"]
             if s.get("run") and not d.run:
                 d.run = s["run"]
+        own = [float(s["day_pnl"]) for s in sess if s.get("day_pnl") is not None]
+        d.bot_day_pnl = sum(own) if own and v.running else None
     _deployed(d, state_dir)
 
     # the account: live uses the real one (bot, own read, history); paper only what the paper bot publishes
@@ -333,8 +336,10 @@ def render(d: Dash, *, html: bool = True, frame: str = "live") -> str:
         extra = []
         if d.day_pnl_base:
             extra.append(_pct(d.day_pnl, d.day_pnl_base))
-        if d.day_pnl < 0 and d.stops.get("daily"):
-            extra.append(f"{-d.day_pnl / d.stops['daily'] * 100:.0f}% of day stop")
+        run_day = d.bot_day_pnl if d.bot_day_pnl is not None else d.day_pnl   # the stop counts this run's day only
+        if run_day < 0 and d.stops.get("daily"):
+            extra.append(f"{-run_day / d.stops['daily'] * 100:.0f}% of day stop"
+                         + (" (this run)" if d.bot_day_pnl is not None and d.bot_day_pnl != d.day_pnl else ""))
         elif bt_pnl is not None:
             extra.append(f"backtest {usd(bt_pnl)}/day")
         rows.append(f"PnL {b(usd(d.day_pnl))}" + e("".join(f" · {x}" for x in extra)))

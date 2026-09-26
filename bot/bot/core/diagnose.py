@@ -231,7 +231,7 @@ def replay(setup: dict[str, Any], fills: list[dict[str, Any]], dec: list[dict[st
     cfg = BY_NAME.get(str(setup.get("setting")))
     if cfg is None or not setup.get("risk") or markets_json is None:
         return [f"Replay    cannot: setting {setup.get('setting')!r} or its sizes are unknown"]
-    risk = Risk(**setup["risk"])
+    risk = Risk(**setup["risk"]).with_stops(cfg.stops)
     sized = next((d.get("data") or {} for d in reversed(dec) if d.get("event") == "resize"
                   and (d.get("data") or {}).get("order")), None)
     if sized:
@@ -239,6 +239,9 @@ def replay(setup: dict[str, Any], fills: list[dict[str, Any]], dec: list[dict[st
                        order_usd=float(sized["order"]), cap_usd=float(sized["cap"]),
                        cap_off_usd=float(sized.get("cap_off") or sized["cap"]), pos_stop_usd=float(sized["pos_stop"]),
                        daily_stop_usd=float(sized["daily_stop"]), kill_usd=float(sized["kill"]))
+    lim = float(setup.get("max_loss_usd") or 0)
+    if lim:   # the run's loss limit (sl=) lifts the daily stop and the kill to itself, as in the engine
+        risk = replace(risk, daily_stop_usd=max(risk.daily_stop_usd, lim), kill_usd=max(risk.kill_usd, lim))
     mi = load_markets(markets_json).get(market)
     meta = market_meta(markets_json).get(market, {})
     store = TapeStore(tape_root)
@@ -258,12 +261,12 @@ def replay(setup: dict[str, Any], fills: list[dict[str, Any]], dec: list[dict[st
     stop = next((int(d["ts"]) for d in dec if str(d.get("event")) == "risk:stop_venue_day"), None)
     out = [f"Replay    {setup.get('setting')} @ {float(setup.get('leverage') or 0):g}x: order ${risk.order_usd:,.0f}, cap "
            f"${risk.cap_usd:,.0f}, stops ${risk.pos_stop_usd:.2f}/${risk.daily_stop_usd:.2f}/${risk.kill_usd:.2f}"
-           + (" (the engine's sizes)" if sized else " (the deployed sizes)"),
+           + (" (the engine's sizes)" if sized else " (the deployed sizes)") + (f", sl=${lim:g}" if lim else ""),
            f"  the run      volume ${live_vol:>9,.0f}  fills {len(fills):4d}  PnL {live_pnl:+7.2f} (marked at the end"
            f"{', starting flat' if fills else ''})  daily stop {_utc(stop) if stop else '-'}"]
     for name, sp in (("through", SimParams()), ("queue (scan)", SimParams(queue=True)),
                      ("front", SimParams(front_of_queue=True))):
-        r = Sim(cfg, risk.with_stops(cfg.stops), mi, sp).run(w)
+        r = Sim(cfg, risk, mi, sp).run(w)
         vol = r.maker_usd + r.taker_usd
         out.append(f"  backtest {name:13s} ${vol:>9,.0f}  fills {r.maker_fills + r.taker_fills:4d}  PnL {r.pnl:+7.2f}"
                    f"  daily stop {_utc(r.first_day_stop_us) if r.first_day_stop_us else '-'}"

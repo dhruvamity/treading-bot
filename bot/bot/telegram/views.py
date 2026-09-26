@@ -9,7 +9,7 @@ from html import escape
 from typing import Any
 
 from bot.telegram.api import Keyboard
-from bot.telegram.control import ModeView
+from bot.telegram.control import ModeView, pause_where
 
 GREEN, YELLOW, RED, WHITE = "🟢", "🟡", "🔴", "⚪"
 
@@ -57,9 +57,12 @@ def state_of(v: ModeView) -> tuple[str, str]:
     risk = _risk(v)
     if risk:
         return RED, "running, " + "; ".join(risk)
-    if v.paused:
-        return YELLOW, "running, paused: " + ", ".join(sorted(v.paused))
     snap = v.snapshot or {}
+    bases = {str(x.get("market")) for x in snap.get("sessions") or [] if x.get("market")}
+    paused = {k: w for k, w in v.paused.items() if k == "*" or not bases or k in bases}   # the ones that hold it
+    if paused:
+        who = "the scout" if all(str(w).startswith("scout") for w in paused.values()) else "you"
+        return YELLOW, f"running, new orders paused by {who} ({pause_where(paused)}) · /unpause to quote"
     blocked = [m for m in snap.get("markets", []) if not m.get("quoting") and m.get("why")]
     if blocked:
         return YELLOW, "running, not quoting: " + "; ".join(f"{m['market']} ({m['why']})" for m in blocked)

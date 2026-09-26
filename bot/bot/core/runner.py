@@ -412,8 +412,7 @@ class BotRunner:
             sessions.append({"session": e.sid, "market": e.base, "venue": e.venue.value, "mode": e.last_mode,
                              "pnl": str(pnl), "day_pnl": str(day_pnl) if day_pnl is not None else None,
                              "capital": str(e.capital), "size_capital": str(e.size_capital),
-                             "stops": {k: getattr(e.session, f, None) for k, f in (
-                                 ("position", "pos_stop_usd"), ("daily", "daily_stop_usd"), ("kill", "kill_usd"))},
+                             "stops": _stops(e.session),
                              "run": {"pnl": str(e.run_pnl or 0), "limit": e.session.max_loss_usd}
                              if e.session.max_loss_usd else None,
                              "ticks": e.stats.ticks, "actions": e.stats.actions,
@@ -657,6 +656,18 @@ class BotRunner:
             "budget": self.governor.state(),
             "pnl": {f"{v.value}:{b}": str(self.ledger.breakdown(v, b).net) for (v, b) in list(self.ledger.books)},
         }
+
+
+def _stops(s: Any) -> dict[str, float | None]:
+    """The dollar stops in force: a run's loss limit (sl=) lifts the daily stop and the kill to at least itself
+    (RiskEngine.on_pnl), so a screen must not show the lower ones (2026-09-26: "229% of day stop" on a $10 run)."""
+    out = {k: getattr(s, f, None) for k, f in (("position", "pos_stop_usd"), ("daily", "daily_stop_usd"),
+                                                ("kill", "kill_usd"))}
+    lim = getattr(s, "max_loss_usd", None)
+    if lim:
+        for k in ("daily", "kill"):
+            out[k] = max(float(out[k] or 0), float(lim))
+    return out
 
 
 __all__ = ["BotRunner", "Decimal"]

@@ -190,6 +190,10 @@ class OrderManager:
         self.session = session
         self.account_index = account_index or {}
         self.in_flight: dict[str, int] = {}   # client id -> when its request was sent (us)
+        # client id -> when its cancel was sent (us). Arcus requotes are cancel + place in one sync; until the venue
+        # confirms the cancel the old order is still open locally, and the pre-trade check counted it as resting next
+        # to its own replacement (2026-09-26, BTC 40x: a reducing buy wanted ~$80 of margin with ~$50 free, 14 refusals).
+        self.cancelling: dict[str, int] = {}
         self.now_fn = now_fn
         self._resync_at: dict[Venue, int] = {}
         self.backoff_until: dict[tuple[Venue, str], int] = {}   # (venue, "order" | "cancel") -> us: a 429's retry hint
@@ -210,6 +214,11 @@ class OrderManager:
             log.warning("in_flight_expired", data={"client_id": client_id})
             return False
         return True
+
+    def is_cancelling(self, client_id: str) -> bool:
+        """A cancel for this order went out within IN_FLIGHT_MAX_S: it no longer counts as resting."""
+        sent = self.cancelling.get(client_id)
+        return sent is not None and self._now() - sent <= IN_FLIGHT_MAX_S * 1e6
 
     def _mark(self, client_ids: Sequence[str]) -> None:
         now = self._now()
@@ -286,10 +295,15 @@ class OrderManager:
                 self._dec("cancel", f"{why}: {a.reason}", venue=venue.value, market=m.base,
                                       session=self.session, client_id=a.client_id)
             self._mark(ids)   # before sending: the venue's update may arrive before the request returns
+            now = self._now()
+            self.cancelling = {c: t for c, t in self.cancelling.items() if now - t <= IN_FLIGHT_MAX_S * 1e6}
+            self.cancelling.update(dict.fromkeys(ids, now))
             try:
                 await adapter.cancel(ids)  # type: ignore[attr-defined]
                 res.actions += cancels
             except Exception as e:   # refused: leave them for IN_FLIGHT_MAX_S and let reconciliation say what is left
+                for c in ids:
+                    self.cancelling.pop(c, None)   # maybe still resting: count it again
                 res.errors.append(f"cancel: {e}")
                 self._rate_limited(venue, "cancel", e)
                 self.resync(venue, f"cancel refused: {str(e)[:120]}")

@@ -501,6 +501,78 @@ async def test_run_with_a_loss_limit_replaces_the_running_live_bot(tmp_path: Pat
     assert deployed and deployed[0]["max_loss_usd"] == 30 and deployed[0]["market"] == "BTC-USD"
 
 
+async def test_a_new_run_clears_an_old_pause_and_waits_for_a_closing_bot(tmp_path: Path, monkeypatch: Any) -> None:
+    """2026-09-26: /run BTC ... sl=10 started but quoted 0% for two hours behind an "all markets" pause from an
+    earlier /pauseneworders ("paused by you 100%"); /resumeaftersl did not help. And a /run while the SPY bot was
+    closing failed "already running": Telegram only looked at the heartbeat (15 s), the doctor at the process."""
+    import bot.scout.pilot as pilot_mod
+
+    rows = [_cand("BTC-USD", "touch 0bp", lev=20, go=False)]
+    bot, api, pilot, _calls = _with_pilot(tmp_path, rows, top=[])
+    ctl = pilot.control
+    ctl.set_pause("live", None, "Telegram (owner)")
+    ctl.set_pause("live", "QQQ", "scout: trending now")
+    monkeypatch.setenv("BOT_PILOT_LIVE", "1")
+    closing = [True, True, False]           # the old bot: shutting down (no heartbeat), then gone
+    started: list[bool] = []
+    monkeypatch.setattr(ctl, "is_running", lambda mode: bool(started))
+    monkeypatch.setattr(ctl, "alive", lambda mode: bool(started) or (closing.pop(0) if closing else False))
+    monkeypatch.setattr(ctl, "start_run", lambda name, live: started.append(True) or {"pid": 1, "log": "x.log"})
+    pilot.write_session = lambda c, live, path=None: tmp_path / "x.yaml"  # type: ignore[method-assign,assignment]
+    checked: list[bool] = []
+
+    async def doctor(name: str, *, replacing: bool = False) -> tuple[bool, str]:
+        checked.append(replacing)
+        return True, "all good"
+    monkeypatch.setattr(ctl, "doctor", doctor)
+    await bot.handle(msg("/run BTC touch 0bp 20x live sl=10"))
+    await asyncio.sleep(0.05)
+    text = api.sent[-1][1]
+    assert checked == [True] and "Starts once the LIVE bot that is stopping has exited" in text   # still exiting
+    assert "Clears your pause on new orders (all markets, QQQ)" in text
+    real_sleep = asyncio.sleep
+
+    async def fast(_s: float) -> None:
+        await real_sleep(0)
+    monkeypatch.setattr(pilot_mod.asyncio, "sleep", fast)
+    c = {**bot._find("BTC-USD", "touch 0bp", 20.0, "manual"), "max_loss_usd": 10.0}
+    assert await pilot_mod.Pilot.deploy(pilot, c, live=True, by="test") == "running in live"
+    assert not closing and started == [True]                                 # waited for the old process first
+    assert ctl.paused("live") == {}
+    ev, _ = pilot.events_since(0)
+    assert any("Cleared the pause on new orders (all markets, QQQ)" in e["text"] for e in ev)
+
+
+async def test_resume_after_a_stop_says_when_the_owner_pause_still_holds(tmp_path: Path) -> None:
+    app = _app(tmp_path)
+    _running_paper(tmp_path, app)
+    bot, api, ctl = _bot(tmp_path, app)
+    ctl.set_pause("paper", None, "Telegram (owner)")
+    await bot.handle(msg("/resumeaftersl"))
+    await bot.handle(press(f"ok {next(iter(bot.pending))}"))
+    assert "still paused by you (all markets)" in api.texts() and "unpause all paper" in _buttons(api)
+    from bot.telegram.views import state_of
+
+    assert "new orders paused by you (all markets) · /unpause" in state_of(ctl.view("paper"))[1]
+    ctl.clear_pause("paper", None)
+    ctl.set_pause("paper", "QQQ", "scout: x")        # another market's pause does not hold an AMD bot
+    assert "paused" not in state_of(ctl.view("paper"))[1]
+
+
+def test_a_stopped_heartbeat_is_a_stop_not_a_crash(tmp_path: Path) -> None:
+    app = _app(tmp_path)
+    ctl = Control(app, root=tmp_path)
+    hb = tmp_path / app.heartbeat_for("live")
+    write_heartbeat(hb, mode="live", stopped="quotes cancelled, bot stopped")
+    d = json.loads(hb.read_text())
+    d["pid"], d["ts_us"] = os.getppid(), d["ts_us"] - 20_000_000       # 20 s old, the process still exiting
+    hb.write_text(json.dumps(d))
+    v = ctl.view("live")
+    assert v.stopped and not v.running and not ctl.is_running("live") and ctl.alive("live")
+    ctl.request_close("live", "test")
+    assert ctl.stop_asked["live"] > 0
+
+
 async def test_a_paper_deployment_goes_live_with_the_same_setup(tmp_path: Path, monkeypatch: Any) -> None:
     rows = [_cand("QQQ-USD", "touch 1bp", lev=20)]
     bot, api, pilot, calls = _with_pilot(tmp_path, rows)

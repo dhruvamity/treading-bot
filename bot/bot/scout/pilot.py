@@ -48,7 +48,7 @@ from bot.common.sizing import INV_BUFFER, min_capital
 from bot.scout import profiles
 from bot.scout.scan import BY_NAME, load_markets, market_meta, max_leverage, venue_min
 from bot.scout.sim import Config, Risk
-from bot.telegram.control import Control
+from bot.telegram.control import Control, pause_where
 from bot.venues.base import Venue
 from bot.venues.symbols import canonical_base
 
@@ -462,11 +462,18 @@ class Pilot:
             if self.control.is_running(m):
                 self.control.request_close(m, by)
                 self.event("closing", f"Closing the running {m} bot first…")
-                t0 = time.time()
-                while self.control.is_running(m) and time.time() - t0 < wait_close_s:
-                    await asyncio.sleep(5)
-                if self.control.is_running(m):
-                    raise RuntimeError(f"the {m} bot did not stop within {wait_close_s / 60:.0f} min; check it (/status)")
+            # until its process exits, also when it was already stopping: two bots never share the account
+            t0 = time.time()
+            while self.control.alive(m) and time.time() - t0 < wait_close_s:
+                await asyncio.sleep(3)
+            if self.control.alive(m):
+                raise RuntimeError(f"the {m} bot did not stop within {wait_close_s / 60:.0f} min; check it (/status)")
+        # A new run is the owner's go: a pause from before it (/pauseneworders, or the scout's on the last setup) must
+        # not hold it. 2026-09-26: a BTC run sat at 0% quoting behind an old "all markets" pause. A restart of the same
+        # run (`bot up`) keeps its pauses.
+        cleared = self.control.paused(mode)
+        if cleared:
+            self.control.clear_pause(mode, None)
         self.write_session(c, live=live)
         self.control.clear_sizing_ok(mode)
         rec = self.control.start_run(SESSION, live=live)
@@ -488,6 +495,7 @@ class Pilot:
                 self.event("deployed", f"🟢 {mode.upper()} · {c['market']} · {c['config']}\n{numbers(c)}"
                            + (f"\n🛑 Stops for good once this run loses ${float(c['max_loss_usd']):,.2f}"
                               if c.get("max_loss_usd") else "")
+                           + (f"\n▶️ Cleared the pause on new orders ({pause_where(cleared)})" if cleared else "")
                            + f"\n{prof.icon} {prof.title}{' · max leverage' if c['lev'] == 'max' else ''} · by {by}",
                            setup=setup)   # what `bot diagnose --replay` backtests against the live run
                 if live:   # the live bot's independent watchdog (bot/ops.py); best effort, never blocks the deploy
@@ -508,8 +516,8 @@ class Pilot:
         if self.control.is_running(a["mode"]):
             self.control.request_close(a["mode"], by)
             t0 = time.time()
-            while self.control.is_running(a["mode"]) and time.time() - t0 < wait_s:
-                await asyncio.sleep(5)
+            while self.control.alive(a["mode"]) and time.time() - t0 < wait_s:
+                await asyncio.sleep(3)
         st["active"] = None
         st.pop("paused_by_scout", None)
         self.save(st)

@@ -21,7 +21,7 @@ from pathlib import Path
 from typing import Any
 
 from bot.common.config import AppConfig, load_session
-from bot.core.heartbeat import heartbeat_process_alive, read_heartbeat_age_s
+from bot.core.heartbeat import heartbeat_process_alive, read_heartbeat, read_heartbeat_age_s
 
 MODES = ("live", "testnet", "paper")
 
@@ -40,6 +40,12 @@ class ModeView:
     positions: dict[str, str] = field(default_factory=dict)
     paused: dict[str, str] = field(default_factory=dict)
     resume_pending: bool = False
+    stopped: bool = False   # the heartbeat says the bot stopped on purpose (quotes pulled)
+
+
+def pause_where(paused: dict[str, str]) -> str:
+    """{"*": .., "QQQ": ..} -> "all markets, QQQ"."""
+    return ", ".join("all markets" if k == "*" else k for k in sorted(paused, key=lambda k: (k != "*", k)))
 
 
 def _today_start_us(now: float | None = None) -> int:
@@ -53,6 +59,7 @@ class Control:
         self.root = Path(root)
         self.bot_bin = bot_bin or str(Path(sys.executable).with_name("bot"))
         self.runs_file = self.root / app.state_dir / "telegram_runs.json"
+        self.stop_asked: dict[str, float] = {}   # mode -> when a stop or close was last requested from here
 
     # ------------------------------------------------------------------ paths / db
     def db_path(self, mode: str) -> Path:
@@ -105,6 +112,22 @@ class Control:
         age = read_heartbeat_age_s(self.hb_path(mode))
         return age < 15 and heartbeat_process_alive(self.hb_path(mode))
 
+    def alive(self, mode: str) -> bool:
+        """The bot's process is still there: running, or shutting down. A bot stops writing its heartbeat once it
+        starts to stop, and closing its connections can take a while; `bot doctor` counts it as running for 30 s
+        after its last heartbeat. 2026-09-26: /run during a close failed "already running" while Telegram thought
+        nothing ran. A new bot waits for this to be False (the old one disarms the dead man's switch on exit)."""
+        if self.is_running(mode):
+            return True
+        return read_heartbeat_age_s(self.hb_path(mode)) < 120 and heartbeat_process_alive(self.hb_path(mode))
+
+    def paused(self, mode: str) -> dict[str, str]:
+        """Markets the owner (or the scout) paused: {BASE or "*": who/why}."""
+        try:
+            return dict(json.loads(self._kv_get(mode, "paused") or "{}"))
+        except ValueError:
+            return {}
+
     def heartbeat_pid(self, mode: str) -> int | None:
         try:
             return int(json.loads(self.hb_path(mode).read_text())["pid"])
@@ -124,7 +147,8 @@ class Control:
         age = read_heartbeat_age_s(self.hb_path(mode), int(now * 1e6))
         v = ModeView(mode=mode, running=age < 15 and heartbeat_process_alive(self.hb_path(mode)),
                      heartbeat_age_s=None if age == float("inf") else age, pid=self.heartbeat_pid(mode),
-                     snapshot=None, snapshot_age_s=None)
+                     snapshot=None, snapshot_age_s=None,
+                     stopped=bool((read_heartbeat(self.hb_path(mode)) or {}).get("stopped")))
         con = self._db(mode)
         if con is None:
             return v
@@ -214,10 +238,12 @@ class Control:
         self._kv_set(mode, "sizing_ok", "")
 
     def request_stop(self, mode: str, by: str) -> None:
+        self.stop_asked[mode] = time.time()
         self._kv_set(mode, "control", json.dumps({"cmd": "stop", "by": by, "ts": time.time()}))
 
     def request_close(self, mode: str, by: str) -> None:
         """Close every position (maker, then taker), then stop the run."""
+        self.stop_asked[mode] = time.time()
         self._kv_set(mode, "control", json.dumps({"cmd": "close", "by": by, "ts": time.time()}))
 
     def signal_stop(self, mode: str) -> bool:
