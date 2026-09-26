@@ -51,9 +51,3 @@ class SessionClock:
     def exit_done(self) -> SessionState:
         self.state = SessionState.DONE if self.run_index >= self.cfg.repeat else SessionState.WAITING
         return self.state
-
-    def progress(self, now_us: int) -> float:
-        """0..1 through the current run (drives the Tread bias path)."""
-        if self.state is not SessionState.RUNNING:
-            return 1.0 if self.state is SessionState.EXITING else 0.0
-        return min(1.0, (now_us - self.started_us) / (self.cfg.duration_s() * US_PER_S))

@@ -4,7 +4,7 @@
     bot status                    one screen: services, trading bot, what is deployed, last scan, balance
     bot dashboard                 live screen, every 10 s: today's volume and PnL, the capital's profit or loss
     bot pilot approve 1 [--live]  trade the scout's #1 setup (paper, or real money)
-        [--list volume|aggressive] [--max-lev]   from another top 3, or at the market's maximum leverage
+        [--list volume|cheapest|max] [--max-lev]   from another top 3, or at the market's maximum leverage
     bot pilot close               close the position and stop trading
     bot down [--all]              stop the services (--all: the trading bot too, positions kept)
     bot doctor pilot              is everything ready for live? (reads only)
@@ -299,19 +299,28 @@ async def _venue_adapter(venue: str, account_index: int | None, mainnet: bool) -
                      is_mainnet=mainnet)
     return ArcusAdapter(rest, None, address=address, account_index=int(account_index or 0),
                         markets=lp.markets[Venue.ARCUS], use_modify=acfg.use_modify)
-async def venue_cancel_all(venue: str, account: int | None, mainnet: bool, market: str | None = None) -> str:
-    """Cancel every open order on a venue account (shared by the CLI and the Telegram bot)."""
+
+
+async def venue_cancel_all(venue: str, account: int | None, mainnet: bool, market: str | None = None
+                           ) -> dict[str, Any]:
+    """Cancel every open order on a venue account (shared by the CLI and the Telegram bot): the account, and the
+    orders the venue still lists afterwards."""
     ad = await _venue_adapter(venue, account, mainnet)
     try:
         await ad.cancel_all(market)
-        return (f"cancel-all sent to {venue} {'MAINNET' if mainnet else 'testnet'} "
-                f"account {getattr(ad, 'account_index', '?')}")
+        try:
+            left: int | None = len(await ad.open_orders())
+        except Exception:
+            left = None
+        return {"venue": venue, "net": "MAINNET" if mainnet else "testnet",
+                "account": getattr(ad, "account_index", "?"), "open": left}
     finally:
         await ad.close()
 
 
-async def venue_flatten(venue: str, account: int | None, mainnet: bool, taker: bool) -> str:
-    """Cancel everything, then close every position with reduce-only orders (maker at the touch, or IOC)."""
+async def venue_flatten(venue: str, account: int | None, mainnet: bool, taker: bool) -> dict[str, Any]:
+    """Cancel everything, then close every position with reduce-only orders (maker at the touch, or IOC): how many
+    positions there were, the orders sent, and the positions still open a moment later."""
     from bot.common.ids import ClientIdFactory
     from bot.core.guardian import flatten_orders
     from bot.venues.base import Venue
@@ -319,28 +328,42 @@ async def venue_flatten(venue: str, account: int | None, mainnet: bool, taker: b
     ad = await _venue_adapter(venue, account, mainnet)
     try:
         await ad.cancel_all(None)
-        pos = await ad.positions()
+        pos = [p for p in await ad.positions() if p.size]
         mk = {m.base: m for m in await ad.markets()}
         orders = flatten_orders(pos, mk, {p.base: p.mark_price for p in pos}, ClientIdFactory("manual", 1), Venue(venue),
                                 taker=taker)
+        left = len(pos)
         if orders:
             await ad.place(orders)
-        return f"sent {len(orders)} reduce-only {'IOC' if taker else 'maker'} orders on {venue}"
+            await asyncio.sleep(2)
+            with contextlib.suppress(Exception):
+                left = len([p for p in await ad.positions() if p.size])
+        return {"venue": venue, "positions": len(pos), "orders": len(orders), "open": left, "taker": taker}
     finally:
         await ad.close()
+
+
+def _cancel_line(r: dict[str, Any]) -> str:
+    return (f"cancel-all sent to {r['venue']} {r['net']} account {r['account']}"
+            + (f"; {r['open']} orders still open" if r.get("open") else ""))
+
+
+def _flatten_line(r: dict[str, Any]) -> str:
+    return (f"sent {r['orders']} reduce-only {'IOC' if r['taker'] else 'maker'} orders on {r['venue']} for "
+            f"{r['positions']} position(s); {r['open']} still open")
 
 
 def cmd_cancel_all(a: argparse.Namespace) -> None:
     net = "testnet" if a.testnet else "MAINNET"
     if not a.testnet and not a.yes:
         _confirm(f"cancel ALL open orders on {a.venue} ({net}, account {a.account if a.account is not None else 'of your key'})")
-    print(_run(venue_cancel_all(a.venue, a.account, not a.testnet, a.market)))
+    print(_cancel_line(_run(venue_cancel_all(a.venue, a.account, not a.testnet, a.market))))
 
 
 def cmd_flatten(a: argparse.Namespace) -> None:
     if not a.testnet:
         _confirm(f"FLATTEN every position on {a.venue} MAINNET with reduce-only orders ({'IOC' if a.taker else 'maker'})")
-    print(_run(venue_flatten(a.venue, a.account, not a.testnet, a.taker)))
+    print(_flatten_line(_run(venue_flatten(a.venue, a.account, not a.testnet, a.taker))))
 
 
 def cmd_selftest(a: argparse.Namespace) -> None:
@@ -689,7 +712,7 @@ def build_parser() -> argparse.ArgumentParser:
         sp.set_defaults(fn=fn)
         return sp
 
-    modes = ("mid", "grid", "rgrid", "signal", "anchor")
+    modes = ("mid", "grid")
     add("sessions", cmd_sessions, "list the session files: venue, subaccount, market, mode, capital, live_enabled")
     sp = add("doctor", cmd_doctor, "check everything a live run needs (credentials, account, sizing, clock); no orders")
     sp.add_argument("sessions", nargs="*", help="session names (default: credentials and account only)")
@@ -761,8 +784,9 @@ def build_parser() -> argparse.ArgumentParser:
     sp.add_argument("action", choices=["status", "approve", "close"])
     sp.add_argument("n", nargs="?", type=int, default=1, help="approve: which of the top 3")
     sp.add_argument("--live", action="store_true", help="real money (needs BOT_PILOT_LIVE=1 and typing LIVE)")
-    sp.add_argument("--list", default="breakeven", choices=["breakeven", "volume", "aggressive"],
-                    help="which top 3: breakeven (default), volume or aggressive (bot/scout/profiles.py)")
+    sp.add_argument("--list", default="volume", choices=["volume", "cheapest", "max"],
+                    help="which top 3: volume (most volume within /set volume_cost, default), cheapest or max "
+                         "(bot/scout/profiles.py)")
     sp.add_argument("--max-lev", action="store_true", help="the same setting at the market's maximum leverage")
     sp = add("resume", cmd_resume, "clear safe mode / stops (after investigation)")
     sp.add_argument("--venue")

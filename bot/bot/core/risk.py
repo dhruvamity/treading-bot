@@ -59,6 +59,29 @@ class RiskDecision:
     market: str | None
     reason: str
     resume: str
+    lines: tuple[str, ...] = ()   # what the alert shows under its title (default: the reason and when it resumes)
+
+
+# the alert title of each trigger (the owner's Telegram templates, 2026-09-26)
+ALERT_TITLES = {
+    "safety_pause": "⚠️ SAFETY PAUSE", "position_stop": "🛑 POSITION STOP", "daily_loss": "🛑 DAILY STOP",
+    "run_loss": "🛑 RUN STOP", "drawdown": "🚨 KILL STOP", "session_sl": "🛑 SESSION STOP", "session_tp": "🎯 TAKE PROFIT",
+    "band_or_oi": "⚠️ MARKET STOPPED", "event_window": "⚠️ EVENT WINDOW", "critical_reject": "🚨 VENUE STOPPED",
+    "reject_breaker": "⚠️ REJECTS PAUSE", "liq_distance": "🚨 NEAR LIQUIDATION", "safe_mode": "🚨 SAFE MODE",
+}
+
+
+def alert_text(d: RiskDecision) -> str:
+    """The decision as an alert: its title, then its own lines, else the reason and when it resumes; each line a group
+    of its own, as in the owner's templates ("BTC · PnL -$1.34", then "Stop -$1.10")."""
+    title = ALERT_TITLES.get(d.trigger, d.trigger.replace("_", " ").upper())
+    body = list(d.lines) or [x for x in (f"{d.market} · {d.reason}" if d.market else d.reason,
+                                         f"Resumes: {d.resume}" if d.resume else "") if x]
+    return title + "\n" + "\n\n".join(body)
+
+
+def _bp(x: float) -> str:
+    return f"{x:.1f}bp" if x >= 0.1 else f"{x:.2f}bp"
 
 
 @dataclass
@@ -218,7 +241,9 @@ class RiskEngine:
         if run is not None and run_pnl is not None and run_pnl <= -run and not self.all_stopped:
             self.all_stopped = f"this run lost ${-run_pnl:.2f}, its limit is ${run:.2f}"
             out.append(self._log(RiskDecision("run_loss", RiskAction.STOP_ALL, None, None, self.all_stopped,
-                                              "start a new run (/run ... sl=)"), ts_us))
+                                              "start a new run (/run ... sl=)",
+                                              (f"Run PnL -${-run_pnl:.2f} · stop -${run:.2f}",
+                                               "Closing the position · run ended")), ts_us))
         if run is None and session_margin > 0 and session_pnl <= -session_margin * Decimal(stop_loss_pct) / 100:
             out.append(self._log(RiskDecision("session_sl", RiskAction.FLATTEN_SESSION, venue, None,
                                               f"session {session_id} loss ${-session_pnl:.2f} >= {stop_loss_pct}% of margin",
@@ -238,7 +263,9 @@ class RiskEngine:
             self.venue_stopped_day[venue] = day
             out.append(self._log(RiskDecision("daily_loss", RiskAction.STOP_VENUE_DAY, venue, None,
                                               f"day loss ${-(day_pnl - since):.2f}{' since the resume' if since else ''}"
-                                              f" > daily stop ${day_lim:.2f}", "manual or next UTC day"), ts_us))
+                                              f" > daily stop ${day_lim:.2f}", "manual or next UTC day",
+                                              (f"PnL -${-(day_pnl - since):.2f}{' since the resume' if since else ''}",
+                                               "Trading stopped for today")), ts_us))
         key = venue.value
         peak = max(self.equity_peak.get(key, equity), equity)
         self.equity_peak[key] = peak
@@ -248,7 +275,9 @@ class RiskEngine:
         if dd_lim > 0 and (peak - equity) > dd_lim and not self.all_stopped:
             self.all_stopped = f"drawdown ${peak - equity:.2f} > ${dd_lim:.2f} from the peak"
             out.append(self._log(RiskDecision("drawdown", RiskAction.STOP_ALL, None, None, self.all_stopped,
-                                              "manual only (bot resume)"), ts_us))
+                                              "manual only (bot resume)",
+                                              (f"Drawdown ${peak - equity:.2f} from the peak · limit ${dd_lim:.2f}",
+                                               "Closing the position · trading stopped")), ts_us))
         return out
 
     def roll_day(self, ts_us: int) -> None:
@@ -266,26 +295,30 @@ class RiskEngine:
         key = (view.venue, view.base)
         s = self.safety
         sig = max(view.vol_1s.sigma(), s.min_sigma_1s)
-        reasons = []
+        reasons, shown = [], []
         if view.vol_1s.n > 60 and abs(view.last_move_1s) > s.move_sigma_1s * sig:
             reasons.append(f"1s move {view.last_move_1s:.5f} > {s.move_sigma_1s} sigma ({sig:.5f})")
+            shown.append("1s move exceeded volatility threshold")
         sb = view.book.spread_bps()
         med = view.spread_med_1h.median()
         if (sb is not None and med is not None and len(view.spread_med_1h.buf) >= s.warmup_samples
                 and sb > s.spread_x_median * med and sb - med > s.spread_min_excess_bps):
             reasons.append(f"spread {sb:.2f} bps > {s.spread_x_median}x median {med:.2f}")
+            shown.append(f"Spread {_bp(float(sb))} > {s.spread_x_median:g}× median {_bp(float(med))}")
         dm = view.depth_med_1h.median()
         if dm and len(view.depth_med_1h.buf) >= s.warmup_samples:
             d = float(view.book.depth_notional(True, within_bps=25) + view.book.depth_notional(False, within_bps=25))
             if d < s.depth_frac_min * dm:
                 reasons.append(f"depth ${d:.0f} < {s.depth_frac_min:.0%} of median ${dm:.0f}")
+                shown.append(f"Depth ${d:,.0f} < {s.depth_frac_min:.0%} of median ${dm:,.0f}")
         if reasons:
             self._pause_normal_since.pop(key, None)
             already = self.paused_until_us.get(key, 0) > now_us
             self.paused_until_us[key] = now_us + int(s.resume_s * US_PER_S)
             if not already:
                 return self._log(RiskDecision("safety_pause", RiskAction.PAUSE_QUOTES, view.venue, view.base,
-                                              "; ".join(reasons), f"{s.resume_s:.0f} s of normal readings"), now_us)
+                                              "; ".join(reasons), f"{s.resume_s:.0f} s of normal readings",
+                                              (*shown, "Quoting paused")), now_us)
         return None
 
     def event_window(self, venue: Venue, base: str, category: str, ts_us: int, skip: set[str]) -> RiskDecision | None:

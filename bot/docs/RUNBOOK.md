@@ -135,9 +135,8 @@ names `/scout`, `/pilot`, `/report`, `/pause`, `/resume`, `/flatten` still work)
 
 | Command | What happens |
 |---|---|
-| `/top3` | The 3 best setups right now (backtested), with Run buttons: Paper = confirm button, LIVE = `BOT_PILOT_LIVE=1`, doctor, typed code |
-| `/volume`, `/aggressive`, `/maxvolume` | The volume lists (bot/scout/profiles.py): most volume within `volume_cost` per $1,000 (any setting, or aggressive Mid only), or at any cost. A list asks the scout for a scan (state/scan_now) only when the last is stale; the ETA comes from data/scout/scan_status.json. ▶️ → the leverage ladder → Paper/LIVE |
-| `/run` | Any market, setting and leverage (market → setting → ladder), or `/run BTC touch 0bp max paper`. Runs as the owner's pick (profile `manual`): never paused for its numbers |
+| `/top3`, `/cheapest`, `/maxvolume` | The lists (bot/scout/profiles.py): Most Volume within `volume_cost` per $1,000, the cheapest per $1,000 within it, or the most volume at any cost (`/volume`, `/aggressive`, `/breakeven` are old names for them). A list asks the scout for a scan (state/scan_now) only when the last is stale; the ETA comes from data/scout/scan_status.json. ▶️ → the run form → Paper (confirm button) / LIVE (`BOT_PILOT_LIVE=1`, doctor, typed code) |
+| `/run` | The run form: market, then Mid or Grid, spread, bias, leverage, run stop, volume target as buttons (bot/strategies/setup.py), or in one line `/run BTC mid 0 40x live sl=10 vol=100k tp=5`. Old names (`touch 0bp`, `deep 3bp`) still parse. Runs as the owner's pick (profile `manual`) unless it came from a list: never paused for its numbers |
 | `/openpositions` | What is deployed, today's PnL vs the backtest, the last check; Close & stop |
 | `/dashboard` | One message edited every 10 s and pinned (state/telegram_dashboard.json, survives a restart): today's volume and pace, today's PnL from the balance history (deposits excluded), position, equity and capital P/L. ⏹ / ▶️ buttons; `bot dashboard` is the terminal version |
 | `/status`, `/pnl`, `/positions`, `/orders` | What is running, today's PnL, fills and maker volume; PnL by market since start |

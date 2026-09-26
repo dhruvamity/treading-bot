@@ -15,9 +15,6 @@ ARCUS_CLIENT_ID_RE = re.compile(r"^[A-Za-z0-9_-]{1,36}$")
 STRATEGY_CODES = {
     "mid": "m",
     "grid": "g",
-    "rgrid": "r",
-    "signal": "s",
-    "anchor": "a",
     "manual": "x",
     "probe": "q",
     "guardian": "z",

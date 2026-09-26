@@ -26,7 +26,7 @@ from tests.unit.test_sizing import _engine, _pilot_session
 from tests.unit.test_telegram import OWNER, _app, _bot, _running_paper, msg, press
 
 ROOT = Path(__file__).parents[2]
-DAY = {"config": "deep 3bp", "pnl": 0.5, "maker_fills": 50, "maker_usd": 10_000, "day_stops": 0, "killed": False,
+DAY = {"config": "Mid +3", "pnl": 0.5, "maker_fills": 50, "maker_usd": 10_000, "day_stops": 0, "killed": False,
        "taker_usd": 0, "actions": 100}
 
 
@@ -36,9 +36,9 @@ def test_only_settings_that_pass_on_their_full_days_are_rechecked() -> None:
     days = ("2026-09-20", "2026-09-21", "2026-09-22")
     good = {"risk": r, "days": {d: [DAY] for d in days}}
     bad = {"risk": r, "days": {d: [DAY | {"pnl": -3.0}] for d in days}}
-    assert passes_long(good, "deep 3bp", Pct()) and not passes_long(bad, "deep 3bp", Pct())
-    assert not passes_long({"risk": r, "days": {}}, "deep 3bp", Pct())                    # no full day yet
-    assert not passes_long({**good, "skip": "needs $8"}, "deep 3bp", Pct())               # capital too small
+    assert passes_long(good, "Mid +3", Pct()) and not passes_long(bad, "Mid +3", Pct())
+    assert not passes_long({"risk": r, "days": {}}, "Mid +3", Pct())                    # no full day yet
+    assert not passes_long({**good, "skip": "needs $8"}, "Mid +3", Pct())               # capital too small
     assert long_reasons([DAY], 100, Pct()) == ["1 full day of data (needs 3)"]
     assert long_reasons([DAY | {"maker_fills": 2}] * 3, 100, Pct()) == ["too few fills (2.0/day)"]
 
@@ -137,15 +137,15 @@ async def test_telegram_changes_a_setting_after_a_confirm(tmp_path: Path) -> Non
     bot, api, _ = _bot(tmp_path, app)
     (tmp_path / "state" / STATE).write_text(json.dumps({"usd": 100, "kind": "account"}))
     await bot.handle(msg("/set trade_share 50"))
-    assert "Set <b>trade_share</b> to <b>50%</b>" in api.sent[-1][1]
+    assert "⚙️ <b>TRADE SHARE</b>" in api.sent[-1][1] and "<code>New 50%</code>" in api.sent[-1][1]
     assert settings.load(tmp_path / "state") == {}                            # nothing until confirmed
     await bot.handle(press(f"ok {next(iter(bot.pending))}"))
     assert settings.load(tmp_path / "state") == {"trade_share": 50}
     assert not (tmp_path / "state" / STATE).exists() and (tmp_path / "state" / SCAN_NOW).exists()   # rescan now
     await bot.handle(msg("/set position_stop 5"))                             # above the daily stop
-    assert "⚠️" in api.sent[-1][1] and not bot.pending
+    assert "CANNOT SET" in api.sent[-1][1] and "further information" not in api.sent[-1][1] and not bot.pending
     await bot.handle(msg("/settings"))
-    assert "trade_share</b> 50% ✏️" in api.sent[-1][1]
+    assert "trade_share</b> <code>50%</code> (changed)" in api.sent[-1][1]
     await bot.handle(msg("/set trade_share default"))
     await bot.handle(press(f"ok {next(iter(bot.pending))}"))
     assert settings.load(tmp_path / "state") == {}
@@ -167,8 +167,8 @@ async def test_telegram_balance_reads_logs_and_shows_the_history(tmp_path: Path,
     monkeypatch.setattr(cap, "account_snapshot", snap)
     await bot.handle(msg("/balance"))
     text = api.sent[-1][1]
-    assert "Equity <b>$112.50</b>" in text and "trading PnL <b>+$2.50</b>" in text
-    assert "7 d +$12.50 (trading +$2.50)" in text
+    assert "Equity $112.50" in text and "trading PnL +$2.50" in text
+    assert "7d +$12.50 (trading +$2.50)" in text
     assert len(BalanceLog(tmp_path / "state" / "balances.jsonl").rows()) == 2   # this reading was logged
 
 

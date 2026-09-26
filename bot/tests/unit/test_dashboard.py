@@ -63,7 +63,7 @@ def _acct(equity: float, deposits: float, age_s: float = 5.0) -> dict[str, Any]:
 
 def _deploy(tmp_path: Path, mode: str = "live") -> None:
     (tmp_path / "state" / "pilot.json").write_text(json.dumps({"active": {
-        "market": "QQQ-USD", "config": "deep 2bp x2 @ 10x", "mode": mode, "since": time.time() - 7200,
+        "market": "QQQ-USD", "config": "Mid +2 @ 10x", "mode": mode, "since": time.time() - 7200,
         "backtest": {"volume_day": 5369.0, "pnl_day": 0.32}}}))
 
 
@@ -92,23 +92,17 @@ def test_live_today_volume_pnl_and_capital(tmp_path: Path) -> None:
         assert d.pace_day == pytest.approx(d.maker_volume / (now - t_from) * DAY)   # maker, as backtested
 
     html = dashboard.render(d)
-    for part in ("📊 <b>QQQ-USD</b> · <b>LIVE</b>", "<i>deep 2bp x2 @ 10x", "Volume <b>$110</b> · 2 fills",
-                 "of the $5,369/day backtest", "PnL <b>+$0.42</b> · +0.84%", "Long <b>0.1 QQQ</b>",
-                 "Equity <b>$50.42</b> · deposited $50.00", "P/L <b>+$0.42</b> · +0.84%", "every 10 s",
-                 "<blockquote><b>Today</b>", "<blockquote><b>Position</b>", "<blockquote><b>Capital</b>"):
+    # the owner's template (2026-09-26): one emoji, the state in the title, sections under bold labels
+    for part in ("📊 <b>QQQ-USD · LIVE · RUNNING</b>", "<code>Mid +2 · Neutral · 10x · $28 sizing</code>",
+                 "<b>Today</b>\nVolume <b>$110</b> · 2 fills · Fees <b>$0.01</b>", "PnL <b>+$0.42</b> (+0.84%)",
+                 "<b>Position</b>\nLong 0.1 QQQ ≈ $60.00", "<b>Capital</b>\nEquity <b>$50.42</b> · P/L <b>+$0.42 (+0.84%)</b>",
+                 "every 10 s"):
         assert part in html, (part, html)
-    assert "<pre>" not in html and html.count("<blockquote>") == html.count("</blockquote>") == 3
+    assert "<pre>" not in html and "<blockquote>" not in html and "**" not in html and "`" not in html
+    if now - t_from >= dashboard.PACE_AFTER_S:
+        assert "backtest $5,369/day" in html
     text = dashboard.render(d, html=False, frame="once")
-    assert "<b>" not in text and "│ TODAY" in text and "│ CAPITAL" in text and "every 10 s" not in text
-
-
-def test_bar_and_sparkline() -> None:
-    assert dashboard.bar(0.0) == "─" * 12 and dashboard.bar(0.5) == "━" * 6 + "─" * 6 and dashboard.bar(3) == "━" * 12
-    assert dashboard.spark([0.0, 1.0]) == ""                             # too few points to draw
-    assert dashboard.spark([0.0, 0.5, 1.0]) == "▁▅█"
-    assert dashboard.spark([1.0, 1.0, 1.0]) == "▁▁▁"
-    long = dashboard.spark([float(x) for x in range(100)])
-    assert len(long) == dashboard.SPARK_POINTS and long[0] == "▁" and long[-1] == "█"
+    assert "<b>" not in text and "TODAY" in text and "CAPITAL" in text and "every 10 s" not in text
 
 
 def test_position_card_shows_entry_mark_and_stop(tmp_path: Path) -> None:
@@ -128,9 +122,9 @@ def test_position_card_shows_entry_mark_and_stop(tmp_path: Path) -> None:
     BalanceLog(tmp_path / "state" / "balances.jsonl").record(
         source="bot", equity=50.00, net_deposits=50.00, ts=_today_start_us(time.time()) / 1e6 - 60)
     html = dashboard.render(dashboard.collect(Control(app, root=tmp_path)))
-    assert html.count("Short <b>0.1503 QQQ</b> ≈ $112.09") == 1           # the market listed twice shows once
-    assert "745.69 → 745.80 · <b>-$0.02</b> · stop -$0.28" in html
-    assert "PnL <b>-$0.23</b> · -0.46% · 41% of day stop" in html
+    assert html.count("Short 0.1503 QQQ ≈ $112.09 · PnL <b>-$0.02</b>") == 1   # the market listed twice shows once
+    assert "Entry 745.69 → 745.80\nStop -$0.28 · 0 open orders" in html
+    assert "PnL <b>-$0.23</b> (-0.46%) · Stop <b>41% used</b>" in html
     # 2026-09-26: a new run with sl=10 showed "229% of day stop": the whole account's day (earlier runs too) against
     # the run's un-lifted $2.20 stop. The run's own day counts, against the stop in force.
     from bot.core.runner import _stops
@@ -144,7 +138,7 @@ def test_position_card_shows_entry_mark_and_stop(tmp_path: Path) -> None:
     st.close()
     assert snap["sessions"][0]["stops"] == {"position": 1.1, "daily": 10.0, "kill": 11.0}
     html = dashboard.render(dashboard.collect(Control(app, root=tmp_path)))
-    assert "PnL <b>-$0.23</b> · -0.46% · 0% of day stop (this run)" in html
+    assert "PnL <b>-$0.23</b> (-0.46%) · Stop <b>0% used</b> (this run)" in html
 
 
 def test_deposits_never_count_as_profit(tmp_path: Path) -> None:
@@ -201,7 +195,7 @@ def test_paper_uses_its_own_account_not_the_real_one(tmp_path: Path) -> None:
     d = dashboard.collect(Control(app, root=tmp_path))
     assert d.mode == "paper" and d.equity == 101.5 and d.capital_pnl == pytest.approx(1.5)
     assert d.day_pnl == pytest.approx(0.75) and "own count" in d.day_pnl_note
-    assert "Capital (paper)" in dashboard.render(d) and "started with $100.00" in dashboard.render(d)
+    assert "<b>Capital (paper)</b>\nEquity <b>$101.50</b> · P/L <b>+$1.50 (+1.50%)</b>" in dashboard.render(d)
 
 
 def test_no_bot_shows_the_real_account_not_an_old_paper_bot(tmp_path: Path) -> None:
@@ -216,7 +210,7 @@ def test_no_bot_shows_the_real_account_not_an_old_paper_bot(tmp_path: Path) -> N
     d2 = dashboard.collect(Control(app, root=tmp_path))
     assert d2.mode is None and not d2.running and d2.equity == 49.84
     assert d2.capital_pnl == pytest.approx(-0.16)
-    assert "No trading bot running" in dashboard.render(d2)
+    assert "📊 <b>Dashboard · NO BOT RUNNING</b>" in dashboard.render(d2)
 
 
 # ------------------------------------------------------------------------------------------------ Telegram
@@ -257,11 +251,11 @@ async def test_telegram_dashboard_updates_stops_and_resumes(tmp_path: Path) -> N
     await bot.handle(msg("/dashboard"))                             # a newer one retires the older
     assert json.loads(state.read_text())["message_id"] == len(api.sent) != first
     retired = [e for e in api.edits if e[1] == first][-1][2]
-    assert "Stopped at" in retired and "newer dashboard" in retired
+    assert "Stopped updating at" in retired and "newer dashboard" in retired
     assert ("unpinChatMessage", {"chat_id": OWNER, "message_id": first}) in api.calls
 
     await bot.handle(press("dashstop"))
-    assert not state.exists() and "Stopped at" in api.edits[-1][2]
+    assert not state.exists() and "Stopped updating at" in api.edits[-1][2]
     assert api.last_keyboard == [[("▶️ Update live again", "dashresume")]]
     n = len(api.edits)
     await bot._dash_tick()
@@ -302,7 +296,8 @@ def test_menu_help_and_commands_list_the_dashboard() -> None:
     from bot.telegram.views import COMMANDS, HELP, menu_keyboard
 
     assert COMMANDS[0][0] == "dashboard" and "/dashboard" in HELP
-    assert menu_keyboard()[0] == [("📺 Live dashboard", "dashboard")]
+    assert menu_keyboard()[:2] == [[("📊 Dashboard", "dashboard"), ("▶️ Resume", "unpause")],   # the owner's template
+                                   [("⏸ Pause Orders", "pauseneworders"), ("⏹ Stop", "stop")]]
 
 
 def test_cli_dashboard_once(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]) -> None:
@@ -337,8 +332,12 @@ def test_status_is_a_card_and_lists_a_market_once(tmp_path: Path) -> None:
     con.close()
     v = Control(app, root=tmp_path).view("live")
     text = status_text([v])
-    assert "<pre>" not in text and "<blockquote>" in text and text.count("QQQ short $112.09") == 1, text
-    assert "3 open orders" in text and "🟢 <b>LIVE</b> · running · up 2h00m" in text
-    assert text.count("QQQ") == 1 and "<pre>" not in positions_text(v) + orders_text(v)
+    assert "<pre>" not in text and text.count("QQQ short $112.09") == 1, text
+    assert text.startswith("🟢 <b>LIVE · HEALTHY</b>\n\n<code>Heartbeat") and "up 2h00m" in text
+    assert "<code>Quotes active · 3 open orders</code>" in text and text.count("QQQ") == 1
+    assert "<pre>" not in positions_text(v) + orders_text(v)
+    pos = positions_text(v)   # the owner's /openpositions template
+    assert pos.startswith("📌 <b>OPEN POSITIONS</b>\n\n<code>QQQ  SHORT  0.1503</code>\n<code>Notional $112")
+    assert "<b>Orders:</b> 3" in pos
     book = orders_text(v)
     assert book.index("SELL") < book.index("745.37") < book.index("744.36")     # asks on top, then bids high to low

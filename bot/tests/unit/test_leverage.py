@@ -117,7 +117,7 @@ def test_default_risk_is_unchanged_without_leverage() -> None:
 
 def test_pilot_session_carries_leverage_and_sizes() -> None:
     risk = Risk.at_leverage(50, 33.33)
-    s = session_for("SPY-USD", BY_NAME["deep 3bp"], risk, live=False)
+    s = session_for("SPY-USD", BY_NAME["Mid +3"], risk, live=False)
     sess = MMSession.model_validate(s)
     assert sess.leverage_max == 50 and sess.inventory_cap_usd == 4000 and sess.order_size_usd == 2000
     assert sess.inventory_cap_off_usd is not None and math.isclose(sess.inventory_cap_off_usd, 4000 * 33.33 / 50,
@@ -127,13 +127,15 @@ def test_pilot_session_carries_leverage_and_sizes() -> None:
 
 
 def test_pilot_sessions_match_the_backtest_rules() -> None:
-    s = MMSession.model_validate(session_for("NVDA-USD", BY_NAME["anchor 3bp"], Risk(), live=False))
-    assert (s.mode, s.spacing_bps, s.reset_threshold_pct, s.session.skip_et) == ("anchor", 3, 0.1, [])
-    assert s.safety_pause.move_sigma_1s >= 1e9 and s.safety_pause.spread_x_median >= 1e9   # anchor: no pause
-    assert make_strategy(s).name == "anchor"
-    s = MMSession.model_validate(session_for("QQQ-USD", BY_NAME["touch 1bp, skip US session"], Risk(), live=False))
-    assert s.session.skip_et == ["09:00-16:30"] and (s.mode, s.execution_style) == ("mid", "normal")
-    assert s.safety_pause.move_sigma_1s == 6 and s.safety_pause.spread_x_median == 3   # the backtest's pause rules
+    s = MMSession.model_validate(session_for("NVDA-USD", BY_NAME["Grid +3 Long"], Risk(), live=False))
+    assert (s.mode, s.spacing_bps, s.reset_threshold_pct, s.bias, s.bias_frac) == ("grid", 3, 0.5, "long", 0.5)
+    assert s.safety_pause.move_sigma_1s == 6 and s.safety_pause.spread_x_median == 3   # Grid keeps the safety pause
+    assert make_strategy(s).name == "grid"
+    s = MMSession.model_validate(session_for("QQQ-USD", BY_NAME["Mid -1 Short"], Risk(), live=False))
+    assert (s.mode, s.execution_style, s.spacing_bps, s.passive_k_sigma, s.skew_kappa, s.bias) == \
+        ("mid", "passive", -1, 0, 0, "short")
+    assert s.safety_pause.move_sigma_1s >= 1e9 and s.safety_pause.spread_x_median >= 1e9   # Mid: no pause
+    assert MMSession.model_validate(session_for("QQQ-USD", BY_NAME["Mid +2"], Risk(), live=False)).skew_kappa == 1
     for cfg in BY_NAME.values():   # the backtest has no thin-depth rule, so no pilot session has one either
         assert MMSession.model_validate(session_for("QQQ-USD", cfg, Risk(), live=False)).safety_pause.depth_frac_min == 0
 
@@ -193,12 +195,11 @@ def test_a_large_order_fills_only_what_the_taker_printed_beyond_it() -> None:
 @pytest.mark.parametrize("inv", [D(0), D("0.5"), D("-0.9")])
 def test_live_quotes_match_the_backtest_at_leverage_with_skew(inv: D) -> None:
     """QQQ-like: 10x sizes ($400 orders, $800 cap), skew on (kappa 1), 3 bp from mid."""
-    from collections import deque
 
     from bot.scout.sim import Book, Config, MidPolicy
     m = fixture_markets()[Venue.ARCUS]["AMD"]
     risk = Risk.at_leverage(10)
-    s = session_for("AMD-USD", BY_NAME["deep 3bp, skew"], risk, live=False)
+    s = session_for("AMD-USD", BY_NAME["Mid +3"], risk, live=False)
     sess = MMSession.model_validate({**s, "account_index": 1})
     view = MarketView(Venue.ARCUS, "AMD")
     view.book = L2Book()
@@ -207,8 +208,8 @@ def test_live_quotes_match_the_backtest_at_leverage_with_skew(inv: D) -> None:
     out = make_strategy(sess).on_tick(ctx)
     live = sorted((o.side.value, o.price_ticks, o.size_quantums) for o in out.desired[(Venue.ARCUS, "AMD")])
     mi = MarketInfo(float(m.tick_size), float(m.step_size), float(m.min_notional), float(m.min_size))
-    pol = MidPolicy(Config("x", "mid", spacing_bps=3, kappa=1.0), risk, mi)
-    q, _ = pol.quotes(Book(T0, 620.0, 620.4, 620.2, float(inv), None, 0.0, 0.0, deque()))
+    pol = MidPolicy(Config("x", "mid", spacing_bps=3, kappa=1.0, safety=False), risk, mi)
+    q, _ = pol.quotes(Book(T0, 620.0, 620.4, 620.2, float(inv), None, 0.0, 0.0))
     ours = sorted(("buy" if sd == 1 else "sell", round(p / mi.tick), round(qq / mi.step)) for sd, p, qq, _t in q)
     assert live == ours and live
 
@@ -218,3 +219,31 @@ def test_arcus_wallet_address_is_read_as_arcus_address(monkeypatch: pytest.Monke
     monkeypatch.delenv("ARCUS_ADDRESS", raising=False)
     monkeypatch.setenv("ARCUS_WALLET_ADDRESS", "0x" + "ab" * 20)
     assert SecretStore(tmp_path / "none.enc", password="").get("ARCUS_ADDRESS") == "0x" + "ab" * 20
+
+
+@pytest.mark.parametrize("name", ["Mid 0", "Mid -1 Long", "Mid +1 Long", "Mid +3 Short", "Grid 0 Long", "Grid +3 Short"])
+@pytest.mark.parametrize("inv", [D(0), D("0.5"), D("-0.9")])
+def test_every_setup_quotes_live_what_the_backtest_quotes(name: str, inv: D) -> None:
+    """The pilot's session for a setup (mode, spread, bias) and the scout's policy for it quote the same prices and
+    sizes, flat and holding a position: the bias's target position included."""
+    from bot.scout.sim import POLICIES, Book
+
+    m = fixture_markets()[Venue.ARCUS]["AMD"]
+    cfg = BY_NAME[name]
+    risk = Risk.at_leverage(10)
+    sess = MMSession.model_validate({**session_for("AMD-USD", cfg, risk, live=False), "account_index": 1})
+    view = MarketView(Venue.ARCUS, "AMD")
+    view.book = L2Book()
+    view.book.load([(D("620.00"), D("50"))], [(D("620.40"), D("50"))], 1)
+    ctx = StrategyContext(now_us=T0, venue=Venue.ARCUS, market=m, view=view, params=sess, inventory=inv,
+                          entry_price=D("620.20") if inv else None)
+    out = make_strategy(sess).on_tick(ctx)
+    live = sorted((o.side.value, o.price_ticks, o.size_quantums) for o in out.desired[(Venue.ARCUS, "AMD")])
+    mi = MarketInfo(float(m.tick_size), float(m.step_size), float(m.min_notional), float(m.min_size))
+    q, _ = POLICIES[cfg.mode](cfg, risk, mi).quotes(Book(T0, 620.0, 620.4, 620.2, float(inv), 620.2 if inv else None,
+                                                         0.0, 0.0))
+    ours = sorted(("buy" if sd == 1 else "sell", round(p / mi.tick), round(qq / mi.step)) for sd, p, qq, _t in q)
+    assert live == ours and live
+    if name.endswith("Long") and not inv:   # flat with a Long bias: the bid is the bigger side
+        size = {side: qty for side, _p, qty in live}
+        assert size["buy"] > size["sell"]

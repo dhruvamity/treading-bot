@@ -164,7 +164,7 @@ async def test_allowed_users_restrict_even_the_owner_chat(tmp_path: Path) -> Non
     await bot.handle(msg("/ping", chat=OWNER, user=OWNER))
     assert api.sent == []
     await bot.handle(msg("/ping", chat=OWNER, user=42))
-    assert "pong" in api.sent[-1][1]
+    assert "🏓 <b>PONG</b>" in api.sent[-1][1]
 
 
 async def test_status_screen(tmp_path: Path) -> None:
@@ -173,7 +173,7 @@ async def test_status_screen(tmp_path: Path) -> None:
     bot, api, _ = _bot(tmp_path, app)
     await bot.handle(msg("/status"))
     text = api.sent[-1][1]
-    assert "PAPER" in text and "running" in text and "+$0.31" in text and "AMD" in text, text
+    assert text.startswith("🟢 <b>PAPER · HEALTHY</b>") and "+$0.31" in text and "AMD" in text, text
     await bot.handle(msg("/pnl"))
     assert "+$0.42" in api.sent[-1][1]
 
@@ -205,7 +205,7 @@ async def test_stop_needs_the_confirm_button(tmp_path: Path) -> None:
     await bot.handle(press(f"ok {pid}"))
     assert json.loads(ctl._kv_get("paper", "control") or "{}")["cmd"] == "stop"
     await bot.handle(press(f"ok {pid}"))                                 # a second press finds nothing pending
-    assert "Expired" in api.texts()
+    assert "EXPIRED" in api.texts()
 
 
 async def test_flatten_needs_the_typed_code_and_a_real_account(tmp_path: Path) -> None:
@@ -216,9 +216,9 @@ async def test_flatten_needs_the_typed_code_and_a_real_account(tmp_path: Path) -
     assert "real account" in api.texts() and not bot.pending          # paper has no venue positions to flatten
     calls: list[tuple[str, str, bool]] = []
 
-    async def fake_flatten(mode: str, venue: str, taker: bool) -> str:
+    async def fake_flatten(mode: str, venue: str, taker: bool) -> dict[str, Any]:
         calls.append((mode, venue, taker))
-        return "sent 1 reduce-only maker orders on arcus"
+        return {"venue": venue, "positions": 1, "orders": 1, "open": 1 if len(calls) == 1 else 0, "taker": taker}
 
     ctl.flatten = fake_flatten  # type: ignore[method-assign]
     await bot.handle(msg("/flatten arcus live"))
@@ -233,6 +233,11 @@ async def test_flatten_needs_the_typed_code_and_a_real_account(tmp_path: Path) -
     await bot.handle(msg(p.code))
     await asyncio.sleep(0.05)
     assert calls == [("live", "arcus", False)]
+    assert api.sent[-1][1].startswith("🧯 <b>CLOSING POSITIONS</b>") and "Closed: 0 · Open: 1" in api.sent[-1][1]
+    await bot.handle(msg("/closeall arcus live"))            # the owner's template once nothing is left open
+    await bot.handle(msg(next(iter(bot.pending.values())).code))
+    await asyncio.sleep(0.05)
+    assert api.sent[-1][1] == "✅ <b>POSITIONS CLOSED</b>\n\n<code>Closed: 1 · Open: 0</code>"
 
 
 async def test_expired_confirmations_do_nothing(tmp_path: Path) -> None:
@@ -243,7 +248,7 @@ async def test_expired_confirmations_do_nothing(tmp_path: Path) -> None:
     p = next(iter(bot.pending.values()))
     p.expires = time.time() - 1
     await bot.handle(press(f"ok {p.pid}"))
-    assert not ctl._kv_get("paper", "control") and "Expired" in api.texts()
+    assert not ctl._kv_get("paper", "control") and "EXPIRED" in api.texts()
 
 
 async def test_read_only_refuses_controls(tmp_path: Path) -> None:
@@ -251,7 +256,7 @@ async def test_read_only_refuses_controls(tmp_path: Path) -> None:
     _running_paper(tmp_path, app)
     bot, api, ctl = _bot(tmp_path, app, read_only=True)
     await bot.handle(msg("/pause"))
-    assert "Read-only" in api.texts() and not ctl._kv_get("paper", "paused")
+    assert "READ-ONLY" in api.texts() and not ctl._kv_get("paper", "paused")
     await bot.handle(msg("/status"))
     assert "PAPER" in api.sent[-1][1]
 
@@ -291,9 +296,9 @@ async def test_watcher_alerts(tmp_path: Path) -> None:
     st.close()
     await w.tick()
     texts = "\n".join(t for t, _ in got)
-    assert "AMD BUY" in texts and "half the daily stop" in texts, texts
+    assert "AMD BUY" in texts and "HALF THE DAY STOP" in texts, texts
     await w.tick()
-    assert sum("half the daily stop" in t for t, _ in got) == 1   # once per day
+    assert sum("HALF THE DAY STOP" in t for t, _ in got) == 1   # once per day
     (tmp_path / app.heartbeat_for("paper")).unlink()                      # the bot dies
     await w.tick()
     assert any("DOWN" in t and crit for t, crit in got)
@@ -348,23 +353,23 @@ async def test_pilot_offers_pauses_resumes_and_suggests(tmp_path: Path) -> None:
     app = _app(tmp_path)
     ctl = Control(app, root=tmp_path)
     pilot = Pilot(tmp_path, ctl)
-    nvda, gld = _cand("NVDA-USD", "deep 3bp"), _cand("GLD-USD", "deep 2bp x2", vol=1500)
+    nvda, gld = _cand("NVDA-USD", "Mid +3"), _cand("GLD-USD", "Mid +2", vol=1500)
     ev = pilot.review(_scan([nvda, gld]))
     assert [e["kind"] for e in ev] == ["offer"] and len(ev[0]["top"]) == 2
     assert pilot.review(_scan([nvda, gld])) == []                      # same top: no repeat
     # deployed on NVDA (paper bot running)
     _running_paper(tmp_path, app)
     st = pilot.state()
-    st["active"] = {"market": "NVDA-USD", "config": "deep 3bp @ 10x", "mode": "paper", "since": time.time()}
+    st["active"] = {"market": "NVDA-USD", "config": "Mid +3 @ 10x", "mode": "paper", "since": time.time()}
     pilot.save(st)
-    bad = _cand("NVDA-USD", "deep 3bp", go=False)
+    bad = _cand("NVDA-USD", "Mid +3", go=False)
     ev = pilot.review(_scan([gld], [bad]))
     assert [e["kind"] for e in ev] == ["paused"] and "trending now" in ev[0]["text"]
     assert ctl.view("paper").paused.get("NVDA", "").startswith("scout: trending now")
     assert pilot.review(_scan([nvda, gld])) == []                      # one GO scan is not enough
     ev = pilot.review(_scan([nvda, gld]))
     assert [e["kind"] for e in ev] == ["resumed"] and "NVDA" not in ctl.view("paper").paused
-    big = _cand("HOOD-USD", "deep 2bp", vol=5000)
+    big = _cand("HOOD-USD", "Mid +2", vol=5000)
     ev = pilot.review(_scan([big, nvda]))
     assert [e["kind"] for e in ev] == ["suggest"] and "HOOD-USD" in ev[0]["text"]
     assert pilot.review(_scan([big, nvda])) == []                      # suggested once
@@ -397,49 +402,95 @@ def _buttons(api: Any) -> list[str]:
     return [d for row in api.last_keyboard or [] for _t, d in row]
 
 
-async def test_a_list_pick_shows_the_whole_ladder_then_deploys_paper(tmp_path: Path) -> None:
-    from bot.scout.pilot import setting_id
-
-    rows = [_cand("NVDA-USD", "deep 3bp", lev=20, at_max=True, go=False, reasons=["loses $1.00 (3.57% of $28)/day"]),
-            _cand("NVDA-USD", "deep 3bp", lev=10), _cand("NVDA-USD", "deep 3bp", lev=5, vol=900)]
+async def test_a_list_pick_opens_the_run_form_then_deploys_paper(tmp_path: Path) -> None:
+    rows = [_cand("NVDA-USD", "Mid +3", lev=20, at_max=True, go=False, reasons=["loses $1.00 (3.57% of $28)/day"]),
+            _cand("NVDA-USD", "Mid +3", lev=10), _cand("NVDA-USD", "Mid +3", lev=5, vol=900)]
     bot, api, _pilot, calls = _with_pilot(tmp_path, rows, top=[rows[1]])
-    sid = setting_id("deep 3bp")
     await bot.handle(msg("/scout"))
-    assert "NVDA · deep 3bp · 10x" in api.sent[-1][1] and api.sent[-1][2][0][0] == ("▶️ 1", "pick breakeven 1")
+    assert "<b>1. NVDA</b>\n<code>Mid +3 · Neutral · 10x" in api.sent[-1][1] and \
+        api.sent[-1][2][0][0] == ("▶️ 1", "pick volume 1")
     await bot.handle(press("pick 1"))                                   # a button from before the lists still works
     text = api.texts()
-    assert "20x" in text and "10x" in text and "5x" in text and "⭐" in text   # the whole ladder, the pick starred
-    assert f"rl NVDA-USD {sid} 20 breakeven" in _buttons(api)
-    await bot.handle(press(f"rl NVDA-USD {sid} 20 breakeven"))          # not in the list at 20x: your own pick
-    assert "Runs as 🎯 Your pick" in api.texts() and "loses $1.00" in api.texts()
-    await bot.handle(press(f"rl NVDA-USD {sid} 10 breakeven"))
-    assert "In 🟢 Breakeven" in api.texts() and f"rd NVDA-USD {sid} 10 breakeven paper" in _buttons(api)
-    await bot.handle(press(f"rd NVDA-USD {sid} 10 breakeven paper"))
+    assert "<code>NVDA · Mid +3 · Neutral · 10x</code>" in text and "From Most Volume" in text
+    assert {"f NVDA-USD m+3n 20 0 0 0 volume", "f NVDA-USD m+3n 5 0 0 0 volume"} <= set(_buttons(api))
+    await bot.handle(press("f NVDA-USD m+3n 20 0 0 0 volume"))          # not in the list at 20x: your own pick
+    assert "In no list: loses $1.00" in api.texts() and "Runs as your pick" in api.texts()
+    await bot.handle(press("f NVDA-USD m+3n 10 0 0 0 volume"))
+    assert "In Most Volume, Cheapest, Max Volume" in api.texts()
+    assert "fd NVDA-USD m+3n 10 0 0 0 volume paper" in _buttons(api)
+    await bot.handle(press("fd NVDA-USD m+3n 10 0 0 0 volume paper"))
     assert calls == []                                                  # a confirm is still needed
     await bot.handle(press(f"ok {next(iter(bot.pending))}"))
     await asyncio.sleep(0.05)
-    assert calls == [("NVDA-USD", "deep 3bp", 10, False, "breakeven")]
-    await bot.handle(press(f"rd NVDA-USD {sid} 10 breakeven live"))
+    assert calls == [("NVDA-USD", "Mid +3", 10, False, "volume")]
+    await bot.handle(press("fd NVDA-USD m+3n 10 0 0 0 volume live"))
     assert "LIVE is off" in api.texts()                                 # BOT_PILOT_LIVE not set
 
 
+async def test_the_run_form_changes_one_field_at_a_time(tmp_path: Path) -> None:
+    """Tread's order form as buttons: mode, spread, bias, leverage, run stop and volume target, each one tap."""
+    rows = [_cand("BTC-USD", "Mid 0", lev=20, at_max=True, vol=3000),
+            _cand("BTC-USD", "Grid +1 Long", lev=20, at_max=True)]
+    bot, api, _pilot, calls = _with_pilot(tmp_path, rows, top=[])
+    (tmp_path / "data" / "scout" / "markets.json").write_text(json.dumps({"markets": [
+        {"marketDisplayName": "BTC-USD", "status": "ONLINE", "initialMarginFraction": "0.05", "tickSize": "0.1",
+         "stepSize": "0.0001", "minOrderNotional": "5", "minOrderSize": "0.0001", "markPrice": "86000"}]}))
+    (tmp_path / "state" / "scout_capital.json").write_text(json.dumps({"usd": 28}))
+    await bot.handle(msg("/run BTC"))                                   # opens with the market's best setup
+    text, kb = api.sent[-1][1], api.sent[-1][2]
+    assert text.startswith("🎛 <b>BTC · RUN SETUP</b>\n\n<code>BTC · Mid 0 · Neutral · 20x</code>")
+    assert "Quotes the best bid and ask, following the mid" in text
+    labels = [[t for t, _d in row] for row in kb]
+    assert labels[0] == ["• Mid", "Grid"] and labels[1] == ["-1 bp", "• 0 bp", "+1 bp", "+2 bp", "+3 bp", "+5 bp"]
+    assert labels[2] == ["Short", "• Neutral", "Long"] and labels[4][0] == "• No SL" and labels[5][0] == "• No target"
+    data = {t: d for row in kb for t, d in row}
+    await bot.handle(press(data["Grid"]))                               # Grid keeps the spread (never below 0)
+    data = {t: d for row in api.edit_keyboards[-1] for t, d in row}
+    assert "Sells no lower than the last buy" in api.edits[-1][2] and "• 0 bp" in data and "-1 bp" not in data
+    await bot.handle(press(data["+1 bp"]))
+    data = {t: d for row in api.edit_keyboards[-1] for t, d in row}
+    await bot.handle(press(data["Long"]))
+    text = api.edits[-1][2]
+    assert "<code>BTC · Grid +1 · Long · 20x</code>" in text and "Long bias: holds about half the position cap long" \
+        in text and "In Most Volume" in text                           # backtested: its numbers show
+    data = {t: d for row in api.edit_keyboards[-1] for t, d in row}
+    await bot.handle(press(data["SL $10"]))
+    data = {t: d for row in api.edit_keyboards[-1] for t, d in row}
+    await bot.handle(press(data["Vol $100.0k"]))
+    text = api.edits[-1][2]
+    assert "<code>Run stop -$10.00</code>\n<code>Volume target $100.0k</code>" in text
+    data = {t: d for row in api.edit_keyboards[-1] for t, d in row}
+    assert data["📝 Paper"] == "fd BTC-USD g+1l 20 10 100 0 manual paper" and len(data["📝 Paper"]) <= 64
+    await bot.handle(press(data["📝 Paper"]))
+    assert "<code>Run stop: -$10.00</code>" in api.texts() and "<code>Volume target: $100.0k</code>" in api.texts()
+    await bot.handle(press(f"ok {next(iter(bot.pending))}"))
+    await asyncio.sleep(0.05)
+    assert calls == [("BTC-USD", "Grid +1 Long", 20, False, "manual")]
+
+
 async def test_run_any_market_setting_and_leverage_from_the_command(tmp_path: Path) -> None:
-    rows = [_cand("BTC-USD", "touch 0bp", lev=20, at_max=True, go=False, vol=12000,
+    rows = [_cand("BTC-USD", "Mid 0", lev=20, at_max=True, go=False, vol=12000,
                   reasons=["loses $1.51 (5.38% of $28)/day over 5 days"]),
-            _cand("BTC-USD", "touch 0bp", lev=10, go=False), _cand("QQQ-USD", "touch 1bp", lev=25, at_max=True)]
+            _cand("BTC-USD", "Mid 0", lev=10, go=False), _cand("QQQ-USD", "Mid +1", lev=25, at_max=True)]
     bot, api, _pilot, calls = _with_pilot(tmp_path, rows, top=[])
     await bot.handle(msg("/run"))
     assert any(d == "rm BTC-USD" for d in _buttons(api))                # markets, the most volume first
     await bot.handle(msg("/run btc"))
-    assert any(d.startswith("rs BTC-USD ") for d in _buttons(api))      # its settings
-    await bot.handle(msg("/run BTC touch 0bp max"))
-    assert "BTC · touch 0bp · 20x" in api.texts() and "In no list" in api.texts()
-    await bot.handle(msg('/run BTC "touch 0bp" max paper'))
+    assert any(d.startswith("f BTC-USD ") for d in _buttons(api))       # its run form
+    await bot.handle(msg("/run BTC Mid 0 max"))
+    assert "BTC · Mid 0 · Neutral · 20x" in api.texts() and "In no list" in api.texts()
+    await bot.handle(msg('/run BTC "Mid 0" max paper'))
     await bot.handle(press(f"ok {next(iter(bot.pending))}"))
     await asyncio.sleep(0.05)
-    assert calls == [("BTC-USD", "touch 0bp", 20, False, "manual")]    # runs as the owner's pick, never paused
-    for bad, why in (("/run DOGE", "Unknown market"), ("/run BTC grid 99bp", "Unknown setting"),
-                     ("/run BTC touch 0bp 7x", "no backtest at 7x (has 20x, 10x)")):   # no market list: scan rows only
+    assert calls == [("BTC-USD", "Mid 0", 20, False, "manual")]    # runs as the owner's pick, never paused
+    await bot.handle(msg("/run BTC touch 0bp 20x paper"))            # the name from before 2026-09-26: Mid 0
+    await bot.handle(press(f"ok {list(bot.pending)[-1]}"))
+    await asyncio.sleep(0.05)
+    assert calls[-1] == ("BTC-USD", "Mid 0", 20, False, "manual")
+    for bad, why in (("/run DOGE", "Unknown market"), ("/run BTC rgrid 5", "was retired"),
+                     ("/run BTC mid", "Mid needs a spread"), ("/run BTC grid -1", "cannot be negative"),
+                     ("/run BTC 20x live", "Which setup?"),
+                     ("/run BTC Mid 0 7x", "no backtest at 7x (has 20x, 10x)")):   # no market list: scan rows only
         await bot.handle(msg(bad))
         assert why in api.texts(), bad
     # 2026-09-26: a direct run waited hours for a scan at the new capital. With the market list it runs any leverage
@@ -449,25 +500,31 @@ async def test_run_any_market_setting_and_leverage_from_the_command(tmp_path: Pa
          "stepSize": "0.0001", "minOrderNotional": "5", "minOrderSize": "0.0001", "markPrice": "86000"}]}))
     (tmp_path / "state" / "scout_capital.json").write_text(json.dumps({"usd": 100}))
     settings.save(tmp_path / "state", "crypto_lev", 20.0, SizingDefaults())   # caps the scan, not the owner's pick
-    await bot.handle(msg("/run BTC touch 0bp 60x"))
+    await bot.handle(msg("/run BTC Mid 0 60x"))
     assert "Arcus allows at most 40x" in api.texts()
-    await bot.handle(msg("/run BTC touch 0bp 40x"))
-    assert "Not backtested at this leverage yet" in api.texts() and "max position $4,000" in api.texts()
-    await bot.handle(msg("/run BTC touch 0bp 20x"))
-    assert "Backtest (at $28 capital)" in api.texts() and "max position $2,000" in api.texts()
-    await bot.handle(msg("/run BTC touch 0bp 40x paper"))
+    await bot.handle(msg("/run BTC Mid 0 40x"))
+    assert "No backtest at 40x" in api.texts() and "Max position $4,000" in api.texts()
+    await bot.handle(msg("/run BTC Mid 0 20x"))
+    assert "Backtest · 3d at $28" in api.texts() and "Max position $2,000" in api.texts()
+    await bot.handle(msg("/run BTC mid +0.5 long 40x"))              # any spread: runs, not in the scout's menu
+    assert "BTC · Mid +0.5 · Long · 40x" in api.texts() and "Not in the scout" in api.texts()
+    await bot.handle(msg("/run BTC Mid 0 40x paper"))
     await bot.handle(press(f"ok {list(bot.pending)[-1]}"))
     await asyncio.sleep(0.05)
-    assert calls[-1] == ("BTC-USD", "touch 0bp", 40, False, "manual")
+    assert calls[-1] == ("BTC-USD", "Mid 0", 40, False, "manual")
+    await bot.handle(msg("/run BTC grid 3 short 20x paper"))
+    await bot.handle(press(f"ok {list(bot.pending)[-1]}"))
+    await asyncio.sleep(0.05)
+    assert calls[-1] == ("BTC-USD", "Grid +3 Short", 20, False, "manual")
 
 
 async def test_run_with_a_loss_limit_replaces_the_running_live_bot(tmp_path: Path, monkeypatch: Any) -> None:
     """2026-09-26: /run while a live bot sat on its daily stop failed the "already running" check; and the owner
     wants to set the most a run may lose (sl=30)."""
-    rows = [_cand("BTC-USD", "touch 0bp", lev=20, go=False)]
+    rows = [_cand("BTC-USD", "Mid 0", lev=20, go=False)]
     bot, api, pilot, _calls = _with_pilot(tmp_path, rows, top=[])
     st = pilot.state()
-    st["active"] = {"market": "QQQ-USD", "config": "touch 1bp @ 20x", "mode": "live", "since": time.time()}
+    st["active"] = {"market": "QQQ-USD", "config": "Mid +1 @ 20x", "mode": "live", "since": time.time()}
     pilot.save(st)
     monkeypatch.setenv("BOT_PILOT_LIVE", "1")
     pilot.control.is_running = lambda mode: mode == "live"  # type: ignore[method-assign]
@@ -485,20 +542,26 @@ async def test_run_with_a_loss_limit_replaces_the_running_live_bot(tmp_path: Pat
         deployed.append(c)
         return "ok"
     pilot.deploy = deploy  # type: ignore[method-assign]
-    for bad, why in (("/run BTC touch 0bp 20x sl=30", "With sl= give the whole setup"),
-                     ("/run BTC touch 0bp 20x live sl=abc", "sl= takes dollars"),
-                     ("/run BTC touch 0bp 20x live sl=0", "between $0.50")):
+    for bad, why in (("/run BTC Mid 0 20x live sl=abc", "sl= takes dollars"),
+                     ("/run BTC Mid 0 20x live sl=0", "between $0.50"), ("/run BTC Mid 0 live vol=10", "vol= must be")):
         await bot.handle(msg(bad))
         assert why in api.texts(), bad
-    await bot.handle(msg("/run BTC touch 0bp 20x live sl=$30"))
+    await bot.handle(msg("/run BTC Mid 0 20x sl=30"))                  # no paper/live: the form, the limit set
+    assert "<code>Run stop -$30.00</code>" in api.texts() and "f BTC-USD m0n 20 30 0 0 manual" in _buttons(api)
+    await bot.handle(msg("/run BTC Mid 0 20x live sl=$30 vol=100k tp=5"))
     await asyncio.sleep(0.05)
     assert checked == [True] and written == [tmp_path / "state" / "pilot_check.yaml"]   # pilot.yaml left alone
     text = api.sent[-1][1]
-    assert "Stops for good once this run loses $30.00" in text and "Replaces the running LIVE bot (QQQ" in text
+    assert text.startswith("🔴 <b>LIVE RUN</b>\n\n<code>BTC · Mid 0 · Neutral · 20x</code>")   # the owner's template
+    assert "<code>Run stop: -$30.00</code>\n<code>Take profit: +$5.00</code>\n<code>Volume target: $100.0k</code>" \
+        in text and "Replaces the running LIVE bot (QQQ" in text
+    assert "<b>Confirm within 2 min</b>" in text
     p = next(iter(bot.pending.values()))
     await bot.handle(msg(p.code))
     await asyncio.sleep(0.05)
-    assert deployed and deployed[0]["max_loss_usd"] == 30 and deployed[0]["market"] == "BTC-USD"
+    assert deployed and deployed[0]["market"] == "BTC-USD"
+    assert (deployed[0]["max_loss_usd"], deployed[0]["take_profit_usd"], deployed[0]["volume_target_usd"]) == \
+        (30, 5, 100_000)
 
 
 async def test_a_new_run_clears_an_old_pause_and_waits_for_a_closing_bot(tmp_path: Path, monkeypatch: Any) -> None:
@@ -507,7 +570,7 @@ async def test_a_new_run_clears_an_old_pause_and_waits_for_a_closing_bot(tmp_pat
     closing failed "already running": Telegram only looked at the heartbeat (15 s), the doctor at the process."""
     import bot.scout.pilot as pilot_mod
 
-    rows = [_cand("BTC-USD", "touch 0bp", lev=20, go=False)]
+    rows = [_cand("BTC-USD", "Mid 0", lev=20, go=False)]
     bot, api, pilot, _calls = _with_pilot(tmp_path, rows, top=[])
     ctl = pilot.control
     ctl.set_pause("live", None, "Telegram (owner)")
@@ -525,7 +588,7 @@ async def test_a_new_run_clears_an_old_pause_and_waits_for_a_closing_bot(tmp_pat
         checked.append(replacing)
         return True, "all good"
     monkeypatch.setattr(ctl, "doctor", doctor)
-    await bot.handle(msg("/run BTC touch 0bp 20x live sl=10"))
+    await bot.handle(msg("/run BTC Mid 0 20x live sl=10"))
     await asyncio.sleep(0.05)
     text = api.sent[-1][1]
     assert checked == [True] and "Starts once the LIVE bot that is stopping has exited" in text   # still exiting
@@ -535,7 +598,7 @@ async def test_a_new_run_clears_an_old_pause_and_waits_for_a_closing_bot(tmp_pat
     async def fast(_s: float) -> None:
         await real_sleep(0)
     monkeypatch.setattr(pilot_mod.asyncio, "sleep", fast)
-    c = {**bot._find("BTC-USD", "touch 0bp", 20.0, "manual"), "max_loss_usd": 10.0}
+    c = {**bot._find("BTC-USD", "Mid 0", 20.0, "manual"), "max_loss_usd": 10.0}
     assert await pilot_mod.Pilot.deploy(pilot, c, live=True, by="test") == "running in live"
     assert not closing and started == [True]                                 # waited for the old process first
     assert ctl.paused("live") == {}
@@ -550,13 +613,13 @@ async def test_resume_after_a_stop_says_when_the_owner_pause_still_holds(tmp_pat
     ctl.set_pause("paper", None, "Telegram (owner)")
     await bot.handle(msg("/resumeaftersl"))
     await bot.handle(press(f"ok {next(iter(bot.pending))}"))
-    assert "still paused by you (all markets)" in api.texts() and "unpause all paper" in _buttons(api)
-    from bot.telegram.views import state_of
+    assert "New orders paused by you: all markets" in api.texts() and "unpause all paper" in _buttons(api)
+    from bot.telegram.views import mode_state
 
-    assert "new orders paused by you (all markets) · /unpause" in state_of(ctl.view("paper"))[1]
+    assert mode_state(ctl.view("paper")) == ("⏸", "PAUSED", ["New orders paused by you: all markets", "/unpause"])
     ctl.clear_pause("paper", None)
     ctl.set_pause("paper", "QQQ", "scout: x")        # another market's pause does not hold an AMD bot
-    assert "paused" not in state_of(ctl.view("paper"))[1]
+    assert mode_state(ctl.view("paper"))[1] == "RUNNING"
 
 
 def test_a_stopped_heartbeat_is_a_stop_not_a_crash(tmp_path: Path) -> None:
@@ -574,11 +637,11 @@ def test_a_stopped_heartbeat_is_a_stop_not_a_crash(tmp_path: Path) -> None:
 
 
 async def test_a_paper_deployment_goes_live_with_the_same_setup(tmp_path: Path, monkeypatch: Any) -> None:
-    rows = [_cand("QQQ-USD", "touch 1bp", lev=20)]
+    rows = [_cand("QQQ-USD", "Mid +1", lev=20)]
     bot, api, pilot, calls = _with_pilot(tmp_path, rows)
     _running_paper(tmp_path, pilot.control.app)
     st = pilot.state()
-    st["active"] = {"market": "QQQ-USD", "config": "touch 1bp @ 20x", "mode": "paper", "since": time.time(),
+    st["active"] = {"market": "QQQ-USD", "config": "Mid +1 @ 20x", "mode": "paper", "since": time.time(),
                     "profile": "aggressive", "lev": "rec", "backtest": rows[0]}
     pilot.save(st)
     await bot.handle(msg("/openpositions"))
@@ -592,20 +655,20 @@ async def test_a_paper_deployment_goes_live_with_the_same_setup(tmp_path: Path, 
     await bot.handle(press("golive"))
     await asyncio.sleep(0.05)
     p = next(iter(bot.pending.values()))
-    assert p.code and "LIVE" in api.sent[-1][1] and "QQQ · touch 1bp · 20x" in api.sent[-1][1]
+    assert p.code and "LIVE" in api.sent[-1][1] and "QQQ · Mid +1 · Neutral · 20x" in api.sent[-1][1]
     await bot.handle(msg(p.code))
     await asyncio.sleep(0.05)
-    assert calls == [("QQQ-USD", "touch 1bp", 20, True, "aggressive")]
+    assert calls == [("QQQ-USD", "Mid +1", 20, True, "volume")]         # the old list name: Most Volume
 
 
 async def test_list_views_ask_for_a_scan_only_when_stale_and_once(tmp_path: Path) -> None:
     from bot.scout.service import SCAN_NOW, STATUS
 
-    rows = [_cand("QQQ-USD", "touch 1bp", lev=20)]
+    rows = [_cand("QQQ-USD", "Mid +1", lev=20)]
     bot, api, _pilot, _ = _with_pilot(tmp_path, rows)
     trigger = tmp_path / "state" / SCAN_NOW
     await bot.handle(msg("/volume"))
-    assert not trigger.exists() and "Scan" not in api.sent[-1][1]      # the last scan is fresh: no new one
+    assert not trigger.exists() and "Scan started" not in api.sent[-1][1] and "Scan running" not in api.sent[-1][1]
     st = {"running": True, "started": time.time() - 270, "workers": 1,
           "history": [{"ts": 0, "took_s": 1200.0, "workers": 1, "full": False}]}
     (tmp_path / "data" / "scout" / STATUS).write_text(json.dumps(st))
@@ -658,12 +721,12 @@ async def test_a_mistyped_doctor_session_answers_instead_of_ending_the_bot(tmp_p
     bot, api, _ctl = _bot(tmp_path, app)
     await bot.handle(msg("/doctor no_such_session"))
     await asyncio.sleep(0.05)
-    assert "doctor failed: no session called" in api.texts() and "no_such_session" in api.texts()
+    assert "CHECK FAILED" in api.texts() and "no session called" in api.texts() and "no_such_session" in api.texts()
 
 
 async def test_an_old_scan_is_a_warning_not_a_refusal(tmp_path: Path) -> None:
     """"the last scan is over 90 minutes old" refused every list pick while a long scan ran; now it only warns."""
-    rows = [_cand("QQQ-USD", "touch 1bp", lev=20)]
+    rows = [_cand("QQQ-USD", "Mid +1", lev=20)]
     bot, api, _pilot, _calls = _with_pilot(tmp_path, rows)
     p = tmp_path / "data" / "scout" / "latest.json"
     scan = json.loads(p.read_text())
@@ -676,11 +739,10 @@ async def test_an_old_scan_is_a_warning_not_a_refusal(tmp_path: Path) -> None:
 
 
 async def test_run_any_leverage_below_the_maximum_without_a_backtest(tmp_path: Path, monkeypatch: Any) -> None:
-    """2026-09-26: `/run SPY touch 0bp 33x live sl=30` answered "no backtest at 33x (has 50x, 20x, ...)". The scan
+    """2026-09-26: `/run SPY Mid 0 33x live sl=30` answered "no backtest at 33x (has 50x, 20x, ...)". The scan
     now backtests the maximum only; any leverage up to it runs, sized for the balance, marked as not backtested."""
-    from bot.scout.pilot import setting_id
 
-    rows = [_cand("SPY-USD", "touch 0bp", lev=50, at_max=True, go=False)]
+    rows = [_cand("SPY-USD", "Mid 0", lev=50, at_max=True, go=False)]
     bot, api, pilot, _calls = _with_pilot(tmp_path, rows, top=[])
     (tmp_path / "data" / "scout" / "markets.json").write_text(json.dumps({"markets": [
         {"marketDisplayName": "SPY-USD", "status": "ONLINE", "initialMarginFraction": "0.02",
@@ -694,12 +756,11 @@ async def test_run_any_leverage_below_the_maximum_without_a_backtest(tmp_path: P
     async def doctor(name: str, *, replacing: bool = False) -> tuple[bool, str]:
         return True, "all good"
     pilot.control.doctor = doctor  # type: ignore[method-assign]
-    await bot.handle(msg("/run SPY touch 0bp 33x live sl=30"))
+    await bot.handle(msg("/run SPY Mid 0 33x live sl=30"))
     await asyncio.sleep(0.05)
     text = api.sent[-1][1]
-    assert "no backtest" not in api.texts() and "LIVE" in text and "SPY · touch 0bp · 33x" in text
-    assert "Stops for good once this run loses $30.00" in text
-    await bot.handle(press(f"rs SPY-USD {setting_id('touch 0bp')} manual"))     # the leverage screen
-    screen = api.edits[-1][2] if api.edits else api.sent[-1][1]
-    assert "20x  not backtested" in screen and "Any other leverage: /run SPY touch 0bp 33x" in screen
-    assert any(d.startswith("rl SPY-USD ") and d.split()[3] == "20" for d in _buttons(api))
+    assert "no backtest" not in api.texts() and "LIVE" in text and "SPY · Mid 0 · Neutral · 33x" in text
+    assert "Run stop: -$30.00" in text
+    await bot.handle(msg("/run SPY Mid 0 20x"))                          # the form at a leverage not backtested
+    assert "No backtest at 20x (the scout tests each market" in api.sent[-1][1]
+    assert "f SPY-USD m0n 50 0 0 0 manual" in _buttons(api)              # the maximum, backtested, one tap away

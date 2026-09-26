@@ -175,14 +175,14 @@ def test_a_markets_partial_first_day_is_not_a_full_day(tmp_path: Path) -> None:
 
 def test_every_market_needs_three_full_days() -> None:
     # server, 2026-09-26: CRCL and HOOD (1 full day) ranked beside 5-day setups; MU showed "worst day +$1.08, 1 days"
-    day = {"config": "deep 3bp", "pnl": 0.5, "maker_fills": 50, "maker_usd": 10_000, "day_stops": 0, "killed": False,
+    day = {"config": "Mid +3", "pnl": 0.5, "maker_fills": 50, "maker_usd": 10_000, "day_stops": 0, "killed": False,
            "taker_usd": 0, "actions": 100}
     rec = {**day, "hours": 24, "tail_pnl": 0.0}
     r = Risk.for_capital(100, 10).__dict__
 
     def go(n_days: int) -> list[str]:
         bt = {"days": {f"2026-09-2{i}": [day] for i in range(n_days)}, "recent": [rec]}
-        return next(c for c in _score("MU-USD", bt, {"age_s": 1}, r, True, Pct()) if c.setting == "deep 3bp").reasons
+        return next(c for c in _score("MU-USD", bt, {"age_s": 1}, r, True, Pct()) if c.setting == "Mid +3").reasons
 
     assert go(1) == ["1 full day of data (needs 3)"]
     assert go(2) == ["2 full days of data (needs 3)"]
@@ -222,14 +222,14 @@ def test_a_setting_added_to_the_menu_fills_into_cached_days(tmp_path: Path, monk
     rk = sc.risk_key(r)
     cp = s.cache_path("QQQ-USD", "2026-09-22", rk)
     cp.parent.mkdir(parents=True)
-    cp.write_text(json.dumps([{"config": n, "pnl": 1.0} for n in sc.BY_NAME if n != "touch 0bp"]))   # older menu
+    cp.write_text(json.dumps([{"config": n, "pnl": 1.0} for n in sc.BY_NAME if n != "Mid 0"]))   # older menu
     monkeypatch.setattr(s, "full_days", lambda m, now: ["2026-09-22"])
     monkeypatch.setattr(s, "order_max", lambda m, days: None)
     monkeypatch.setattr(s, "risks_for", lambda meta, mi, om: [r])
     monkeypatch.setattr(s, "shortlist", False)   # re-run every last 24 h: the fake rows carry no stats
     out = s.backtest(["QQQ-USD"], day_start_us("2026-09-23"), {"QQQ-USD": sc.MarketInfo(0.01, 0.001)},
                      {"QQQ-USD": {}})
-    assert ran[0] == {rk: ["touch 0bp"]}                        # only the missing setting was backtested
+    assert ran[0] == {rk: ["Mid 0"]}                        # only the missing setting was backtested
     day = out["QQQ-USD"][rk]["days"]["2026-09-22"]
     assert sorted(x["config"] for x in day) == sorted(sc.BY_NAME)
     assert json.loads(cp.read_text()) == day                     # and the cache now holds it too
@@ -239,7 +239,7 @@ def test_the_pilot_pauses_a_deployment_whose_market_goes_offline(tmp_path: Path)
     app = AppConfig(state_dir=str(tmp_path / "state"))
     ctl = Control(app, root=tmp_path)
     pilot = Pilot(tmp_path, ctl)
-    pilot.save({"active": {"market": "GME-USD", "config": "deep 3bp @ 10x", "mode": "paper"}})
+    pilot.save({"active": {"market": "GME-USD", "config": "Mid +3 @ 10x", "mode": "paper"}})
     ctl.is_running = lambda mode: True  # type: ignore[method-assign]
     ev = pilot.review({"top": [], "all": [], "offline": ["GME-USD"]})
     assert ev[0]["kind"] == "paused" and "offline" in ev[0]["text"]

@@ -99,16 +99,19 @@ def run(sessions, events, **cfg):  # type: ignore[no-untyped-def]
     return Simulator(sessions, MK, SimConfig(**cfg)).run_sync(events)
 
 
+MID = {"mode": "mid", "spacing_bps": 1, "levels_per_side": 1}
+
+
 def test_sim_determinism() -> None:
     e = evs(sine_path(86000, 0.002, 900, 0.0001), 1800)
-    r1, r2 = run([mm_session()], e), run([mm_session()], e)
+    r1, r2 = run([mm_session(**MID)], e), run([mm_session(**MID)], e)
     assert [(f.trade_id, f.price, f.size, f.ts_us) for f in r1.fills] == [(f.trade_id, f.price, f.size, f.ts_us) for f in r2.fills]
     assert r1.total.net == r2.total.net and r1.fills
 
 
 def test_sim_pnl_identity_against_paper_equity() -> None:
     e = evs(sine_path(86000, 0.002, 900, 0.0001), 3600)
-    sim = Simulator([mm_session()], MK, SimConfig())
+    sim = Simulator([mm_session(**MID)], MK, SimConfig())
     res = sim.run_sync(e)
     eq = sim.venues[Venue.ARCUS].equity() - sim.venues[Venue.ARCUS].starting_equity
     assert abs(float(res.total.net - eq)) < 1e-8
@@ -119,12 +122,16 @@ def test_e1_grid_stops_at_inventory_cap_in_trend() -> None:
     assert abs(float(res.total.position)) * 86000 <= 30 * 1.25 + 11
 
 
-def test_e1_rgrid_cuts_in_trend_vs_grid() -> None:
-    e = evs(trend_path(86000, 0.02), 5400)
-    g = run([mm_session(mode="grid", levels_per_side=3, reset_threshold_pct=5)], e)
-    r = run([mm_session(mode="rgrid", levels_per_side=1)], e)
-    assert any("cut" in d["reason"] for d in r.decisions)
-    assert float(r.total.net) >= float(g.total.net) - 0.25
+def test_retired_modes_are_refused_and_old_names_map() -> None:
+    """2026-09-26: two modes, as on Tread.fi. RGrid and the RSI signal lost on every market and were removed; a
+    session from before names the Grid `anchor` and the biases long_skew / short_skew."""
+    import pytest
+
+    for mode in ("rgrid", "signal"):
+        with pytest.raises(ValueError, match="retired"):
+            mm_session(mode=mode)
+    s = mm_session(mode="anchor", bias="long_skew", recentre_after_s=120, signal={"rsi_len": 14})
+    assert (s.mode, s.bias, s.bias_frac) == ("grid", "long", 0.5)
 
 
 def test_e1_mid_skews_against_inventory() -> None:
@@ -137,14 +144,23 @@ def test_e1_mid_skews_against_inventory() -> None:
     assert qt.skewed_sizes(1.0, 1.0, 0.1)[0] == 0.0  # at u = 1 stop adding
 
 
-def test_e1_signal_single_position() -> None:
-    res = run([mm_session(mode="signal", signal={"rsi_low": 45, "rsi_high": 55, "trend_z": 50, "cooldown_s": 10})],
-              evs(sine_path(86000, 0.004, 1200, 0.0002), 7200))
-    pos = [abs(float(p)) for p in [res.total.position]]
-    q = 0.00012
-    assert max(pos) <= q * 1.01
-    entries = [d for d in res.decisions if d["kind"] == "place" and "sig_entry" in str(d.get("data"))]
-    assert all(True for _ in entries)
+def test_e1_bias_holds_part_of_the_cap() -> None:
+    """Over a choppy half hour a Long bias holds about half the $30 cap long on average (while still trading both
+    sides), Short the mirror image, Neutral about flat."""
+    e = evs(sine_path(86000, 0.002, 900, 0.0001), 1800)
+    kw = {**MID, "inventory_cap_usd": 30, "order_size_usd": 10, "bias_frac": 0.5}
+
+    def mean_position_usd(bias: str) -> float:
+        fills = run([mm_session(**kw, bias=bias)], e).fills
+        pos, path = 0.0, []
+        for f in fills:
+            pos += float(f.size) * (1 if f.side is Side.BUY else -1)
+            path.append(pos * 86000)
+        assert {f.side for f in fills} == {Side.BUY, Side.SELL}
+        return sum(path) / len(path)
+
+    assert 10 < mean_position_usd("long") < 20 and -20 < mean_position_usd("short") < -10
+    assert abs(mean_position_usd("neutral")) < 3
 
 
 def test_f3_no_look_ahead() -> None:

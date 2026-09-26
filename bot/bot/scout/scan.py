@@ -1,6 +1,7 @@
-"""Backtest the strategy menu on every recorded market and rank what to run now.
+"""Backtest the setups (bot/strategies/setup.py: Mid and Grid, every spread, each Neutral, Long and Short) on every
+recorded market and rank what to run now.
 
-Every config runs on every market, one UTC day at a time (each day starts flat, with 2 h of warm-up), at the capital
+Every setup runs on every market, one UTC day at a time (each day starts flat, with 2 h of warm-up), at the capital
 the bot trades with (the account's equity, bucketed; bot/common/sizing.py) and its stops as % of that capital.
 Completed days are cached per capital bucket; the current day is re-run on each scan.
 
@@ -21,8 +22,8 @@ A candidate is GO only when all three checks pass (percentages are of the capita
   still there), with the last 6 h not worse than -0.50%;
 - market now (last 60 minutes of 1-min mids): not trending (efficiency ratio < 0.5), volatility not above 2x its
   usual level, spread not above 2x its usual level, and data fresh (< 5 minutes old).
-GO candidates rank by maker volume per day (the goal: the most maker volume while at or near breakeven), then PnL.
-One pick per market; the top three go to the owner for approval.
+GO candidates rank by maker volume per day, then PnL (the scan's own `top`). The owner's lists (bot/scout/profiles.py)
+drop the money checks and judge each setup by its cost per $1,000 traded instead; the pilot offers their top 3.
 """
 
 from __future__ import annotations
@@ -49,45 +50,35 @@ import numpy as np
 from bot.common.sizing import Pct, bucket, min_capital, venue_min_usd
 from bot.scout.sim import Config, MarketInfo, Risk, S, Sim, SimParams, Window
 from bot.scout.tape import US_DAY, TapeStore, day_start_us, day_str
+from bot.strategies import setup as su
 
-SIM_VERSION = "8"          # bump when the simulator changes, so cached day results are recomputed (8: queue fills)
+SIM_VERSION = "9"          # bump when the simulator changes, so cached day results are recomputed (9: Mid/Grid setups)
 ALIVE_MARKET = "BTC-USD"   # busiest book: its rows show when the recorder was up
 LADDER = (20.0, 10.0, 5.0, 2.0)                 # tested below each market's maximum
 HOLIDAYS_CSV = Path(__file__).resolve().parents[2] / "config" / "calendars" / "nyse_holidays.csv"
-US_SESSION = ("09:00-16:30",)   # New York time on NYSE trading days: the cash session, half an hour either side
-SKIP_US = ", skip US session"
-MENU: list[Config] = [
-    *(Config(f"deep {d:g}bp", "mid", spacing_bps=d) for d in (1, 1.5, 2, 3, 5)),
-    *(Config(f"deep {d:g}bp, no pause", "mid", spacing_bps=d, safety=False) for d in (1.5, 3)),
-    Config("deep 3bp, skew", "mid", spacing_bps=3, kappa=1.0),
-    *(Config(f"deep {d:g}bp x2", "mid", spacing_bps=d, levels=2, level_step_bps=3) for d in (2, 4)),
-    # the most volume at breakeven or better on the stock and ETF perps, at max leverage (2026-09-26 research, five
-    # days at ~$100 of capital: SPY, QQQ, NVDA, GOOGL); the scan re-checks them on every new day
-    Config("deep 1.5bp x2", "mid", spacing_bps=1.5, levels=2, level_step_bps=3),
-    Config("deep 1.5bp x2, no pause", "mid", spacing_bps=1.5, levels=2, level_step_bps=3, safety=False),
-    Config("deep 3bp x2, skew", "mid", spacing_bps=3, levels=2, level_step_bps=3, kappa=1.0),
-    Config("deep 3bp, no pause, skew", "mid", spacing_bps=3, kappa=1.0, safety=False),
-    Config("deep 3bp x2, no pause, skew", "mid", spacing_bps=3, levels=2, level_step_bps=3, kappa=1.0, safety=False),
-    # a static grid on the ETF perps (SPY: +$3-4/day on $23-33k/day at 50x, five days; higher variance than the deep
-    # quotes, and poor on crypto)
-    *(Config(f"grid 3bp x{n}", "grid", spacing_bps=3, levels=n, reset_pct=0.2, safety=False) for n in (2, 4)),
-    # deep quotes on the anchored perps need room to be paid for the reversion: with the default 1% position stop the
-    # gain came from two days; with 3/6/15 it held without them (SPY, QQQ, NVDA, GLD; research note, section 5)
-    Config("deep 3bp, no pause, 3% stop", "mid", spacing_bps=3, safety=False, stops=(3.0, 6.0, 15.0)),
-    Config("touch 0bp", "mid", style="normal", spacing_bps=0),   # joins the best bid and ask
-    Config("touch 1bp", "mid", style="normal", spacing_bps=1),
-    Config("improve touch", "mid", style="aggressive"),
-    # quotes around the last fill, soft reset after a 0.1% run against the position (the Grid of Tread users)
-    *(Config(f"anchor {d:g}bp", "anchor", spacing_bps=d, reset_pct=0.1, safety=False) for d in (3, 5)),
-    *(Config(f"rgrid {d:g}bp", "rgrid", spacing_bps=d) for d in (5, 15)),
-    Config("rsi signal", "signal"),
-    # the same settings with no new quotes while US stocks trade (most of the losses on stock and index perps)
-    Config("deep 3bp, skew" + SKIP_US, "mid", spacing_bps=3, kappa=1.0, skip_et=US_SESSION),
-    Config("deep 1.5bp, no pause" + SKIP_US, "mid", spacing_bps=1.5, safety=False, skip_et=US_SESSION),
-    Config("touch 1bp" + SKIP_US, "mid", style="normal", spacing_bps=1, skip_et=US_SESSION),
-    Config("improve touch" + SKIP_US, "mid", style="aggressive", skip_et=US_SESSION),
-]
+
+
+def config_of(s: su.Setup) -> Config:
+    """A setup's backtest config, with the defaults the research picked (docs/notes/2026-09-26-tread-style-setups.md):
+    Mid runs without the safety pause (the same cost per dollar with 13-66% more volume) and, for a positive spread,
+    skews its reservation price with the position; Grid keeps the safety pause (cheaper on 6 of 10 markets) and a
+    0.5% soft reset. One order per side."""
+    if s.mode == "mid":
+        return Config(s.name, "mid", style="passive", spacing_bps=s.spread, kappa=1.0 if s.spread > 0 else 0.0,
+                      bias=s.sign, bias_frac=su.BIAS_FRAC, safety=False)
+    return Config(s.name, "grid", spacing_bps=s.spread, reset_pct=su.GRID_RESET_PCT, bias=s.sign,
+                  bias_frac=su.BIAS_FRAC, safety=True)
+
+
+MENU: list[Config] = [config_of(s) for s in su.menu()]
 BY_NAME = {c.name: c for c in MENU}
+
+
+def config_for(name: str) -> Config:
+    """A menu setting by name, or any other setup the owner types (a spread the scout does not backtest, an old name
+    such as "touch 0bp"). Raises ValueError for anything else."""
+    c = BY_NAME.get(name)
+    return c if c is not None else config_of(su.parse(name))
 
 # GO thresholds (see module docstring; the PnL ones are % of capital, in sizing.Pct)
 MIN_FULL_DAYS = 3
@@ -609,7 +600,7 @@ def cost_per_1k(pnl: float, volume: float) -> float | None:
 def passes_long(entry: dict[str, Any], name: str, pct: Pct, volume_cost: float | None = None) -> bool:
     """Does setting `name` pass the multi-day checks in this backtest entry (Scanner.backtest)? With volume_cost
     (dollars per $1,000 of volume), a setting that loses money also passes when it costs at most that and every
-    other check passes: the volume and aggressive lists (bot/scout/profiles.py) need its last 24 h too."""
+    other check passes: the lists (bot/scout/profiles.py) need its last 24 h too."""
     if entry.get("skip"):
         return False
     days = [r for _d, rs in sorted(entry["days"].items()) for r in rs if r["config"] == name]
@@ -825,26 +816,33 @@ def table(res: dict[str, Any], limit: int = 25) -> str:
     head = (f"{'':3}{'market':<12} {'setting':<42} {'uses':>7} {'order':>6} {'fills/d':>7} {'volume/d':>9} "
             f"{'pnl/d':>7} {'worst':>7} {'24h':>6}  why not")
 
-    def rows(cs: list[dict[str, Any]]) -> list[str]:
+    from bot.scout import profiles
+
+    def rows(cs: list[dict[str, Any]], cost: bool = False) -> list[str]:
+        """cost: the list sections, where the last column is the cost per $1,000 (the lists' measure)."""
+        def last(c: dict[str, Any]) -> str:
+            if cost:
+                x = profiles.cost_1k(c)
+                return "profitable" if x == 0 else f"${x:.2f} per $1,000" if x is not None else "-"
+            return "GO" if c["go"] else "; ".join(c["reasons"])[:80]
         return [f"{i:>2} {c['market']:<12} {c['config']:<42} {c.get('used_usd', 0):>7,.0f} "
                 f"{c.get('order_usd', 0):>6,.0f} {c['fills_day']:>7.0f} {c['volume_day']:>9,.0f} "
                 f"{c['pnl_day']:>+7.2f} {c['worst_day']:>+7.2f} "
                 f"{(format(c['recent_pnl'], '+6.2f') if c.get('recent_checked', True) else '-'):>6}  "
-                f"{'GO' if c['go'] else '; '.join(c['reasons'])[:80]}" for i, c in enumerate(cs, 1)]
+                f"{last(c)}" for i, c in enumerate(cs, 1)]
     lines += ["best per market (any leverage up to the max):", head]
     lines += rows([r for r in res["ranked"] if r["days"]][:limit])
     if res.get("at_max"):
         lines += ["", "each market at its MAXIMUM leverage:", head]
         lines += rows(res["at_max"][:limit])
-    from bot.scout import profiles
 
-    budget = float(res.get("volume_cost") or 0.15)
-    for key in ("volume", "aggressive", "max"):
-        p = profiles.PROFILES[key]
+    budget = float(res.get("volume_cost") or 0.20)
+    for p in profiles.LISTS:
         top = profiles.top(res, p, budget)
-        why = "whatever it costs" if p.any_cost else f"for at most ${budget:.2f} lost per $1,000; /set volume_cost"
-        lines += ["", f"{p.title.upper()} top 3 (most volume {why}):", head]
-        lines += rows(top) if top else ["   nothing fits right now"]
+        why = "whatever it costs" if p.any_cost else f"at most ${budget:.2f} lost per $1,000; /set volume_cost"
+        lines += ["", f"{p.title.upper()} top 3 ({p.blurb.split(';')[0]}, {why}):",
+                  head.replace("why not", "cost")]
+        lines += rows(top, cost=True) if top else ["   nothing fits right now"]
     small = [f"{r['market']} (${r.get('min_capital_usd', 0):,.2f})" for r in res["ranked"]
              if r.get("too_small") and not r["days"]]
     if small:

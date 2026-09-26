@@ -1,8 +1,9 @@
-"""Common market-making plumbing for the Tread-style modes.
+"""Common market-making plumbing for the two modes (Mid and Grid).
 
-Handles: quoting gate (risk/safety/event windows), Arcus RWA off-hours rules (spacing x2, size x0.25, no Mid, never
-price past the next trading bound), bias path I*(t), inventory skew, participation cap, and the exit book used when
-quoting is blocked (reduce-only maker order at the touch; the runner escalates to IOC after `exit_taker_after_s`).
+Handles: quoting gate (risk/safety/event windows), Arcus RWA off-hours rules (spacing, size, never price past the next
+trading bound), the directional bias (a target position of bias_frac x the cap), inventory skew, participation cap, and
+the exit book used when quoting is blocked (reduce-only maker order at the touch; the runner escalates to IOC after
+`exit_taker_after_s`).
 """
 
 from __future__ import annotations
@@ -71,7 +72,9 @@ class MMBase:
         return off if ctx.off_hours and off is not None else self.p.inventory_cap_usd
 
     def target_inventory_base(self, ctx: StrategyContext, mid: float) -> float:
-        usd = qt.bias_target_usd(self.p.bias, ctx.session_progress, self.p.bias_size_usd)
+        """The directional bias: hold bias_frac of the position cap long (Long) or short (Short); follows the cap, so
+        it re-sizes with the account and shrinks outside an RWA perp's session."""
+        usd = qt.bias_target_usd(self.p.bias, self.p.bias_frac * self.cap_usd(ctx))
         return usd / mid if mid > 0 else 0.0
 
     def u(self, ctx: StrategyContext, mid: float, extra_target_base: float = 0.0) -> float:

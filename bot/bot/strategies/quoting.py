@@ -66,13 +66,14 @@ def post_only_guard(bid: float, ask: float, best_bid: float, best_ask: float, ti
     return bid, ask
 
 
-def bias_target_usd(bias: str, progress: float, peak_usd: float) -> float:
-    """Tread bias path: rises to +/-B over the first half of the session, back to 0 by the end."""
-    if bias == "neutral" or peak_usd == 0:
-        return 0.0
-    shape = 2 * progress if progress <= 0.5 else 2 * (1 - progress)
-    sign = 1.0 if bias == "long_skew" else -1.0
-    return sign * peak_usd * max(0.0, min(1.0, shape))
+def bias_target_usd(bias: str, size_usd: float) -> float:
+    """The position a directional bias holds (Tread "Long" / "Short"): +size long, -size short, 0 neutral. The quotes
+    skew their sizes toward it (skew_u), so the bot keeps quoting both sides around that position."""
+    if bias == "long":
+        return size_usd
+    if bias == "short":
+        return -size_usd
+    return 0.0
 
 
 def participation_mult(our_fill_usd_5m: float, market_usd_5m: float, cap_pct: float) -> float:
