@@ -9,6 +9,7 @@ hours, at or near breakeven, using limit (maker) orders only?
 | [REPORT.md](REPORT.md) | The findings: shortlist, synthetic mechanics study, live paper runs, recommendation |
 | `synthetic/` | The synthetic mechanics study (`bot farm synth`): results and a summary. Not evidence of real edge |
 | `runs/<UTC start>/` | Live paper runs on Arcus (`bot farm run`): leaderboard, results per hour, 1-minute candles, per-minute paper series, every paper fill, and the recorded tape |
+| `runs/<UTC start>/paper-engine/` | The bot's own engine in paper mode, one session per market (`bot farm paperrun`, `scripts/paper_engines.sh`, collected by `bot farm engines`) |
 
 ## Run the paper farm yourself
 
@@ -19,7 +20,7 @@ the orders). From `treading-bot/bot` after `make install`:
 .venv/bin/bot farm run --hours 15
 ```
 
-- It records every Arcus perp and, every hour, paper-trades the whole menu (30 settings × 5x, 10x, 20x and the market maximum) on the 20
+- It records every Arcus perp and, every hour, paper-trades the whole menu (31 settings × 5x, 10x, 20x and the market maximum) on the 20
   busiest markets plus BTC, ETH, SOL, HYPE, QQQ, SPY, GLD, SLV, NVDA, USO, TSLA and XRP, since the start. Each
   paper account starts with $100 (`--capital`), with stops of 5% (position), 10% (day) and 20% (kill) of it.
 - Results land in `research/runs/<UTC start>/`; `LEADERBOARD.md` is rewritten every hour. With git set up it also

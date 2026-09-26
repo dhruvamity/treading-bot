@@ -100,7 +100,7 @@ next to the wider settings the data favours.
 
 ## 1.5 How each kept setup maps onto the paper farm
 
-The farm runs on one venue with maker (post-only) orders only, as the user asked. Its menu (30 settings) is in
+The farm runs on one venue with maker (post-only) orders only, as the user asked. Its menu (31 settings) is in
 `bot/bot/farm/menu.py`. Tread's modes map as follows:
 
 | Tread mode | Farm setting(s) | Faithfulness |
@@ -119,3 +119,21 @@ The farm runs on one venue with maker (post-only) orders only, as the user asked
 
 Sizing follows the posts: capital $100, leverage 5x, 10x and 20x (capped at the market's maximum), a position stop
 of 5% of capital, a daily stop of 10% and a kill at 20%. Tread users run SL 5–25% of margin (S06, S11, S14, S26, S27).
+
+## 1.6 Live verdict (2026-09-25 22:17 to 09-26 07:13 UTC, Arcus, 20x, 11 liquid markets)
+
+From [REPORT.md](REPORT.md) section 6. The same setups, measured on live Arcus data (no fees for makers, so these
+costs are the trading part only). The verdict updates each setup's risk label.
+
+| Tread setup | Farm setting | Live: turnover / h, cost per $1M, profitable markets | Verdict |
+|---|---|---|---|
+| Mid 0 (S28), Mid −1/−3 (S03, S04) | `mid0` | 59×, $62, 2 of 11 | Most volume, steady cost: **R3** |
+| Mid −1 aggressive (S04) | `improve1`, `touch 0bp` | 41–48×, $85–115, 3–4 of 11 | **R3**; at max leverage the daily stop fires within hours |
+| Mid +1 (S34, S29) | `mid+1`, `mid+1 skew` | 24–34×, −$12 to $53, 4 of 11 | Near breakeven: **R2** |
+| Mid +3…+5 (S07) | `mid+3`, `mid+5` | 5×, −$117 (+3); 2×, $896 (+5) | +3 **R1** at low volume; +5 too few fills |
+| Grid +1…+3, soft reset (S07, S27, S31, S35) | `grid+1 r0.25`, `grid+3 r0.5` | 13–26×, −$20 to −$28, 6–8 of 11 | Best non-Mid family: **R2** |
+| Grid +7…+10 (S11, S15) | `grid+7 r1`, `grid+10 r1` | 4×, $95 | Too few fills for this goal |
+| RGrid +1/+2 (S01, S06, S32) | `rgrid+1 r0.25`, `rgrid+2 r0.5` | 28–30×, $151–176, 2–3 of 11 | **R3** (maker approximation) |
+| DGrid (S02, S04, S12, S33) | `dgrid` | 27×, $14, 4 of 11 | Near breakeven; approximation: **R2–R3** |
+| Signal RSI +3…+8 (S05, S13) | `rsi+3`, `rsi+8` | 4–10×, −$190 to −$1 | Profitable but low volume: **R2** |
+| (new) Mid 0 when calm | `mid0 vgate` | 36×, $20, 2 of 11 | A third of Mid 0's cost: **R3** until proven |
