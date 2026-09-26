@@ -245,7 +245,7 @@ What the first hours show (early and noisy; updated hourly):
 
 **Engines (`touch 0bp` at maximum leverage):** 9 of 12 are stopped for the day (8 on the 2% daily stop, SOL
 killed). QQQ went from +$0.55 to −$2.54 and stopped too. Only NVDA (−$1.63 on $25k) and GLD (−$1.10 on $4.5k) still
-quote; TSLA has not traded. Net across the 12: −$40.9 on $236k of volume, **$173 per $1M**.
+quote; TSLA has not traded. Net across the 12: −$39.9 on $235k of volume, **$170 per $1M**.
 
 **Whole menu, live replay, 4 hours (22:17–02:17 UTC, overnight, US closed), $100 per run, farm stops 5/10/20%:**
 
