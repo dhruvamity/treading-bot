@@ -217,6 +217,30 @@ What the first hours show (early and noisy; updated hourly):
    paper venue gave 2.5× the replay's volume on SPY and 10× on NVDA. The replay only counts prints through our
    price, which is the lower bound, and the gap is largest for exactly this setting.
 
+### Update after 2.7 hours (00:30 UTC), 30 minutes into the new UTC day
+
+| Market | Engine volume | Engine net | CPM | Since 00:00 (volume / net) | State |
+|---|---|---|---|---|---|
+| SPY 50x | $47,289 | −$3.35 | $71 | $5,183 / −$0.10 | quoting |
+| SOL 20x | $37,866 | −$4.31 | $114 | $4,836 / −$1.81 | **killed** (−$9.03 from a +$4.7 peak) |
+| ETH 20x | $37,088 | −$5.00 | $135 | $18,271 / −$2.37 | daily stop again |
+| BTC 20x | $35,316 | −$4.50 | $127 | $15,669 / −$2.01 | daily stop again |
+| NVDA 20x | $15,208 | −$0.40 | $26 | $3,176 / +$0.12 | quoting |
+| QQQ 25x | $11,714 | **+$0.55** | −$47 | $495 / −$0.06 | quoting |
+| ZEC 10x | $10,368 | −$4.25 | $410 | $4,149 / −$2.13 | daily stop again |
+| NEAR 10x | $7,577 | −$3.67 | $484 | $5,808 / −$1.64 | daily stop again |
+| HYPE 10x | $7,441 | −$4.07 | $546 | $3,906 / −$1.62 | quoting |
+| GLD 25x | $4,532 | −$1.32 | $292 | $5 / +$0.11 | quoting |
+| SLV 25x | $2,998 | −$1.88 | $628 | $1,498 / −$1.20 | quoting |
+| TSLA 10x | $0 | $0 | — | — | no trades (US closed) |
+
+- **The daily stop is the binding constraint.** After the 00:00 UTC reset, BTC, ETH, ZEC and NEAR hit their 2% stop
+  again within 30 minutes. At maximum leverage the stop allows only about $15–20k of BTC or ETH volume a day before it
+  fires.
+- **SOL shows the swing risk of maximum leverage:** it was up $4.7, then fell $9 from that peak and hit the 10% kill.
+- **QQQ is the only engine in profit; NVDA is close to flat.** The replay over the same window agrees on QQQ (+$0.49)
+  and on the crypto losses (BTC −$5.07, ETH −$5.39, ZEC −$5.48 with 2 daily stops each).
+
 ### Why it did not run earlier in this session
 
 Two things had stopped it:

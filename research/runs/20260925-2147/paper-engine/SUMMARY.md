@@ -1,18 +1,18 @@
 # Live paper engines
 
-Updated 2026-09-25 23:55 UTC. Each row is the bot's real engine in paper mode (live Arcus data, simulated orders, the paper venue's queue-aware fills) running one session, the one Telegram's `/run MARKET SETTING max` deploys: $100 capital at the market's maximum leverage, stops 1% / 2% / 10% of the capital. Net = spread capture + inventory mark-to-market − fees + funding. CPM = dollars lost per $1M traded (negative = profit). At touch = share of quoting time the bid (ask) sat at the best price.
+Updated 2026-09-26 00:30 UTC. Each row is the bot's real engine in paper mode (live Arcus data, simulated orders, the paper venue's queue-aware fills) running one session, the one Telegram's `/run MARKET SETTING max` deploys: $100 capital at the market's maximum leverage, stops 1% / 2% / 10% of the capital. Net = spread capture + inventory mark-to-market − fees + funding. CPM = dollars lost per $1M traded (negative = profit). At touch = share of quoting time the bid (ask) sat at the best price.
 
 | market | setting | lev | hours | volume $ | turnover/h | fills/h | net $ | net % | CPM | spread $ | inventory $ | position $ | max pos $ | quoting % | bid at touch % | ask at touch % | not quoting |
 |---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|
-| SPY | touch 0bp | 50.00 | 2.07 | 42,106 | 203.38 | 30.90 | -3.25 | -3.25 | 77.10 | -0.87 | -1.03 | 0.00 | 3,003.86 | 71.00 | 13.00 | 20.60 | daily loss stop |
-| SOL | touch 0bp | 20.00 | 2.07 | 33,030 | 159.54 | 33.30 | -2.50 | -2.50 | 75.60 | -4.97 | 3.32 | 0.00 | 1,311.10 | 31.90 | 23.40 | 21.80 | daily loss stop |
-| BTC | touch 0bp | 20.00 | 2.07 | 19,648 | 94.71 | 58.80 | -2.49 | -2.49 | 126.60 | -0.36 | -1.86 | 0.00 | 1,253.32 | 10.20 | 5.60 | 7.60 | daily loss stop |
-| ETH | touch 0bp | 20.00 | 2.07 | 18,817 | 90.71 | 18.80 | -2.62 | -2.62 | 139.40 | -0.93 | -1.44 | 0.00 | 1,352.82 | 14.30 | 12.80 | 11.80 | daily loss stop |
-| QQQ | touch 0bp | 25.00 | 2.07 | 8,931.03 | 43.10 | 8.20 | 0.68 | 0.68 | -76.50 | 0.18 | 0.50 | -1,287.74 | 1,613.46 | 100.00 | 15.10 | 9.60 |  |
-| NVDA | touch 0bp | 20.00 | 2.07 | 8,793.80 | 42.44 | 20.80 | 0.15 | 0.15 | -17.10 | 0.33 | -0.17 | 1,238.83 | 1,238.83 | 99.60 | 81.30 | 32.60 |  |
-| ZEC | touch 0bp | 10.00 | 2.07 | 6,219.22 | 30.06 | 10.60 | -2.12 | -2.12 | 340.40 | -0.98 | -0.84 | 0.00 | 686.26 | 21.40 | 14.30 | 14.80 | daily loss stop |
-| GLD | touch 0bp | 25.00 | 2.07 | 4,526.51 | 21.82 | 6.30 | -1.41 | -1.41 | 311.60 | -0.20 | -0.98 | -501.53 | 1,014.99 | 98.90 | 86.00 | 86.90 |  |
-| HYPE | touch 0bp | 10.00 | 2.07 | 3,534.50 | 17.05 | 10.60 | -2.45 | -2.45 | 693.10 | -0.54 | -1.65 | 0.00 | 589.96 | 31.60 | 20.80 | 20.10 | daily loss stop |
-| NEAR | touch 0bp | 10.00 | 2.07 | 1,768.98 | 8.53 | 5.30 | -2.02 | -2.02 | 1,144.00 | -0.33 | -1.49 | 0.00 | 504.39 | 1.10 | 0.90 | 0.90 | daily loss stop |
-| SLV | touch 0bp | 25.00 | 2.07 | 1,499.96 | 7.24 | 1.00 | -0.95 | -0.95 | 631.20 | 0.04 | -0.99 | 1,499.01 | 1,499.01 | 100.00 | 81.40 | 93.10 |  |
-| TSLA | touch 0bp | 10.00 | 2.07 | 0.00 | 0.00 | 0.00 | 0.00 | 0.00 |  | 0.00 | 0.00 | 0.00 | 0.00 | 100.00 | 89.20 | 95.50 |  |
+| SPY | touch 0bp | 50.00 | 2.66 | 47,289 | 177.81 | 30.50 | -3.35 | -3.35 | 70.80 | -0.90 | -1.10 | -844.71 | 3,004.40 | 99.90 | 49.50 | 67.80 |  |
+| SOL | touch 0bp | 20.00 | 2.66 | 37,866 | 142.38 | 33.50 | -4.31 | -4.31 | 113.80 | -5.35 | 1.97 | 0.00 | 1,309.21 | 92.50 | 79.50 | 79.30 | stopped: drawdown $9.03 > $9.00 from the peak |
+| ETH | touch 0bp | 20.00 | 2.66 | 37,088 | 139.24 | 29.70 | -5.00 | -5.00 | 134.70 | -1.91 | -2.59 | 0.00 | 1,350.50 | 85.70 | 56.60 | 55.40 | daily loss stop |
+| BTC | touch 0bp | 20.00 | 2.66 | 35,316 | 132.58 | 99.50 | -4.50 | -4.50 | 127.40 | -0.70 | -3.54 | 0.00 | 1,251.98 | 41.20 | 24.70 | 20.70 | daily loss stop |
+| NVDA | touch 0bp | 20.00 | 2.66 | 15,208 | 57.15 | 24.80 | -0.40 | -0.40 | 26.40 | 0.14 | -0.26 | 383.22 | 1,238.94 | 100.00 | 88.40 | 89.90 |  |
+| QQQ | touch 0bp | 25.00 | 2.66 | 11,714 | 44.02 | 9.40 | 0.55 | 0.55 | -47.00 | 0.25 | 0.30 | 1,107.36 | 1,613.30 | 100.00 | 19.90 | 89.10 |  |
+| ZEC | touch 0bp | 10.00 | 2.66 | 10,368 | 39.01 | 12.80 | -4.25 | -4.25 | 410.00 | -3.05 | -0.79 | 0.00 | 683.64 | 25.50 | 23.10 | 13.40 | daily loss stop |
+| NEAR | touch 0bp | 10.00 | 2.66 | 7,576.87 | 28.46 | 14.30 | -3.67 | -3.67 | 483.80 | -2.61 | -0.67 | 0.00 | 590.06 | 47.70 | 35.80 | 43.00 | daily loss stop |
+| HYPE | touch 0bp | 10.00 | 2.66 | 7,440.93 | 27.95 | 20.70 | -4.07 | -4.07 | 546.40 | -1.18 | -2.50 | 0.00 | 594.50 | 83.90 | 53.60 | 40.90 |  |
+| GLD | touch 0bp | 25.00 | 2.66 | 4,531.88 | 17.01 | 5.30 | -1.32 | -1.32 | 291.80 | -0.20 | -0.90 | -496.06 | 1,014.81 | 100.00 | 100.00 | 91.40 |  |
+| SLV | touch 0bp | 25.00 | 2.66 | 2,998.37 | 11.27 | 1.50 | -1.88 | -1.88 | 628.20 | -0.43 | -1.12 | 0.00 | 1,497.98 | 95.50 | 82.90 | 59.10 |  |
+| TSLA | touch 0bp | 10.00 | 2.66 | 0.00 | 0.00 | 0.00 | 0.00 | 0.00 |  | 0.00 | 0.00 | 0.00 | 0.00 | 100.00 | 100.00 | 100.00 |  |
