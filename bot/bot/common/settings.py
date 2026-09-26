@@ -17,6 +17,7 @@ from bot.common.config import SizingDefaults
 
 FILE = "settings.json"
 DEFAULT_VOLUME_COST = 0.15   # dollars per $1,000 of volume the volume lists may cost (about 1.5 bp)
+DEFAULT_SCAN_BUDGET_MIN = 30   # minutes of full-day backtests per scan; the rest continues in the next one
 CRYPTO = ("BTC-USD", "ETH-USD")   # the markets /set crypto_lev caps
 
 
@@ -46,8 +47,11 @@ SETTINGS: dict[str, Setting] = {s.name: s for s in (
     Setting("kill", "pct", 1, 50, "Flatten and stop for good once equity is this % below its peak",
             "next scan (a full re-backtest); the running bot at its next re-size", "kill_pct"),
     Setting("scan_every", "minutes", 10, 240, "Minutes between scout scans", "after the current wait"),
+    Setting("scan_budget", "minutes", 5, 240,
+            "Most minutes a scan spends backtesting full days (busiest markets first); the rest continues in the next "
+            "scan", "next scan"),
     Setting("scan_workers", "workers", 1, 32,
-            "CPU cores a scan may use: auto = all but one, and one while a bot runs on this machine", "next scan"),
+            "CPU cores a scan may use: auto = all but one; all but two while a bot runs on this machine", "next scan"),
     Setting("volume_cost", "per1k", 0.01, 5,
             "The most the Volume and Aggressive Mid lists may cost: dollars lost per $1,000 traded (0.15 = 1.5 bp)",
             "those lists at once; the next scan also re-checks the last 24 h of the settings it lets in"),
@@ -135,6 +139,11 @@ def scout_options(overrides: dict[str, Any]) -> tuple[float | None, int | str | 
     return overrides.get("scan_every"), overrides.get("scan_workers")
 
 
+def scan_budget_s(overrides: dict[str, Any]) -> float:
+    """The owner's time budget for one scan's full-day backtests, in seconds (default 30 minutes)."""
+    return 60.0 * float(overrides.get("scan_budget") or DEFAULT_SCAN_BUDGET_MIN)
+
+
 def volume_cost(overrides: dict[str, Any]) -> float:
     """The owner's budget for the volume lists, in dollars per $1,000 of volume."""
     return float(overrides.get("volume_cost") or DEFAULT_VOLUME_COST)
@@ -169,5 +178,6 @@ def defaults(base: SizingDefaults, every_min: float, workers: int | str | None) 
     """What each setting is when the owner has not changed it."""
     return {"capital": base.capital_usd, "trade_share": base.capital_frac * 100, "max_capital": base.max_capital_usd,
             "position_stop": base.position_stop_pct, "daily_stop": base.daily_stop_pct, "kill": base.kill_pct,
-            "scan_every": every_min, "scan_workers": workers or "auto", "volume_cost": DEFAULT_VOLUME_COST,
+            "scan_every": every_min, "scan_workers": workers or "auto", "scan_budget": DEFAULT_SCAN_BUDGET_MIN,
+            "volume_cost": DEFAULT_VOLUME_COST,
             "crypto_lev": "max"}

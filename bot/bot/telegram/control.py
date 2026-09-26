@@ -236,6 +236,15 @@ class Control:
         self._kv_set(mode, "resume", json.dumps({"venue": venue, "all": True, "ts": time.time()}))
 
     # ------------------------------------------------------------------ sessions and runs
+    def session_path(self, name: str) -> Path:
+        """A session file: a path, or a name in config/sessions. ValueError when there is none (not the CLI's exit,
+        which would end the Telegram bot on a mistyped /doctor)."""
+        for p in (Path(name), self.root / "config" / "sessions" / name, self.root / "config" / "sessions" / f"{name}.yaml"):
+            if p.is_file():
+                return p
+        have = ", ".join(x["name"] for x in self.sessions()) or "none"
+        raise ValueError(f"no session called {name!r} (have: {have})")
+
     def sessions(self) -> list[dict[str, Any]]:
         out: list[dict[str, Any]] = []
         for p in sorted((self.root / "config" / "sessions").glob("*.yaml")):
@@ -293,10 +302,10 @@ class Control:
     async def doctor(self, name: str, *, replacing: bool = False) -> tuple[bool, str]:
         """The live pre-start checks for a session (a name in config/sessions, or a path). replacing: the running live
         bot is closed before this one starts (Telegram's /run), so it is not a failure here."""
-        from bot.cli import _doctor, resolve_session
+        from bot.cli import _doctor
         from bot.core.livelock import RunMode
 
-        s = load_session(resolve_session(name))
+        s = load_session(self.session_path(name))
         rep = await _doctor([s], RunMode.LIVE, replacing=replacing)
         return (not rep.failed), rep.render()
 

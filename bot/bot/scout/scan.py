@@ -5,9 +5,9 @@ the bot trades with (the account's equity, bucketed; bot/common/sizing.py) and i
 Completed days are cached per capital bucket; the current day is re-run on each scan.
 
 Leverage: each market is tested at its maximum Arcus leverage (1 / initialMarginFraction; /set crypto_lev can cap
-BTC and ETH) and, below that, at 20x, 10x, 5x and 2x. The leverage sets the size (sim.Risk.for_capital): position up
-to capital x leverage, orders of half the inventory cap. RWA perps use their off-hours maximum outside the
-underlying's session.
+BTC and ETH) only; `--ladder` adds 20x, 10x, 5x and 2x below it (5x the work: the owner runs any leverage anyway).
+The leverage sets the size (sim.Risk.for_capital): position up to capital x leverage, orders of half the inventory
+cap. RWA perps use their off-hours maximum outside the underlying's session.
 Two limits: a leverage whose off-hours order would fall under 1.2x the Arcus minimum order needs more capital and is
 skipped; and one order never exceeds the market's liquidity ceiling (the 99th percentile of taker-order notional over
 the recorded days), past which the sizes stop growing and the stops apply to the capital actually used.
@@ -50,7 +50,7 @@ from bot.common.sizing import Pct, bucket, min_capital, venue_min_usd
 from bot.scout.sim import Config, MarketInfo, Risk, S, Sim, SimParams, Window
 from bot.scout.tape import US_DAY, TapeStore, day_start_us, day_str
 
-SIM_VERSION = "7"          # bump when the simulator changes, so cached day results are recomputed
+SIM_VERSION = "8"          # bump when the simulator changes, so cached day results are recomputed (8: queue fills)
 ALIVE_MARKET = "BTC-USD"   # busiest book: its rows show when the recorder was up
 LADDER = (20.0, 10.0, 5.0, 2.0)                 # tested below each market's maximum
 HOLIDAYS_CSV = Path(__file__).resolve().parents[2] / "config" / "calendars" / "nyse_holidays.csv"
@@ -61,6 +61,19 @@ MENU: list[Config] = [
     *(Config(f"deep {d:g}bp, no pause", "mid", spacing_bps=d, safety=False) for d in (1.5, 3)),
     Config("deep 3bp, skew", "mid", spacing_bps=3, kappa=1.0),
     *(Config(f"deep {d:g}bp x2", "mid", spacing_bps=d, levels=2, level_step_bps=3) for d in (2, 4)),
+    # the most volume at breakeven or better on the stock and ETF perps, at max leverage (2026-09-26 research, five
+    # days at ~$100 of capital: SPY, QQQ, NVDA, GOOGL); the scan re-checks them on every new day
+    Config("deep 1.5bp x2", "mid", spacing_bps=1.5, levels=2, level_step_bps=3),
+    Config("deep 1.5bp x2, no pause", "mid", spacing_bps=1.5, levels=2, level_step_bps=3, safety=False),
+    Config("deep 3bp x2, skew", "mid", spacing_bps=3, levels=2, level_step_bps=3, kappa=1.0),
+    Config("deep 3bp, no pause, skew", "mid", spacing_bps=3, kappa=1.0, safety=False),
+    Config("deep 3bp x2, no pause, skew", "mid", spacing_bps=3, levels=2, level_step_bps=3, kappa=1.0, safety=False),
+    # a static grid on the ETF perps (SPY: +$3-4/day on $23-33k/day at 50x, five days; higher variance than the deep
+    # quotes, and poor on crypto)
+    *(Config(f"grid 3bp x{n}", "grid", spacing_bps=3, levels=n, reset_pct=0.2, safety=False) for n in (2, 4)),
+    # deep quotes on the anchored perps need room to be paid for the reversion: with the default 1% position stop the
+    # gain came from two days; with 3/6/15 it held without them (SPY, QQQ, NVDA, GLD; research note, section 5)
+    Config("deep 3bp, no pause, 3% stop", "mid", spacing_bps=3, safety=False, stops=(3.0, 6.0, 15.0)),
     Config("touch 0bp", "mid", style="normal", spacing_bps=0),   # joins the best bid and ask
     Config("touch 1bp", "mid", style="normal", spacing_bps=1),
     Config("improve touch", "mid", style="aggressive"),
@@ -213,14 +226,11 @@ def liquidity(trades: dict[str, np.ndarray]) -> dict[str, float]:
 # ------------------------------------------------------------------------------------------------ backtests
 def lower_priority() -> None:
     """Run this process (a scan worker) at the lowest CPU priority, so a trading bot on the same machine always gets
-    the CPU first: nice 19 everywhere, plus the background band on macOS (CPU and disk I/O throttled) and SCHED_IDLE
-    on Linux."""
+    the CPU first: nice 19 everywhere, and SCHED_IDLE on Linux. Not macOS's background band: it throttles CPU and disk
+    even when the machine is idle (a scan job took 5x as long on an idle Mac, and hours on the server Mac)."""
     with contextlib.suppress(OSError, AttributeError):
         os.nice(19)
-    if sys.platform == "darwin":
-        with contextlib.suppress(OSError):
-            os.setpriority(4, 0, 0x1000)   # PRIO_DARWIN_PROCESS, this process, PRIO_DARWIN_BG
-    elif hasattr(os, "SCHED_IDLE"):
+    if sys.platform != "darwin" and hasattr(os, "SCHED_IDLE"):
         with contextlib.suppress(OSError, AttributeError):
             os.sched_setscheduler(0, os.SCHED_IDLE, os.sched_param(0))  # type: ignore[attr-defined]
 
@@ -229,17 +239,22 @@ class ScanStopped(Exception):
     """The scan was asked to stop (the scout is shutting down); every day finished so far is cached."""
 
 
-def _gather(ex: ProcessPoolExecutor, jobs: list[Any], stop: threading.Event | None, fn: Any = None
-            ) -> Iterator[tuple[int, Any]]:
-    """(job index, result) as jobs finish; raises ScanStopped within a second of `stop` being set."""
+def _gather(ex: ProcessPoolExecutor, jobs: list[Any], stop: threading.Event | None, fn: Any = None,
+            deadline: float | None = None) -> Iterator[tuple[int, Any]]:
+    """(job index, result) as jobs finish, in the order given; raises ScanStopped within a second of `stop` being
+    set. Past `deadline` (time.monotonic()), jobs not started yet are dropped: they run in a later scan."""
     futs: dict[Future[Any], int] = {ex.submit(fn or _run_window, j): i for i, j in enumerate(jobs)}
     pending = set(futs)
     while pending:
         done, pending = wait(pending, timeout=1.0, return_when=FIRST_COMPLETED)
         for f in done:
-            yield futs[f], f.result()
+            if not f.cancelled():
+                yield futs[f], f.result()
         if stop is not None and stop.is_set():
             raise ScanStopped
+        if deadline is not None and time.monotonic() > deadline:
+            pending = {f for f in pending if not f.cancel()}   # the ones already running finish
+            deadline = None
 
 
 def _halt(ex: ProcessPoolExecutor) -> None:
@@ -266,7 +281,8 @@ def _run_window(args: tuple[Any, ...]) -> dict[str, list[dict[str, Any]]]:
     for r in risks:
         res = []
         for n in (only.get(risk_key(r), []) if only is not None else names):
-            d = Sim(BY_NAME[n], Risk(**r), MarketInfo(**mi), SimParams(**sp)).run(w).as_dict()
+            cfg = BY_NAME[n]
+            d = Sim(cfg, Risk(**r).with_stops(cfg.stops), MarketInfo(**mi), SimParams(**sp)).run(w).as_dict()
             d["leverage"] = r["leverage"]
             res.append(d)
         out[risk_key(r)] = res
@@ -279,14 +295,18 @@ class Scanner:
     capital: float = 100.0            # what the sizes and stops are taken on (bucketed; sizing.bucket)
     pct: Pct = field(default_factory=Pct)
     risk: Risk = field(default_factory=Risk)   # exit timing (exit_taker_after_s, cooldown_s)
-    sp: SimParams = field(default_factory=SimParams)
+    sp: SimParams = field(default_factory=lambda: SimParams(queue=True))   # fills: see bot/scout/sim.py
     workers: int = 6
     htf_days: int = 7
-    ladder: bool = True               # False: each market at its maximum leverage only
+    ladder: bool = False              # True: also 20x, 10x, 5x and 2x below the maximum (5x the work); the owner
+                                      # runs any leverage from Telegram without a backtest at it
     shortlist: bool = True            # re-run the last 24 h only for settings that pass the multi-day checks
     volume_cost: float | None = None  # ... or that cost at most this per $1,000 of volume (the volume lists)
     lev_caps: dict[str, float] = field(default_factory=dict)   # the owner's leverage cap per market (/set crypto_lev)
+    budget_s: float = 1800.0          # full-day backtests per scan stop starting after this long (0: no limit)
     day_jobs: int = 0                 # market-days backtested by the last backtest() (0: every day was cached)
+    left_jobs: int = 0                # ... and the ones left for a later scan (over the time budget)
+    pending: list[str] = field(default_factory=list)   # markets with no finished day at this capital yet
     _alive_h: dict[str, float] = field(default_factory=dict)
 
     @property
@@ -324,6 +344,14 @@ class Scanner:
         p99 = [x for x in p99 if x > 0]
         return bucket(float(np.median(p99))) if p99 else None
 
+    def flow(self, market: str, days: list[str]) -> float:
+        """The market's median daily taker volume over `days` (from the cache order_max fills): the scan order."""
+        vols = []
+        for d in days:
+            with contextlib.suppress(OSError, ValueError, KeyError):
+                vols.append(float(json.loads((self.root / "cache" / "liq" / market / f"{d}.json").read_text())["volume"]))
+        return float(np.median(vols)) if vols else 0.0
+
     def full_days(self, market: str, now_us: int) -> list[str]:
         """Completed UTC days on which the recorder was up for at least 20 h and this market has data. The market's
         first recorded day counts only if its own data covers 20 h of it: a listing that went live at 15:00 UTC (or
@@ -356,6 +384,9 @@ class Scanner:
         2. The last 24 h: re-run only for the settings that pass the multi-day checks (long_reasons), plus `always`
            ((market, "setting @ Nx") pairs: the deployed setup). A setting that already fails on its full days is
            NO-GO whatever its last 24 h did, so re-running it would change nothing. shortlist=False re-runs all.
+        Full days run the busiest markets first, most recent day first, for at most `budget_s`; the rest carry over
+        to the next scan (finished days are cached), and a market with no finished day at this capital is `pending`:
+        left out of the ranking until it has one. So a scan takes about the budget at most, whatever the capital.
         Workers run at the lowest CPU priority (lower_priority). Setting `stop` ends the scan within a second
         (ScanStopped); the full days finished by then stay cached."""
         out: dict[str, dict[str, Any]] = {}
@@ -364,8 +395,10 @@ class Scanner:
         holidays = load_holidays()
         base: dict[str, tuple[Any, ...]] = {}
         day_jobs, day_where = [], []
+        flow: dict[str, float] = {}
         for m in markets:
             days = self.full_days(m, now_us)
+            flow[m] = self.flow(m, days)
             every = self.risks_for(meta[m], mis[m], self.order_max(m, days))
             out[m] = {risk_key(r): {"risk": r, "days": {}, "recent": [], "checked": [],
                                     "skip": f"needs ${r['min_capital_usd']:,.2f} of capital at {r['leverage']:g}x (Arcus "
@@ -394,10 +427,15 @@ class Scanner:
                     day_jobs.append((str(self.store.root), m, s0, s0 + US_DAY, asdict(mis[m]), names, todo, sp,
                                      meta[m].get("regularTradingHours"), holidays, fill))
                     day_where.append((m, d))
-        self.day_jobs = len(day_jobs)
+        order = sorted(range(len(day_jobs)), key=lambda i: day_where[i][1], reverse=True)   # most recent day first
+        order.sort(key=lambda i: -flow[day_where[i][0]])                                   # busiest market first
+        day_jobs, day_where = [day_jobs[i] for i in order], [day_where[i] for i in order]
         ex = ProcessPoolExecutor(max_workers=self.workers, initializer=lower_priority)
+        done_jobs = 0
+        deadline = time.monotonic() + self.budget_s if self.budget_s > 0 else None
         try:
-            for i, res in _gather(ex, day_jobs, stop):
+            for i, res in _gather(ex, day_jobs, stop, deadline=deadline):
+                done_jobs += 1
                 m, d = day_where[i]
                 for rk, rs in res.items():
                     rs = out[m][rk]["days"].get(d, []) + rs   # a cached day gets its missing settings added
@@ -405,9 +443,13 @@ class Scanner:
                     cp = self.cache_path(m, d, rk)
                     cp.parent.mkdir(parents=True, exist_ok=True)
                     cp.write_text(json.dumps(rs))
+            self.day_jobs, self.left_jobs = done_jobs, len(day_jobs) - done_jobs
+            self.pending = sorted(m for m in base if not any(out[m][risk_key(r)]["days"] for r in base[m][3]))
             end = now_us - now_us % S
             rec_jobs, rec_where = [], []
             for m, (root, _m, mi, risks, rth) in base.items():
+                if m in self.pending:
+                    continue
                 only: dict[str, list[str]] = {}
                 for r in risks:
                     e = out[m][risk_key(r)]
@@ -677,29 +719,33 @@ def best_at_max(cands: list[Candidate]) -> list[Candidate]:
 
 def scan(root: Path, *, now_us: int | None = None, markets: list[str] | None = None, workers: int = 6,
          capital: float = 100.0, pct: Pct | None = None, capital_source: str = "fixed", risk: Risk | None = None,
-         ladder: bool = True, shortlist: bool = True, always: set[tuple[str, str]] | None = None,
+         ladder: bool = False, shortlist: bool = True, always: set[tuple[str, str]] | None = None,
          stop: threading.Event | None = None, volume_cost: float | None = None,
-         lev_caps: dict[str, float] | None = None) -> dict[str, Any]:
+         lev_caps: dict[str, float] | None = None, budget_s: float = 1800.0) -> dict[str, Any]:
     """capital: what the sizes and stops are taken on (bucketed here, as the live bot does).
     shortlist: re-run the last 24 h only for settings that pass on their full days (and `always`: the deployed
     (market, "setting @ Nx")); False re-runs every setting, as before.
     volume_cost: the owner's budget for the volume lists (dollars per $1,000 of volume): settings within it are
     shortlisted too, so bot/scout/profiles.py can judge their last 24 h.
-    lev_caps: the owner's leverage cap per market (/set crypto_lev); every other market goes to the Arcus maximum."""
+    lev_caps: the owner's leverage cap per market (/set crypto_lev); every other market goes to the Arcus maximum.
+    budget_s: how long full-day backtests may run in this scan (Scanner.backtest); markets still without a finished
+    day are listed under "pending" and ranked once a later scan has backtested them."""
     now_us = now_us or time.time_ns() // 1000
     mis = load_markets(root / "markets.json")
     meta = market_meta(root / "markets.json")
     pct = pct or Pct()
     sc = Scanner(root, capital=bucket(capital), pct=pct, risk=risk or Risk(), workers=workers, ladder=ladder,
-                 shortlist=shortlist, volume_cost=volume_cost, lev_caps=lev_caps or {})
+                 shortlist=shortlist, volume_cost=volume_cost, lev_caps=lev_caps or {}, budget_s=budget_s)
     have = [m for m in sc.store.markets() if m in mis and (not markets or m in markets) and sc.store.days(m)]
     t0 = time.time()
     bt = sc.backtest(have, now_us, mis, meta, always=always, stop=stop)
     cands: list[Candidate] = []
     for m in have:
-        cands += score_market(m, bt[m], market_now(sc.store, m, now_us), pct)
+        if m not in sc.pending:
+            cands += score_market(m, bt[m], market_now(sc.store, m, now_us), pct)
     ranked = rank(cands)
     return {"ts_us": now_us, "took_s": round(time.time() - t0, 1), "workers": workers, "day_jobs": sc.day_jobs,
+            "left_jobs": sc.left_jobs, "pending": sc.pending,
             "risk": asdict(sc.risk), "volume_cost": volume_cost,
             "capital": {"usd": sc.capital, "source": capital_source, "pct": asdict(pct)},
             "leverage": {"policy": "max, then " + ", ".join(f"{x:g}x" for x in LADDER) if ladder else "max",

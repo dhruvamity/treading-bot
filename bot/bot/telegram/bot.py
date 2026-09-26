@@ -501,9 +501,15 @@ class TelegramBot:
 
         assert self.pilot is not None
         setting = setting_by_id(sid)
-        rows = self.pilot.rows(market, setting) if setting else []
-        if not rows or setting is None:
-            await self.reply(ctx, "Not in the last scan. /run")
+        if setting is None:
+            await self.reply(ctx, "Unknown setting. /run")
+            return
+        rows = self.pilot.rows(market, setting)
+        have = {round(float(r["leverage"]), 2) for r in rows}
+        rows += [{"leverage": x, "not_backtested": True} for x in self.pilot.leverages(market) if round(x, 2) not in have]
+        rows.sort(key=lambda r: -float(r["leverage"]))
+        if not rows:
+            await self.reply(ctx, f"{escape(short(market))}: no market data yet. /run")
             return
         await self.reply(ctx, ladder_text(market, setting, rows, self.pilot.budget(), star),
                          ladder_keyboard(market, sid, rows, profile))
@@ -528,18 +534,41 @@ class TelegramBot:
                 c["lev"] = "max"
         return c
 
+    async def _fresh_balance(self) -> None:
+        """Read the account now and log it, so a run is sized for today's balance (Pilot.capital_now), not the one the
+        scan sized for this morning. Best effort: the last logged balance stands if the read fails."""
+        from bot.common.config import load_arcus_config
+        from bot.scout.capital import account_snapshot
+
+        idx = self.pilot.account_index if self.pilot is not None else 0
+        try:
+            url = load_arcus_config(Path(self.control.root) / "config" / "venues" / "arcus.yaml").rest.mainnet
+            snap = await account_snapshot(url, idx)
+        except Exception as e:
+            log.warning("balance_read_failed", reason=type(e).__name__)
+            return
+        if snap and snap["equity"] > 0:
+            BalanceLog(self._state_dir() / "balances.jsonl").record(
+                source="telegram", account_index=idx, equity=snap["equity"], free=snap["free"],
+                net_deposits=snap["net_deposits"])
+
     async def _run_screen(self, ctx: Ctx, market: str, sid: str, lev: float | str, profile: str) -> None:
         from bot.scout.pilot import setting_id, setting_of
 
         assert self.pilot is not None
+        await self._fresh_balance()
         try:
             c = self._find(market, sid, lev, profile)
         except ValueError as e:
             await self.reply(ctx, escape(str(e)))
             return
+        from bot.scout.pilot import stale_note
+
         live_ok = os.environ.get("BOT_PILOT_LIVE") == "1"
         running = [m for m in ("paper", "live") if self.control.is_running(m)]
-        await self.reply(ctx, run_text(c, self.pilot.budget(), c["profile"], running, live_ok),
+        stale = stale_note(self.pilot.latest_scan())
+        await self.reply(ctx, run_text(c, self.pilot.budget(), c["profile"], running, live_ok)
+                         + (f"\n{escape(stale)}" if stale else ""),
                          run_keyboard(market, setting_id(setting_of(c)), float(c["leverage"]), c["profile"], live_ok))
 
     async def c_rd(self, ctx: Ctx, args: list[str]) -> None:
@@ -572,6 +601,7 @@ class TelegramBot:
         """Paper: a Confirm button. LIVE: BOT_PILOT_LIVE=1, a passing doctor, then a typed one-time code.
         max_loss: the owner's loss limit for the run (sl=)."""
         assert self.pilot is not None
+        await self._fresh_balance()
         try:
             c = self._find(market, setting, lev, profile)
         except ValueError as e:

@@ -86,17 +86,17 @@ def next_is_full(scan: dict[str, Any] | None, now: float) -> bool:
 
 
 def scan_workers(requested: int | str | None, bot_running: bool) -> int:
-    """How many processes a scan may use: 1 while a trading bot runs on this machine (it must never wait for the CPU),
-    else the number asked for, or all cores but one ("auto")."""
-    if bot_running:
-        return 1
-    if isinstance(requested, int) and requested > 0:
-        return requested
-    return max(1, (os.cpu_count() or 2) - 1)
+    """How many processes a scan may use: the number asked for, or all cores but one ("auto"); while a trading bot runs
+    on this machine, at most all cores but two. The workers run at the lowest CPU priority (scan.lower_priority: idle
+    class on Linux), so the bot always gets the CPU first; one worker, as before, made a scan at a new capital take a
+    day and kept the owner from running anything while it lasted."""
+    cores = os.cpu_count() or 2
+    n = requested if isinstance(requested, int) and requested > 0 else max(1, cores - 1)
+    return max(1, min(n, cores - 2)) if bot_running else n
 
 
 async def run_service(root: Path, pilot: Pilot, *, rest_url: str, ws_url: str, every_min: float = 30.0,
-                      workers: int | str | None = None, record: bool = True, ladder: bool = True, depth: bool = False,
+                      workers: int | str | None = None, record: bool = True, ladder: bool = False, depth: bool = False,
                       capital: str | float | None = None, sizing: SizingDefaults | None = None) -> None:
     """capital: "auto" (the subaccount's equity before each scan), a fixed amount, or None for app.yaml's sizing.
     Before every scan it re-reads the owner's settings (state/settings.json, changed from Telegram), reads and logs
@@ -136,8 +136,7 @@ async def run_service(root: Path, pilot: Pilot, *, rest_url: str, ws_url: str, e
                                     free=snap["free"], net_deposits=snap["net_deposits"])
                 eq = snap["equity"] if snap and snap["equity"] > 0 and str(spec).lower() == "auto" else None
                 cap, src = choose(spec, eq, z)
-                cap, src, moved = settle(state_dir, cap, src, today=time.strftime("%Y-%m-%d", time.gmtime()),
-                                         net_deposits=snap["net_deposits"] if snap else None)
+                cap, src, moved = settle(state_dir, cap, src, today=time.strftime("%Y-%m-%d", time.gmtime()))
                 a = pilot.active()
                 n = scan_workers(want_workers, bool(pilot.control.running_modes()))
                 st = read_status(root)
@@ -145,13 +144,15 @@ async def run_service(root: Path, pilot: Pilot, *, rest_url: str, ws_url: str, e
                 res = await loop.run_in_executor(None, functools.partial(
                     scan, root / "data" / "scout", workers=n, ladder=ladder, capital=cap, pct=z.pct(),
                     capital_source=src, always={(a["market"], a["config"])} if a else None, stop=halt,
-                    volume_cost=settings.volume_cost(over), lev_caps=settings.lev_caps(over)))
+                    volume_cost=settings.volume_cost(over), lev_caps=settings.lev_caps(over),
+                    budget_s=settings.scan_budget_s(over)))
                 save_scan(root, res)
                 hist = (st.get("history") or []) + [{"ts": time.time(), "took_s": res["took_s"], "workers": n,
                                                     "full": bool(res.get("day_jobs"))}]
                 _write_status(root, {"running": False, "workers": n, "history": hist[-HISTORY:]})
                 events = pilot.review(res)
                 log.info("scout_scan", data={"took_s": res["took_s"], "go": len(res["top"]), "capital": cap,
+                                             "left_jobs": res.get("left_jobs"), "pending": len(res.get("pending") or []),
                                              "capital_moved": moved, "workers": n,
                                              "rechecked_24h": res.get("rechecked_24h"),
                                              "events": [e["kind"] for e in events]})

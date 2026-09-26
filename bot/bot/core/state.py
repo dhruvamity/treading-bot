@@ -63,6 +63,7 @@ class LocalOrder:
         return max(Decimal(0), self.req.size - self.filled)
 
 
+FILL_IDS_KEPT = 50_000     # recent fill ids kept to drop replays (a reconnect re-sends minutes, not days)
 PENDING_GRACE_S = 10.0   # reconcile leaves an unacknowledged order alone this long after it was sent
 
 
@@ -88,8 +89,9 @@ class StateStore:
         self.by_venue_id: dict[tuple[Venue, str], str] = {}
         self.positions: dict[tuple[Venue, str], Decimal] = {}
         self.entry: dict[tuple[Venue, str], Decimal] = {}
-        self.fills: list[Fill] = []
-        self._fill_ids: set[tuple[str, str]] = set()
+        # fills already counted, to drop a replay after a reconnect: the recent ones only (the fills table keeps all,
+        # and INSERT OR IGNORE there). A list of every Fill and a set of every id grew for as long as the bot ran.
+        self._fill_ids: dict[tuple[str, str], None] = {}
         self._load()
 
     # ---------------------------------------------------------------- persistence
@@ -131,8 +133,9 @@ class StateStore:
                 continue
             self.positions[(Venue(venue), base)] = Decimal(size)
             self.entry[(Venue(venue), base)] = Decimal(entry)
-        for venue, tid in self._db.execute("SELECT venue, trade_id FROM fills"):
-            self._fill_ids.add((venue, tid))
+        for venue, tid in self._db.execute("SELECT venue, trade_id FROM fills ORDER BY ts_us DESC LIMIT ?",
+                                           (FILL_IDS_KEPT,)):
+            self._fill_ids[(venue, tid)] = None
 
     # ---------------------------------------------------------------- orders
     def on_intent(self, req: OrderRequest, session: str = "") -> LocalOrder:
@@ -195,8 +198,9 @@ class StateStore:
         key = (f.venue.value, f.trade_id)
         if key in self._fill_ids:
             return False
-        self._fill_ids.add(key)
-        self.fills.append(f)
+        self._fill_ids[key] = None
+        if len(self._fill_ids) > FILL_IDS_KEPT:
+            del self._fill_ids[next(iter(self._fill_ids))]   # the oldest (dicts keep insertion order)
         pk = (f.venue, f.base)
         old = self.positions.get(pk, Decimal(0))
         signed = f.size * f.side.sign

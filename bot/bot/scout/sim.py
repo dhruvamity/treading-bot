@@ -3,11 +3,15 @@
 Fill model (best bid/offer + trades only, so it works for every Arcus market we record):
 - The bot decides once a second from the best bid/offer at that second. New orders go live, and cancels take effect,
   `latency_ms` later. A post-only order that would cross the book when it arrives is rejected.
-- A resting order fills only when a taker trades THROUGH its price (a taker selling below our bid would have hit us
-  first). A trade AT our price does not count: we cannot know our place in that queue.
-- One taker order (Arcus sequenceNumber) fills us for at most what it printed strictly beyond our price: with our
-  order there, the taker would have used up the better levels and the queue at our price before reaching us. This
-  matters for large (leveraged) orders; we are assumed to be last in the queue, so it is a lower bound on fills.
+- A resting order fills when a taker trades THROUGH its price (a taker selling below our bid would have hit us
+  first). With SimParams.queue (the scout's model since 2026-09-26) a trade AT its price fills it too, once trades at
+  that price have used up the size that was shown ahead of it when it joined (never more than is shown later); an
+  order that improves the best price has nothing ahead. Without it, a trade at our price never counts (a lower
+  bound: the scan's model until then, which on the live BTC run and against the bot's own paper engine understated
+  the volume at the touch by 30-60% and overstated its cost 2-3x; the queue model came within ~5% of the engine).
+- One taker order (Arcus sequenceNumber) fills us for at most what it printed beyond the queue ahead of us (strictly
+  beyond our price without the queue model): with our order there, the taker would have used up the better levels
+  and that queue before reaching us. This matters for large (leveraged) orders.
 - Maker fee 0. A taker exit fills at the opposite best price, pays the taker fee, and pays `slip_bps` extra on any
   size beyond what the best level shows.
 
@@ -36,7 +40,7 @@ from __future__ import annotations
 import datetime as dt
 import math
 from collections import deque
-from dataclasses import asdict, dataclass, field
+from dataclasses import asdict, dataclass, field, replace
 from typing import Any
 
 import numpy as np
@@ -100,6 +104,14 @@ class Risk:
     def off_scale(self) -> float:
         return self.cap_off_usd / self.cap_usd if self.cap_off_usd and self.cap_usd else 1.0
 
+    def with_stops(self, stops: tuple[float, float, float] | None) -> Risk:
+        """The same sizes with a setting's own stops (Config.stops: position, daily, kill in % of the capital used)."""
+        if not stops:
+            return self
+        ps, ds, k = stops
+        return replace(self, pos_stop_usd=self.used * ps / 100, daily_stop_usd=self.used * ds / 100,
+                       kill_usd=self.used * k / 100)
+
 
 @dataclass(frozen=True)
 class Config:
@@ -123,6 +135,8 @@ class Config:
     max_hold_min: float = 120.0
     cooldown_min: float = 5.0
     safety: bool = True         # the live safety pause (session safety_pause); off = thresholds out of reach
+    stops: tuple[float, float, float] | None = None   # its own stops (position, daily, kill in % of capital); None:
+                                                      # the owner's (/set position_stop, daily_stop, kill)
     skip_et: tuple[str, ...] = ()   # "HH:MM-HH:MM" New York windows on NYSE trading days with no new quotes
 
 
@@ -147,6 +161,8 @@ class SimParams:
     liq_sigma: float = 4.0      # app risk.liq_distance_sigma
     liq_resume_sigma: float = 6.0
     front_of_queue: bool = False  # research only: prints AT our price fill us too (an upper bound on fills)
+    queue: bool = False           # research: an order at the best price waits behind the size shown there when it
+                                  # joined (never more than is shown later); prints at its price use that queue first
 
 
 @dataclass
@@ -206,6 +222,7 @@ class Order:
     live_from: int
     cancel_at: int = 1 << 62
     reduce_only: bool = False
+    ahead: float = math.inf     # queue ahead at our price (SimParams.queue); inf until our price is the best
 
 
 @dataclass
@@ -534,12 +551,18 @@ class Window:
     second, data age, and the safety-pause flags the live bot computes at 1 Hz (bot/core/marketdata.py, risk.py)."""
 
     def __init__(self, tape: DayTape, start_us: int, end_us: int, warmup_s: int = 2 * 3600,
-                 alive_ts: np.ndarray | None = None, rth: Any = None, holidays: list[str] | None = None) -> None:
+                 alive_ts: np.ndarray | None = None, rth: Any = None, holidays: list[str] | None = None,
+                 step_ms: int = 1000) -> None:
         """alive_ts: timestamps that prove the recorder was up (the busiest market's rows). A quiet book can go
         many minutes without a change; that is not missing data, a recorder outage is.
         rth: callable(seconds array) -> bool array, True while the underlying's session is open (RWA perps);
         None = always in session (crypto).
-        holidays: NYSE full-day holidays (ISO dates), for the skip windows (Config.skip_et)."""
+        holidays: NYSE full-day holidays (ISO dates), for the skip windows (Config.skip_et).
+        step_ms: how often the bot decides (1000: the live bot's 1 Hz loop; research: a faster loop). The safety pause
+        and the session hours stay on the 1-second grid, as live; quotes and fills use the step."""
+        if 1000 % step_ms:
+            raise ValueError("step_ms must divide 1000")
+        self.step, self.spp = step_ms * 1000, 1000 // step_ms
         b, tr = tape.bbo, tape.trades
         self._cols: tuple[list[Any], ...] | None = None
         self._skip: dict[tuple[str, ...], list[bool]] = {}
@@ -603,6 +626,29 @@ class Window:
         wide = self.ok & ~np.isnan(med) & (spread > 3 * med) & (spread - med > 1.0)
         cs = np.cumsum((move | wide).astype(np.int64))
         self.paused = (cs - np.concatenate([np.zeros(min(30, n), np.int64), cs[:-30]])) > 0
+        if self.spp > 1:
+            self._refine(n)
+
+    def _refine(self, n: int) -> None:
+        """Resample the per-second arrays to the decision step (the pause and session flags repeat per second)."""
+        b = self.bbo
+        m = n * self.spp
+        t = self.t = self.w0 + np.arange(m, dtype=np.int64) * self.step
+        sec = np.arange(m) // self.spp
+        self.paused, self.rth = self.paused[sec], self.rth[sec]
+        idx = np.searchsorted(b["ts"], t, side="right") - 1
+        have = idx >= 0
+        idx = np.clip(idx, 0, None)
+        self.bid = np.where(have, b["bid"][idx], np.nan)
+        self.ask = np.where(have, b["ask"][idx], np.nan)
+        self.bsz = np.where(have, b["bid_sz"][idx], 0.0)
+        self.asz = np.where(have, b["ask_sz"][idx], 0.0)
+        self.age = self.age[sec]
+        self.ok = have & (self.bid > 0) & (self.ask > self.bid) & self.ok[sec]
+        self.mid = np.where(self.ok, (self.bid + self.ask) / 2, np.nan)
+        self.spread_bps = self.spread_bps[sec]
+        self.trade_idx = np.searchsorted(self.tts, np.append(t, t[-1] + self.step), side="left")
+        self.n = m
 
     def columns(self) -> tuple[list[Any], ...]:
         """The per-second arrays as Python lists: t, ok, mid, bid, ask, age, paused, rth, bid size, ask size, trade
@@ -653,6 +699,7 @@ class Sim:
             return res
         policy = POLICIES[cfg.mode](cfg, risk, mi)
         T, OK, MID, BID, ASK, AGE, PAUSED, RTH, BSZ, ASZ, TIDX = w.columns()
+        dt_s = w.step / S                  # seconds per decision (1 = the live bot's 1 Hz loop)
         SKIP = w.skip(cfg.skip_et) if cfg.skip_et else None
         lat = int(sp.latency_ms * 1000)
         tick = mi.tick
@@ -904,7 +951,7 @@ class Sim:
                             cache_key, cache_q = key, q
                         desired = [(s, p, qq, tg, tg == "exit" or tg in ("sig_tp", "sig_time")) for s, p, qq, tg in q]
                         half_ticks = cfg.spacing_bps * BP * mid / tick
-                        res.quoting_s += 1
+                        res.quoting_s += dt_s
                         if tq:
                             taker(tq, i, t)
                     elif st["pos"] != 0:  # paused, stale or a skip window: the strategy's exit book
@@ -914,9 +961,9 @@ class Sim:
                 if desired or orders:
                     bud["mult"] = budget_mode(t)
                     if math.isinf(bud["mult"]):
-                        res.frozen_s += 1
+                        res.frozen_s += dt_s
                     elif bud["mult"] > 1:
-                        res.wide_s += 1
+                        res.wide_s += dt_s
                     fp = (tuple(desired), BID[i], ASK[i], bud["mult"], half_ticks, st["ov"])
                     if fp == last_fp:   # the diff did nothing last time and nothing it reads has changed
                         if t >= st["purge_at"]:
@@ -927,6 +974,15 @@ class Sim:
             # ---- trades during this second fill resting orders. One taker order (one sequenceNumber) is handled
             # whole: with our order resting at p, the taker would have used up the better levels and the queue at p
             # first, so only what it printed strictly beyond p could have filled us.
+            if sp.queue and orders and OK[i]:
+                for o in orders:
+                    if o.live_from > t or o.cancel_at <= t:
+                        continue
+                    best, shown = (BID[i], BSZ[i]) if o.side == BUY else (ASK[i], ASZ[i])
+                    if (o.side == BUY and o.px > best + tick / 2) or (o.side == SELL and o.px < best - tick / 2):
+                        o.ahead = 0.0                        # alone at a better price than the book shows
+                    elif abs(o.px - best) <= tick / 2:
+                        o.ahead = min(o.ahead, shown)        # joined behind what was shown; cancels ahead shrink it
             k, b_ = TIDX[i], TIDX[i + 1]
             if k == b_ or not orders:
                 continue
@@ -948,7 +1004,14 @@ class Sim:
                     cands.sort(key=lambda o: -o.px if ms == BUY else o.px)   # the taker reaches our best price first
                     taken = 0.0
                     for o in cands:
-                        if sp.front_of_queue:
+                        if sp.queue:
+                            same = np.abs(ppx - o.px) <= tick / 2
+                            at_px = float(psz[same].sum())
+                            use = min(at_px, o.ahead)
+                            o.ahead -= use
+                            thru = float(psz[~same & (ppx < o.px)].sum() if ms == BUY else psz[~same & (ppx > o.px)].sum())
+                            beyond = at_px - use + thru
+                        elif sp.front_of_queue:
                             beyond = float(psz[ppx <= o.px].sum() if ms == BUY else psz[ppx >= o.px].sum())
                         else:
                             beyond = float(psz[ppx < o.px].sum() if ms == BUY else psz[ppx > o.px].sum())
@@ -974,5 +1037,5 @@ class Sim:
             res.end_pos_usd = pos * last_mid
         res.pnl = end_eq - (start_eq if start_eq is not None else end_eq)
         res.tail_pnl = end_eq - (tail_eq0 if tail_eq0 is not None else end_eq)
-        res.hours = float(w.ok[w.t >= w.start_us].sum()) / 3600
+        res.hours = float(w.ok[w.t >= w.start_us].sum()) * dt_s / 3600
         return res

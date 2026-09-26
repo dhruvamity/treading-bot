@@ -9,6 +9,7 @@ Order updates: state -> order manager in-flight -> critical rejects (SELF_TRADE 
 
 from __future__ import annotations
 
+import json
 import math
 from collections import deque
 from dataclasses import dataclass, field, replace
@@ -48,6 +49,8 @@ class EngineStats:
 
 
 REFUSED_ALERT_PER_MIN = 30   # pre-trade refusals in one minute that make an alert
+RESIZE_MOVE = 0.25           # re-size within the day once the equity is this far from what the sizes were taken on
+RESIZE_CHECK_S = 3600        # ... checked at most this often
 BLOCKS = (("safety pause", "safety pause"), ("skip window", "skip window"), ("daily", "daily stop"),
           ("position stop", "position stop"), ("cooling down", "cooldown"), ("budget", "order budget"),
           ("event window", "event window"), ("repeated rejects", "rejects"), ("safe mode", "safe mode"),
@@ -136,6 +139,10 @@ class SessionEngine:
         self._refused_alert_us: dict[str, int] = {}      # last alert per check
         self.session_start_equity: Decimal | None = None
         self.run_pnl: Decimal | None = None             # the whole run's PnL when it has a loss limit (sl=)
+        self.day_pnl: Decimal | None = None             # the UTC day's PnL, carried across restarts of the run
+        self._day_carry: dict[str, Decimal] = {}        # ... what earlier processes made that day
+        self._day_saved: tuple[bool, str | None] | None = None
+        self._day_saved_us = 0
         self._run_carry: Decimal | None = None          # ... that earlier processes of the same run made
         self._run_saved_us = 0
         self.day_start_equity: dict[str, Decimal] = {}
@@ -153,6 +160,7 @@ class SessionEngine:
         # are taken on, re-read from the account's equity at start and at 00:00 UTC
         self.size_capital = self.capital
         self.sized_day: str | None = None
+        self._sized_us = 0
         self.too_small = ""
         self.settings_dir: Path | None = None   # the runner sets it: the owner's Telegram settings (common/settings)
         self._wire_risk_context()
@@ -204,27 +212,35 @@ class SessionEngine:
         self.state.kv_set(f"acct:{v.value}", f"{equity},{free}")
 
     def resize(self, now_us: int) -> None:
-        """Sessions with `sizing.follow_equity`: at the first account read and at each 00:00 UTC, size from the
-        account's equity x capital_frac, bucketed, at most max_capital_usd and at most 1.25x the last capital a GO
-        backtest covered (the session's, or a newer one the scout recorded for this market in kv "sizing_ok",
-        which every new approval clears)."""
+        """Sessions with `sizing.follow_equity`: size from the account's equity x capital_frac, bucketed, at most
+        max_capital_usd and, for the lists' picks, at most 1.25x the last capital a GO backtest covered (the
+        session's, or a newer one the scout recorded for this market in kv "sizing_ok", which every new approval
+        clears); the owner's own pick (cap_to_backtest false) follows the balance. At the first account read, at each
+        00:00 UTC, and within the day when the equity has moved RESIZE_MOVE or more from what the sizes were taken on
+        (a deposit, a withdrawal, a large loss), checked at most once an hour."""
         s = self.session
         if s.sizing is None or not s.sizing.follow_equity:
             return
         from bot.common.time import utc_date_str
 
         day = utc_date_str(now_us)
-        if day == self.sized_day:
+        first = day != self.sized_day
+        if not first and now_us - self._sized_us < RESIZE_CHECK_S * US_PER_S:
             return
         eq = float(self._account(self.venue).equity)
         if eq <= 0:
             return  # no account read yet
-        self.sized_day = day
         z, fixed = self._recipe(s)
         ok, _, ok_market = (self.state.kv_get("sizing_ok") or "").partition(":")
-        covered = max(z.backtest_capital_usd, float(ok) if ok and ok_market == self.base else 0.0)
+        covered = max(z.backtest_capital_usd, float(ok) if ok and ok_market == self.base else 0.0) \
+            if z.cap_to_backtest else None
         cap = sizing.target_capital(min(eq, fixed) if fixed else eq, frac=z.capital_frac,
                                     max_capital=z.max_capital_usd, covered=covered)
+        self._sized_us = now_us
+        if not first and not self.too_small and self.size_capital and \
+                abs(cap / float(self.size_capital) - 1) < RESIZE_MOVE:
+            return
+        self.sized_day = day
         if cap < z.min_capital_usd:
             self.too_small = (f"equity ${eq:,.2f} is under the ${z.min_capital_usd:,.2f} {self.base} needs at this "
                               "leverage (Arcus minimum order)")
@@ -240,10 +256,14 @@ class SessionEngine:
         if lim is not None:
             self.risk.market_limits[(self.venue, self.base)] = replace(
                 lim, position_cap_usd=Decimal(str(s.inventory_cap_usd * 1.25)))
-        msg = (f"sized for ${out.capital:,.2f} (equity ${eq:,.2f}, backtests cover ${covered:,.2f}): "
+        why = f"backtests cover ${covered:,.2f}" if covered is not None else "follows the balance"
+        msg = (f"sized for ${out.capital:,.2f} (equity ${eq:,.2f}, {why}): "
                f"order ${s.order_size_usd:,.2f}, cap ${s.inventory_cap_usd:,.2f}, stops ${s.pos_stop_usd:,.2f} "
                f"position / ${s.daily_stop_usd:,.2f} day / ${s.kill_usd:,.2f} kill")
-        self.decisions.record("resize", msg, venue=self.venue.value, market=self.base, session=self.sid, ts_us=now_us)
+        self.decisions.record("resize", msg, venue=self.venue.value, market=self.base, session=self.sid, ts_us=now_us,
+                              capital=out.capital, order=s.order_size_usd, cap=s.inventory_cap_usd,
+                              cap_off=s.inventory_cap_off_usd, pos_stop=s.pos_stop_usd, daily_stop=s.daily_stop_usd,
+                              kill=s.kill_usd)   # the sizes it trades: `bot diagnose --replay` backtests with them
         log.info("resize", venue=self.venue.value, market=self.base, session=self.sid,
                  data={"equity": eq, "capital": out.capital, "order": s.order_size_usd, "cap": s.inventory_cap_usd})
 
@@ -297,6 +317,7 @@ class SessionEngine:
     async def tick(self, now_us: int) -> StrategyOutput | None:
         self.now_us = now_us
         self.stats.ticks += 1
+        self.resume_if_cleared(now_us)
         state = self.clock.update(now_us)
         if state is SessionState.DONE or self.stopped:
             return None
@@ -517,6 +538,12 @@ class SessionEngine:
             mark = view.mark or view.mid()
             assert mark is not None
             self.ledger.mark(self.venue, self.base, mark, now_us)
+        if mark is not None:
+            diff = self.ledger.sync_position(self.venue, self.base, self.state.position(self.venue, self.base), mark)
+            if diff:
+                self.decisions.record("ledger_sync", f"PnL book set to the known position ({diff:+} {self.base} at "
+                                      f"{mark}): restored, adopted or reconciled", venue=self.venue.value,
+                                      market=self.base, session=self.sid, ts_us=now_us)
         equity = self.capital + self.ledger.breakdown(self.venue, self.base, mark).net
         if self.session_start_equity is None:
             self.session_start_equity = equity
@@ -525,16 +552,19 @@ class SessionEngine:
         day = utc_date_str(now_us)
         self.day_start_equity.setdefault(day, equity)
         self.risk.roll_day(now_us)
+        self._restore_day(day)
         s = self.session
         if s.max_loss_usd:
             self.run_pnl = self._run_total(equity - self.session_start_equity, now_us)
+        self.day_pnl = self._day_carry.get(day, Decimal(0)) + equity - self.day_start_equity[day]
         for d in self.risk.on_pnl(venue=self.venue, session_id=self.sid, session_pnl=equity - self.session_start_equity,
                                   session_margin=self.size_capital, stop_loss_pct=s.stop_loss_pct,
-                                  take_profit_pct=s.take_profit_pct, day_pnl=equity - self.day_start_equity[day],
+                                  take_profit_pct=s.take_profit_pct, day_pnl=self.day_pnl,
                                   capital=self.size_capital, equity=equity, ts_us=now_us,
                                   daily_stop_usd=_usd(s.daily_stop_usd), kill_usd=_usd(s.kill_usd),
                                   run_pnl=self.run_pnl, run_limit_usd=_usd(s.max_loss_usd)):
             await self.execute(d, now_us)
+        self._save_day(day, now_us)
         # liquidation distance (A6.7)
         pos = self.state.position(self.venue, self.base)
         if pos != 0 and view is not None and view.mid() is not None:
@@ -546,6 +576,59 @@ class SessionEngine:
                                                       sigma_1h=view.sigma_1h())
             if dl:
                 await self.execute(dl, now_us)
+
+    def resume_if_cleared(self, now_us: int) -> None:
+        """After a drawdown kill the engine stops ticking; a manual resume clears the risk engine's stop, and this
+        starts quoting again (it did not: /resumeaftersl after a kill did nothing). A run past its own loss limit
+        (sl=) is the exception: the stop comes back and the engine stays stopped."""
+        if not self.stopped or self.risk.all_stopped:
+            return
+        lim = self.session.max_loss_usd
+        if lim and self.run_pnl is not None and self.run_pnl <= -Decimal(str(lim)):
+            self.risk.all_stopped = f"this run lost ${-self.run_pnl:.2f}, its limit is ${lim:.2f}"
+            return
+        self.stopped = False
+        if self.clock.state is SessionState.EXITING:
+            self.clock.state = SessionState.RUNNING
+        self.decisions.record("resume", "quoting again after a manual resume", venue=self.venue.value,
+                              market=self.base, session=self.sid, ts_us=now_us)
+
+    def _day_key(self) -> str:
+        return f"day:{self.session.run_id}" if self.session.run_id else ""
+
+    def _restore_day(self, day: str) -> None:
+        """At the first check of a UTC day in this process: the day's PnL so far and its daily-stop state from earlier
+        processes of the same run (kv day:<run_id>). A crash or a restart mid-day used to start the day at zero and
+        lift a daily stop; a new run (a new run_id) starts fresh, as the owner asked for it."""
+        if day in self._day_carry:
+            return
+        self._day_carry[day] = Decimal(0)
+        key = self._day_key()
+        raw = self.state.kv_get(key) if key else None
+        try:
+            d = json.loads(raw) if raw else {}
+        except ValueError:
+            d = {}
+        if d.get("day") != day:
+            return
+        self._day_carry[day] = Decimal(str(d.get("pnl") or 0))
+        if d.get("stopped"):
+            self.risk.venue_stopped_day[self.venue] = day
+        if d.get("rearm") is not None:
+            self.risk.day_rearm[self.venue] = (day, Decimal(str(d["rearm"])))
+
+    def _save_day(self, day: str, now_us: int) -> None:
+        """Every 5 s, and at once when the daily stop or its re-arm changes."""
+        key = self._day_key()
+        if not key or self.day_pnl is None:
+            return
+        rearm = self.risk.day_rearm.get(self.venue)
+        state = (self.risk.venue_stopped_day.get(self.venue) == day, str(rearm[1]) if rearm and rearm[0] == day else None)
+        if state == self._day_saved and now_us - self._day_saved_us < 5 * US_PER_S:
+            return
+        self._day_saved, self._day_saved_us = state, now_us
+        self.state.kv_set(key, json.dumps({"day": day, "pnl": str(self.day_pnl), "stopped": state[0],
+                                           "rearm": state[1]}))
 
     def _run_total(self, pnl: Decimal, now_us: int) -> Decimal:
         """The run's PnL across restarts: what earlier processes of this run (the pilot's run_id) made, kept in kv

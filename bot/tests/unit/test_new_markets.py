@@ -257,3 +257,44 @@ def test_the_scan_skips_a_malformed_listing_instead_of_failing(tmp_path: Path) -
     p = tmp_path / "markets.json"
     p.write_text(json.dumps({"markets": [ok, bad, pre]}))
     assert list(load_markets(p)) == ["QQQ-USD"]
+
+
+def test_a_scan_stops_at_its_time_budget_and_the_next_scan_carries_on(tmp_path: Path, monkeypatch: Any) -> None:
+    """2026-09-26: a scan at a new capital ran for hours. Full days now run busiest market first, most recent day
+    first, for at most the budget; the rest waits for the next scan (finished days are cached), and a market with no
+    finished day yet is `pending`: not ranked, rather than ranked on nothing."""
+    import concurrent.futures as cf
+    import time as _t
+
+    from bot.scout import scan as sc
+
+    ran: list[tuple[str, int]] = []
+
+    def fake_window(args: tuple[Any, ...]) -> dict[str, list[dict[str, Any]]]:
+        ran.append((args[1], args[2]))
+        _t.sleep(0.2)
+        return {sc.risk_key(r): [{"config": n, "pnl": 0.0} for n in args[5]] for r in args[6]}
+
+    monkeypatch.setattr(sc, "_run_window", fake_window)
+    monkeypatch.setattr(sc, "ProcessPoolExecutor",
+                        lambda max_workers, initializer: cf.ThreadPoolExecutor(1))   # in-process, one at a time
+    r = Risk.for_capital(100, 10).__dict__ | {"min_capital_usd": 0.0}
+    mk = ["NVDA-USD", "QQQ-USD", "BTC-USD"]
+    flow = {"BTC-USD": 9e7, "QQQ-USD": 1e6, "NVDA-USD": 3e5}
+
+    def scanner(budget_s: float) -> Scanner:
+        s = Scanner(tmp_path, capital=100, workers=1, budget_s=budget_s, shortlist=False)
+        monkeypatch.setattr(s, "full_days", lambda m, now: ["2026-09-21", "2026-09-22"])
+        monkeypatch.setattr(s, "order_max", lambda m, days: None)
+        monkeypatch.setattr(s, "risks_for", lambda meta, mi, om: [r])
+        monkeypatch.setattr(s, "flow", lambda m, days: flow[m])
+        s.backtest(mk, day_start_us("2026-09-23"), {m: sc.MarketInfo(0.01, 0.001) for m in mk}, {m: {} for m in mk})
+        return s
+
+    first = scanner(0.05)
+    assert ran[0] == ("BTC-USD", day_start_us("2026-09-22"))       # the busiest market, its latest day, first
+    assert first.day_jobs >= 1 and first.left_jobs >= 1 and first.day_jobs + first.left_jobs == 6
+    assert "BTC-USD" not in first.pending and "NVDA-USD" in first.pending
+    assert first.cache_path("BTC-USD", "2026-09-22", sc.risk_key(r)).exists()
+    second = scanner(0)                                             # no limit: only what was left, from the cache on
+    assert second.day_jobs == first.left_jobs and not second.pending

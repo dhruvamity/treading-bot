@@ -70,8 +70,9 @@ def test_the_owner_caps_btc_and_eth_leverage_from_telegram(tmp_path: Path) -> No
     assert settings.show("crypto_lev", "max") == "Arcus max" and settings.show("crypto_lev", 20.0) == "20x"
     btc = {**_meta("BTC-USD", "0.025"), "markPrice": "86000", "minOrderNotional": "5", "minOrderSize": "0.0001"}
     mi = MarketInfo(0.1, 0.0001, 5.0, 0.0001)
-    assert [r["leverage"] for r in Scanner(tmp_path, lev_caps=caps).risks_for(btc, mi)] == [20, 10, 5, 2]
-    assert [r["leverage"] for r in Scanner(tmp_path).risks_for(btc, mi)] == [40, 20, 10, 5, 2]
+    assert [r["leverage"] for r in Scanner(tmp_path, lev_caps=caps, ladder=True).risks_for(btc, mi)] == [20, 10, 5, 2]
+    assert [r["leverage"] for r in Scanner(tmp_path, ladder=True).risks_for(btc, mi)] == [40, 20, 10, 5, 2]
+    assert [r["leverage"] for r in Scanner(tmp_path).risks_for(btc, mi)] == [40]     # default: the maximum only
 
 
 def test_session_mask_follows_the_underlying_hours() -> None:

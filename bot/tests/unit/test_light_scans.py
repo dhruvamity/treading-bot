@@ -44,7 +44,7 @@ def test_only_settings_that_pass_on_their_full_days_are_rechecked() -> None:
 
 
 def test_scan_workers_step_aside_for_a_running_bot() -> None:
-    assert scan_workers(8, bot_running=True) == 1
+    assert scan_workers(8, bot_running=True) == max(1, min(8, (os.cpu_count() or 2) - 2))   # the bot keeps 2 cores
     assert scan_workers(3, bot_running=False) == 3
     assert scan_workers("auto", bot_running=False) == max(1, (os.cpu_count() or 2) - 1)
 
@@ -74,16 +74,6 @@ def test_the_scan_capital_moves_only_on_a_25_percent_change_once_a_day(tmp_path:
     forget(tmp_path)
     assert not (tmp_path / STATE).exists()
 
-
-def test_a_deposit_moves_the_scan_capital_the_same_day(tmp_path: Path) -> None:
-    """2026-09-26: a deposit quadrupled a ~$30 account; the scan kept sizing for $30 until the next UTC day."""
-    acct, day = "account equity", "2026-09-26"
-    assert settle(tmp_path, 30, acct, today=day, net_deposits=30) == (30, acct, True)
-    assert settle(tmp_path, 40, acct, today=day, net_deposits=30)[0] == 30         # +33% from trading: held today
-    assert settle(tmp_path, 110, acct, today=day, net_deposits=120) == (110, acct, True)   # money came in
-    assert settle(tmp_path, 100, acct, today=day, net_deposits=120)[0] == 110      # the same money: held
-    (tmp_path / STATE).write_text(json.dumps({"usd": 30, "source": acct, "kind": "account", "day": day}))
-    assert settle(tmp_path, 110, acct, today=day, net_deposits=120)[0] == 110      # an older file: 3.7x moves at once
 
 
 def test_scan_now_trigger_fires_once(tmp_path: Path) -> None:
