@@ -11,12 +11,13 @@ from zoneinfo import ZoneInfo
 import numpy as np
 import pytest
 
+from bot.common import settings
 from bot.common.config import MMSession, SessionWindowCfg
 from bot.core.book import ArcusBookSync, L2Book, SyncResult
 from bot.core.marketdata import MarketView
 from bot.scout.pilot import session_for
 from bot.scout.record import ScoutRecorder
-from bot.scout.scan import BY_NAME, LEV_CAPS, leverages, max_leverage, session_mask
+from bot.scout.scan import BY_NAME, Scanner, leverages, max_leverage, session_mask
 from bot.scout.sim import MarketInfo, Risk, Sim, Window
 from bot.scout.tape import DEPTH_N, BboBuffer, DepthBuffer, TapeStore, TradeBuffer
 from bot.strategies import make_strategy
@@ -48,11 +49,29 @@ def test_sizes_follow_leverage() -> None:
 
 def test_max_leverage_and_the_ladder() -> None:
     assert max_leverage(_meta("SPY-USD", "0.02", "0.03")) == (50.0, 33.33)
-    assert max_leverage(_meta("BTC-USD", "0.025")) == (LEV_CAPS["BTC-USD"], LEV_CAPS["BTC-USD"])   # 40x capped
-    assert max_leverage(_meta("ETH-USD", "0.04")) == (20.0, 20.0)                                  # 25x capped
+    assert max_leverage(_meta("BTC-USD", "0.025")) == (40.0, 40.0)                # the Arcus maximum, uncapped
+    assert [x for x, _ in leverages(_meta("BTC-USD", "0.025"))] == [40.0, 20.0, 10.0, 5.0, 2.0]
+    assert max_leverage(_meta("ETH-USD", "0.04")) == (25.0, 25.0)
     assert [x for x, _ in leverages(_meta("GLD-USD", "0.04", "0.06"))] == [25.0, 20.0, 10.0, 5.0, 2.0]
     assert [x for x, _ in leverages(_meta("HOOD-USD", "0.1", "0.15"))] == [10.0, 5.0, 2.0]
     assert leverages(_meta("HOOD-USD", "0.1", "0.15"))[0] == (10.0, 6.67)
+
+
+def test_the_owner_caps_btc_and_eth_leverage_from_telegram(tmp_path: Path) -> None:
+    """/set crypto_lev: BTC and ETH at most that leverage in the scan; max (the default) = what Arcus allows."""
+    assert settings.parse("crypto_lev", "40x") == 40 and settings.parse("crypto_lev", "MAX") == "max"
+    with pytest.raises(ValueError):
+        settings.parse("crypto_lev", "60")
+    assert settings.lev_caps({}) == {} and settings.lev_caps({"crypto_lev": "max"}) == {}
+    caps = settings.lev_caps({"crypto_lev": 20})
+    assert caps == {"BTC-USD": 20.0, "ETH-USD": 20.0}
+    assert max_leverage(_meta("BTC-USD", "0.025"), caps) == (20.0, 20.0)
+    assert max_leverage(_meta("SPY-USD", "0.02", "0.03"), caps) == (50.0, 33.33)   # every other market: Arcus's
+    assert settings.show("crypto_lev", "max") == "Arcus max" and settings.show("crypto_lev", 20.0) == "20x"
+    btc = {**_meta("BTC-USD", "0.025"), "markPrice": "86000", "minOrderNotional": "5", "minOrderSize": "0.0001"}
+    mi = MarketInfo(0.1, 0.0001, 5.0, 0.0001)
+    assert [r["leverage"] for r in Scanner(tmp_path, lev_caps=caps).risks_for(btc, mi)] == [20, 10, 5, 2]
+    assert [r["leverage"] for r in Scanner(tmp_path).risks_for(btc, mi)] == [40, 20, 10, 5, 2]
 
 
 def test_session_mask_follows_the_underlying_hours() -> None:

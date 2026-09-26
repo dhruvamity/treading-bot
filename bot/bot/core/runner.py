@@ -412,6 +412,8 @@ class BotRunner:
                              "capital": str(e.capital), "size_capital": str(e.size_capital),
                              "stops": {k: getattr(e.session, f, None) for k, f in (
                                  ("position", "pos_stop_usd"), ("daily", "daily_stop_usd"), ("kill", "kill_usd"))},
+                             "run": {"pnl": str(e.run_pnl or 0), "limit": e.session.max_loss_usd}
+                             if e.session.max_loss_usd else None,
                              "ticks": e.stats.ticks, "actions": e.stats.actions,
                              "rejects": e.stats.rejects, "errors": e.stats.errors, "quotes": asdict(e.quotes)})
         return {"ts_us": now, "mode": self.mode.value, "started_us": self.started_us, "markets": markets,

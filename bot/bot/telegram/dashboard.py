@@ -66,6 +66,7 @@ class Dash:
     positions: list[dict[str, Any]] = field(default_factory=list)   # views.positions_of: market, size, mark, entry
     open_orders: int = 0
     stops: dict[str, float] = field(default_factory=dict)          # position / daily / kill, in dollars
+    run: dict[str, Any] | None = None                              # {pnl, limit}: the run's loss limit (sl=)
     quotes: dict[str, Any] = field(default_factory=dict)            # engine QuoteStats of the day (first session)
     # capital
     equity: float | None = None
@@ -135,6 +136,8 @@ def collect(control: Control, *, now: float | None = None, account: int = 0,
                     d.stops[k] = d.stops.get(k, 0.0) + float(x)
             if s.get("quotes") and not d.quotes:
                 d.quotes = s["quotes"]
+            if s.get("run") and not d.run:
+                d.run = s["run"]
     _deployed(d, state_dir)
 
     # the account: live uses the real one (bot, own read, history); paper only what the paper bot publishes
@@ -341,6 +344,10 @@ def render(d: Dash, *, html: bool = True, frame: str = "live") -> str:
                                                                               else ""))
     else:
         rows.append(e("PnL — no balance reading yet today"))
+    if d.run and d.run.get("limit"):
+        pnl, lim = float(d.run.get("pnl") or 0), float(d.run["limit"])
+        rows.append(e(f"This run {usd(pnl)} · stops at -${lim:,.2f}" + (f" ({-pnl / lim * 100:.0f}% used)" if pnl < 0
+                                                                        else "")))
     cards.append(card("Today", rows))
 
     # position

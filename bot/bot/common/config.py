@@ -238,6 +238,9 @@ class MMSession(_Model):
     daily_stop_usd: float | None = None  # day PnL at or below -X: no new orders until 00:00 UTC, close the position
     pos_stop_usd: float | None = None    # the open position is down X: close it (maker, then taker), then cool down
     kill_usd: float | None = None        # equity X below its peak: flatten and stop until a manual resume
+    max_loss_usd: float | None = None    # this run may lose X in all (/run ... sl=X): then flatten and stop. The
+                                         # daily stop, kill and session stop never stop it sooner
+    run_id: str = ""                     # one deployment (the pilot writes it): the run's loss survives restarts
     cooldown_s: float = 60               # pause after a position stop
     sizing: SizingCfg | None = None      # follow the account's equity (pilot sessions); None = the fixed numbers above
 

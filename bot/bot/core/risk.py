@@ -112,6 +112,9 @@ class RiskEngine:
     # band/OI check lifts on its own. Quoting stops; the strategy's reduce-only exit book keeps working.
     operator_paused: dict[tuple[Venue, str], str] = field(default_factory=dict)
     equity_peak: dict[str, Decimal] = field(default_factory=dict)
+    # a manual resume after a daily stop: the rest of that UTC day counts from the day PnL at the resume
+    day_rearm: dict[Venue, tuple[str, Decimal]] = field(default_factory=dict)
+    last_day_pnl: dict[Venue, tuple[str, Decimal]] = field(default_factory=dict)
 
     def _log(self, d: RiskDecision, ts_us: int | None = None) -> RiskDecision:
         if self.decisions is not None:
@@ -206,9 +209,17 @@ class RiskEngine:
     def on_pnl(self, *, venue: Venue, session_id: str, session_pnl: Decimal, session_margin: Decimal,
                stop_loss_pct: float, take_profit_pct: float | None, day_pnl: Decimal, capital: Decimal,
                equity: Decimal, ts_us: int, daily_stop_usd: Decimal | None = None,
-               kill_usd: Decimal | None = None) -> list[RiskDecision]:
+               kill_usd: Decimal | None = None, run_pnl: Decimal | None = None,
+               run_limit_usd: Decimal | None = None) -> list[RiskDecision]:
+        """run_limit_usd: the owner's loss limit for the whole run (/run ... sl=X). It replaces the session stop and
+        lifts the daily stop and the kill to at least X, so nothing but the limit (and the position stop) ends it."""
         out: list[RiskDecision] = []
-        if session_margin > 0 and session_pnl <= -session_margin * Decimal(stop_loss_pct) / 100:
+        run = run_limit_usd if run_limit_usd is not None and run_limit_usd > 0 else None
+        if run is not None and run_pnl is not None and run_pnl <= -run and not self.all_stopped:
+            self.all_stopped = f"this run lost ${-run_pnl:.2f}, its limit is ${run:.2f}"
+            out.append(self._log(RiskDecision("run_loss", RiskAction.STOP_ALL, None, None, self.all_stopped,
+                                              "start a new run (/run ... sl=)"), ts_us))
+        if run is None and session_margin > 0 and session_pnl <= -session_margin * Decimal(stop_loss_pct) / 100:
             out.append(self._log(RiskDecision("session_sl", RiskAction.FLATTEN_SESSION, venue, None,
                                               f"session {session_id} loss ${-session_pnl:.2f} >= {stop_loss_pct}% of margin",
                                               "next scheduled session"), ts_us))
@@ -218,15 +229,22 @@ class RiskEngine:
                                               "next scheduled session"), ts_us))
         day = utc_date_str(ts_us)
         day_lim = daily_stop_usd if daily_stop_usd is not None else capital * Decimal(self.limits.daily_loss_pct) / 100
-        if day_lim > 0 and day_pnl < -day_lim and self.venue_stopped_day.get(venue) != day:
+        if run is not None:
+            day_lim = max(day_lim, run)
+        self.last_day_pnl[venue] = (day, day_pnl)
+        rearm = self.day_rearm.get(venue)
+        since = rearm[1] if rearm and rearm[0] == day else Decimal(0)
+        if day_lim > 0 and day_pnl - since < -day_lim and self.venue_stopped_day.get(venue) != day:
             self.venue_stopped_day[venue] = day
             out.append(self._log(RiskDecision("daily_loss", RiskAction.STOP_VENUE_DAY, venue, None,
-                                              f"day loss ${-day_pnl:.2f} > daily stop ${day_lim:.2f}",
-                                              "manual or next UTC day"), ts_us))
+                                              f"day loss ${-(day_pnl - since):.2f}{' since the resume' if since else ''}"
+                                              f" > daily stop ${day_lim:.2f}", "manual or next UTC day"), ts_us))
         key = venue.value
         peak = max(self.equity_peak.get(key, equity), equity)
         self.equity_peak[key] = peak
         dd_lim = kill_usd if kill_usd is not None else capital * Decimal(self.limits.drawdown_pct) / 100
+        if run is not None:
+            dd_lim = max(dd_lim, run)
         if dd_lim > 0 and (peak - equity) > dd_lim and not self.all_stopped:
             self.all_stopped = f"drawdown ${peak - equity:.2f} > ${dd_lim:.2f} from the peak"
             out.append(self._log(RiskDecision("drawdown", RiskAction.STOP_ALL, None, None, self.all_stopped,
@@ -238,6 +256,9 @@ class RiskEngine:
         for v, d in list(self.venue_stopped_day.items()):
             if d != day:
                 del self.venue_stopped_day[v]
+        for v, (d, _) in list(self.day_rearm.items()):
+            if d != day:
+                del self.day_rearm[v]
 
     def safety_pause(self, view: MarketView, now_us: int) -> RiskDecision | None:
         """6 sigma 1-s move, spread > 3x its 1 h median, or displayed depth < 30% of median -> pause quotes.
@@ -345,8 +366,16 @@ class RiskEngine:
                                       "manual (bot resume) after investigation"))
 
     def resume(self, venue: Venue | None = None, *, all_: bool = False) -> None:
+        """Manual resume (Telegram /resumeaftersl, `bot resume`). With all_: the drawdown stop, and a daily stop,
+        which re-arms from the day PnL now: the rest of the UTC day may lose one more daily stop. A run that reached
+        its own loss limit stops again at the next check."""
         if all_:
             self.all_stopped = None
+            for v in [venue] if venue else list(self.venue_stopped_day):
+                day = self.venue_stopped_day.pop(v, None)
+                if day is not None:
+                    last = self.last_day_pnl.get(v)
+                    self.day_rearm[v] = (day, last[1] if last and last[0] == day else Decimal(0))
         if venue is None:
             self.safe_mode.clear()
             self.venue_crit_stop.clear()

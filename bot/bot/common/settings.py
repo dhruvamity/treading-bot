@@ -17,12 +17,13 @@ from bot.common.config import SizingDefaults
 
 FILE = "settings.json"
 DEFAULT_VOLUME_COST = 0.15   # dollars per $1,000 of volume the volume lists may cost (about 1.5 bp)
+CRYPTO = ("BTC-USD", "ETH-USD")   # the markets /set crypto_lev caps
 
 
 @dataclass(frozen=True)
 class Setting:
     name: str
-    kind: str          # money_auto | money_none | pct | minutes | workers | per1k
+    kind: str          # money_auto | money_none | pct | minutes | workers | per1k | lev
     lo: float
     hi: float
     help: str
@@ -50,6 +51,9 @@ SETTINGS: dict[str, Setting] = {s.name: s for s in (
     Setting("volume_cost", "per1k", 0.01, 5,
             "The most the Volume and Aggressive Mid lists may cost: dollars lost per $1,000 traded (0.15 = 1.5 bp)",
             "those lists at once; the next scan also re-checks the last 24 h of the settings it lets in"),
+    Setting("crypto_lev", "lev", 1, 50,
+            "Highest leverage the scan tests on BTC and ETH: max = what Arcus allows (BTC 40x, ETH 25x), or a number "
+            "such as 20", "next scan (it backtests the new leverage on every recorded day)"),
 )}
 
 
@@ -77,6 +81,10 @@ def parse(name: str, text: str) -> Any:
         return None
     if s.kind == "workers" and t == "auto":
         return "auto"
+    if s.kind == "lev":
+        if t == "max":
+            return "max"
+        t = t.removesuffix("x")
     try:
         v = float(t)
     except ValueError:
@@ -132,12 +140,20 @@ def volume_cost(overrides: dict[str, Any]) -> float:
     return float(overrides.get("volume_cost") or DEFAULT_VOLUME_COST)
 
 
+def lev_caps(overrides: dict[str, Any]) -> dict[str, float]:
+    """The owner's leverage cap per market (/set crypto_lev): BTC and ETH at that number; none at "max" (Arcus's)."""
+    v = overrides.get("crypto_lev")
+    return {} if v in (None, "max") else {m: float(v) for m in CRYPTO}
+
+
 def show(name: str, value: Any) -> str:
     s = SETTINGS[name]
     if value is None:
         return "none"
     if value == "auto":
         return "auto"
+    if s.kind == "lev":
+        return "Arcus max" if value == "max" else f"{float(value):g}x"
     if s.kind in ("money_auto", "money_none"):
         return f"${float(value):,.2f}"
     if s.kind == "pct":
@@ -153,4 +169,5 @@ def defaults(base: SizingDefaults, every_min: float, workers: int | str | None) 
     """What each setting is when the owner has not changed it."""
     return {"capital": base.capital_usd, "trade_share": base.capital_frac * 100, "max_capital": base.max_capital_usd,
             "position_stop": base.position_stop_pct, "daily_stop": base.daily_stop_pct, "kill": base.kill_pct,
-            "scan_every": every_min, "scan_workers": workers or "auto", "volume_cost": DEFAULT_VOLUME_COST}
+            "scan_every": every_min, "scan_workers": workers or "auto", "volume_cost": DEFAULT_VOLUME_COST,
+            "crypto_lev": "max"}

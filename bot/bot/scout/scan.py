@@ -4,9 +4,10 @@ Every config runs on every market, one UTC day at a time (each day starts flat, 
 the bot trades with (the account's equity, bucketed; bot/common/sizing.py) and its stops as % of that capital.
 Completed days are cached per capital bucket; the current day is re-run on each scan.
 
-Leverage: each market is tested at its maximum Arcus leverage (1 / initialMarginFraction; BTC and ETH capped at 20x)
-and, below that, at 20x, 10x, 5x and 2x. The leverage sets the size (sim.Risk.for_capital): position up to capital x
-leverage, orders of half the inventory cap. RWA perps use their off-hours maximum outside the underlying's session.
+Leverage: each market is tested at its maximum Arcus leverage (1 / initialMarginFraction; /set crypto_lev can cap
+BTC and ETH) and, below that, at 20x, 10x, 5x and 2x. The leverage sets the size (sim.Risk.for_capital): position up
+to capital x leverage, orders of half the inventory cap. RWA perps use their off-hours maximum outside the
+underlying's session.
 Two limits: a leverage whose off-hours order would fall under 1.2x the Arcus minimum order needs more capital and is
 skipped; and one order never exceeds the market's liquidity ceiling (the 99th percentile of taker-order notional over
 the recorded days), past which the sizes stop growing and the stops apply to the capital actually used.
@@ -51,7 +52,6 @@ from bot.scout.tape import US_DAY, TapeStore, day_start_us, day_str
 
 SIM_VERSION = "7"          # bump when the simulator changes, so cached day results are recomputed
 ALIVE_MARKET = "BTC-USD"   # busiest book: its rows show when the recorder was up
-LEV_CAPS = {"BTC-USD": 20.0, "ETH-USD": 20.0}   # owner: the crypto majors never above 20x
 LADDER = (20.0, 10.0, 5.0, 2.0)                 # tested below each market's maximum
 HOLIDAYS_CSV = Path(__file__).resolve().parents[2] / "config" / "calendars" / "nyse_holidays.csv"
 US_SESSION = ("09:00-16:30",)   # New York time on NYSE trading days: the cash session, half an hour either side
@@ -105,17 +105,17 @@ def load_markets(path: Path) -> dict[str, MarketInfo]:
     return out
 
 
-def max_leverage(m: dict[str, Any]) -> tuple[float, float]:
-    """(in-session, off-hours) maximum leverage for one market, after the owner's caps."""
+def max_leverage(m: dict[str, Any], caps: dict[str, float] | None = None) -> tuple[float, float]:
+    """(in-session, off-hours) maximum leverage for one market, after the owner's caps (/set crypto_lev)."""
     imf = float(m.get("initialMarginFraction") or 0.2)
     off = float(m.get("offHoursInitialMarginFraction") or imf)
-    lev = min(1 / imf, LEV_CAPS.get(m["marketDisplayName"], math.inf))
+    lev = min(1 / imf, (caps or {}).get(m["marketDisplayName"], math.inf))
     return round(lev, 2), round(min(1 / off, lev), 2)
 
 
-def leverages(m: dict[str, Any]) -> list[tuple[float, float]]:
+def leverages(m: dict[str, Any], caps: dict[str, float] | None = None) -> list[tuple[float, float]]:
     """The maximum first, then the ladder below it."""
-    lev, off = max_leverage(m)
+    lev, off = max_leverage(m, caps)
     return [(lev, off)] + [(x, min(x, off)) for x in LADDER if x < lev - 1e-9]
 
 
@@ -285,6 +285,7 @@ class Scanner:
     ladder: bool = True               # False: each market at its maximum leverage only
     shortlist: bool = True            # re-run the last 24 h only for settings that pass the multi-day checks
     volume_cost: float | None = None  # ... or that cost at most this per $1,000 of volume (the volume lists)
+    lev_caps: dict[str, float] = field(default_factory=dict)   # the owner's leverage cap per market (/set crypto_lev)
     day_jobs: int = 0                 # market-days backtested by the last backtest() (0: every day was cached)
     _alive_h: dict[str, float] = field(default_factory=dict)
 
@@ -298,7 +299,7 @@ class Scanner:
     def risks_for(self, meta: dict[str, Any], mi: MarketInfo, order_max: float | None = None
                   ) -> list[dict[str, Any]]:
         timing = {"exit_taker_after_s": self.risk.exit_taker_after_s, "cooldown_s": self.risk.cooldown_s}
-        levs = leverages(meta) if self.ladder else leverages(meta)[:1]
+        levs = leverages(meta, self.lev_caps) if self.ladder else leverages(meta, self.lev_caps)[:1]
         vmin = venue_min(mi, meta)
         if order_max:   # a ceiling below two minimum orders would only distort the sizes
             order_max = max(order_max, bucket(2 * 1.2 * vmin) or order_max)
@@ -677,18 +678,20 @@ def best_at_max(cands: list[Candidate]) -> list[Candidate]:
 def scan(root: Path, *, now_us: int | None = None, markets: list[str] | None = None, workers: int = 6,
          capital: float = 100.0, pct: Pct | None = None, capital_source: str = "fixed", risk: Risk | None = None,
          ladder: bool = True, shortlist: bool = True, always: set[tuple[str, str]] | None = None,
-         stop: threading.Event | None = None, volume_cost: float | None = None) -> dict[str, Any]:
+         stop: threading.Event | None = None, volume_cost: float | None = None,
+         lev_caps: dict[str, float] | None = None) -> dict[str, Any]:
     """capital: what the sizes and stops are taken on (bucketed here, as the live bot does).
     shortlist: re-run the last 24 h only for settings that pass on their full days (and `always`: the deployed
     (market, "setting @ Nx")); False re-runs every setting, as before.
     volume_cost: the owner's budget for the volume lists (dollars per $1,000 of volume): settings within it are
-    shortlisted too, so bot/scout/profiles.py can judge their last 24 h."""
+    shortlisted too, so bot/scout/profiles.py can judge their last 24 h.
+    lev_caps: the owner's leverage cap per market (/set crypto_lev); every other market goes to the Arcus maximum."""
     now_us = now_us or time.time_ns() // 1000
     mis = load_markets(root / "markets.json")
     meta = market_meta(root / "markets.json")
     pct = pct or Pct()
     sc = Scanner(root, capital=bucket(capital), pct=pct, risk=risk or Risk(), workers=workers, ladder=ladder,
-                 shortlist=shortlist, volume_cost=volume_cost)
+                 shortlist=shortlist, volume_cost=volume_cost, lev_caps=lev_caps or {})
     have = [m for m in sc.store.markets() if m in mis and (not markets or m in markets) and sc.store.days(m)]
     t0 = time.time()
     bt = sc.backtest(have, now_us, mis, meta, always=always, stop=stop)
@@ -700,7 +703,7 @@ def scan(root: Path, *, now_us: int | None = None, markets: list[str] | None = N
             "risk": asdict(sc.risk), "volume_cost": volume_cost,
             "capital": {"usd": sc.capital, "source": capital_source, "pct": asdict(pct)},
             "leverage": {"policy": "max, then " + ", ".join(f"{x:g}x" for x in LADDER) if ladder else "max",
-                         "caps": LEV_CAPS},
+                         "caps": lev_caps or {}},
             "markets": len(have), "configs": len(MENU),
             "rechecked_24h": sum(len(e["checked"]) for per in bt.values() for e in per.values()),
             "setups": sum(len(MENU) for per in bt.values() for _e in per.values()),

@@ -94,7 +94,8 @@ def cmd_sessions(a: argparse.Namespace) -> None:
             print(f"{p.stem:<20} INVALID: {e}")
 
 
-async def _doctor(sessions: list[Any], mode: Any, *, adopt: bool = False, account_index: int | None = None) -> Any:
+async def _doctor(sessions: list[Any], mode: Any, *, adopt: bool = False, account_index: int | None = None,
+                  replacing: bool = False) -> Any:
     from bot.core.calendar import TradingCalendar
     from bot.core.doctor import run_doctor
     from bot.core.livelock import RunMode
@@ -109,7 +110,7 @@ async def _doctor(sessions: list[Any], mode: Any, *, adopt: bool = False, accoun
         await lp.refresh()
         return await run_doctor(sessions, mode=mode, app=load_app(), secrets=SecretStore(),
                                 calendar=TradingCalendar.load(), arcus_rest=ar, markets=lp.markets,
-                                adopt_positions=adopt, account_index=account_index)
+                                adopt_positions=adopt, account_index=account_index, replacing=replacing)
     finally:
         await ar.close()
 
