@@ -37,3 +37,11 @@ __pycache__/
 .hypothesis/
 .coverage
 .DS_Store
+
+# ---- the Lighter bot (lighter/): the same rules ----------------------------------------------------------------
+lighter/data/
+lighter/state/
+lighter/logs/
+lighter/reports/
+lighter/config/sessions/
+lighter/OWNER_ACTIONS.md

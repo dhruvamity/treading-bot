@@ -1,0 +1,12 @@
+# From treading-bot/lighter:  docker compose up -d --build
+# Records every Lighter perp around the clock and scans every 30 minutes. Needs no keys and places no orders.
+# Its data (data/, state/, logs/) stays in this folder; bring data/tape back to the machine that trades.
+services:
+  scout:
+    build: .
+    container_name: lighter-scout
+    restart: unless-stopped
+    volumes:
+      - ./data:/app/data
+      - ./state:/app/state
+      - ./logs:/app/logs
