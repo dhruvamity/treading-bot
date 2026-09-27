@@ -566,6 +566,8 @@ class BotRunner:
                     await self.alerter.send(Level.CRIT if k.level == "expired" else Level.WARN, f"key:{k.name}",
                                             ("🚨 API KEY EXPIRED" if k.level == "expired" else "⚠️ API KEY EXPIRING")
                                             + f"\n{k.name} · {k.remaining_h:.0f} h left\n\nRotate it")
+            with contextlib.suppress(Exception):   # the scout's daily earnings fetch (a bad file keeps the old one)
+                self.calendar.reload()
             if self.calendar.coverage_days(now, "fomc") < 30 or self.calendar.coverage_days(now, "cpi") < 14:
                 await self.alerter.send(Level.WARN, "calendar", "⚠️ EVENT CALENDAR SHORT\nCPI · NFP · FOMC dates run "
                                         "out soon\nUpdate config/calendars/events.csv")

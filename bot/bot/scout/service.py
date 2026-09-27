@@ -1,7 +1,10 @@
 """`bot scout run`: record every Arcus perp, scan every `every_min` minutes, review the running deployment.
 
 Writes data/scout/latest.json (and a copy per scan under data/scout/scans/) and hands the result to the pilot, which
-pauses a deployment whose conditions changed and offers the top 3 when nothing is running.
+pauses a deployment whose conditions changed and offers the top 3 when nothing is running. Once a day it also fetches
+the stock perps' earnings dates (bot/core/earnings.py) and adds the finished day to the autopilot's playbook
+(bot/scout/playbook.py); the autopilot (bot/scout/autopilot.py) looks every minute and acts when the owner turned it
+on (/auto).
 """
 
 from __future__ import annotations
@@ -20,7 +23,12 @@ from typing import Any
 from bot.common import settings
 from bot.common.config import SizingDefaults
 from bot.common.logging import Log
+from bot.common.sizing import bucket
+from bot.core import earnings
 from bot.core.balances import BalanceLog
+from bot.core.calendar import TradingCalendar
+from bot.scout import playbook as pbk
+from bot.scout.autopilot import Autopilot
 from bot.scout.capital import account_snapshot, choose, settle
 from bot.scout.pilot import Pilot
 from bot.scout.record import ScoutRecorder
@@ -48,6 +56,7 @@ def save_scan(root: Path, res: dict[str, Any]) -> Path:
 
 
 SCAN_NOW = "scan_now"   # a file in the state folder: Telegram's /scannow asks for a scan without waiting
+FIRST_SCAN_S = 10.0     # the recorder connects first
 STATUS = "scan_status.json"   # data/scout: is a scan running, and how long recent scans took (Telegram's ETAs)
 HISTORY = 20
 
@@ -109,6 +118,9 @@ async def run_service(root: Path, pilot: Pilot, *, rest_url: str, ws_url: str, e
     loop = asyncio.get_running_loop()
     stop = asyncio.Event()
     halt = threading.Event()   # tells a scan in progress to stop (it runs in another thread)
+    cal = TradingCalendar.for_app(state_dir, root / "config" / "calendars")
+    auto = Autopilot(root, pilot, calendar=cal, recent=rec.recent if rec else None)
+    auto_task = asyncio.create_task(auto.run(stop))
 
     def shutdown() -> None:
         stop.set()
@@ -119,7 +131,7 @@ async def run_service(root: Path, pilot: Pilot, *, rest_url: str, ws_url: str, e
             loop.add_signal_handler(sig, shutdown)
     try:
         with contextlib.suppress(TimeoutError):
-            await asyncio.wait_for(stop.wait(), 10)
+            await asyncio.wait_for(stop.wait(), FIRST_SCAN_S)
         while not stop.is_set():
             t0 = time.time()
             over = settings.load(state_dir)
@@ -137,6 +149,7 @@ async def run_service(root: Path, pilot: Pilot, *, rest_url: str, ws_url: str, e
                 eq = snap["equity"] if snap and snap["equity"] > 0 and str(spec).lower() == "auto" else None
                 cap, src = choose(spec, eq, z)
                 cap, src, moved = settle(state_dir, cap, src, today=time.strftime("%Y-%m-%d", time.gmtime()))
+                await _earnings(state_dir, root, cal)
                 a = pilot.active()
                 n = scan_workers(want_workers, bool(pilot.control.running_modes()))
                 st = read_status(root)
@@ -150,6 +163,14 @@ async def run_service(root: Path, pilot: Pilot, *, rest_url: str, ws_url: str, e
                 hist = (st.get("history") or []) + [{"ts": time.time(), "took_s": res["took_s"], "workers": n,
                                                     "full": bool(res.get("day_jobs"))}]
                 _write_status(root, {"running": False, "workers": n, "history": hist[-HISTORY:]})
+                pb = pbk.load(root / "data" / "scout")
+                if pbk.age_days(pb) > 20 / 24 or float(pb.get("capital") or 0) != bucket(cap) or pb.get("left_days"):
+                    book = pbk.Playbook(root / "data" / "scout", capital=cap, pct=z.pct(),
+                                        lev_caps=settings.lev_caps(over), calendar=cal)
+                    t = await loop.run_in_executor(None, functools.partial(
+                        book.build, workers=n, stop=halt, budget_s=settings.scan_budget_s(over)))
+                    log.info("scout_playbook", data={"built_days": t.get("built_days"), "left": t.get("left_days"),
+                                                     "markets": {m: e["days"] for m, e in t["markets"].items()}})
                 events = pilot.review(res)
                 log.info("scout_scan", data={"took_s": res["took_s"], "go": len(res["top"]), "capital": cap,
                                              "left_jobs": res.get("left_jobs"), "pending": len(res.get("pending") or []),
@@ -165,11 +186,29 @@ async def run_service(root: Path, pilot: Pilot, *, rest_url: str, ws_url: str, e
                 _write_status(root, {**read_status(root), "running": False})
             await _wait(stop, state_dir / SCAN_NOW, max(60.0, every * 60 - (time.time() - t0)))
     finally:
+        stop.set()
+        with contextlib.suppress(Exception):
+            await asyncio.wait_for(auto_task, 30)
         if rec and rec_task:
             rec.stop()
             with contextlib.suppress(Exception):
                 await asyncio.wait_for(rec_task, 30)
         log.info("scout_stopped")
+
+
+async def _earnings(state_dir: Path, root: Path, cal: TradingCalendar) -> None:
+    """Once a day: the stock perps' earnings dates (bot/core/earnings.py); the calendar re-reads them."""
+    p = earnings.auto_path(state_dir)
+    if earnings.age_h(p) < 20:
+        return
+    try:
+        res = await earnings.refresh(state_dir, root / "data" / "scout" / "markets.json")
+        log.info("scout_earnings", data=res)
+        if not res.get("ok"):
+            return
+        cal.reload()
+    except Exception as e:   # no network: the old dates stay, the scan goes on
+        log.warning("scout_earnings_failed", reason=f"{type(e).__name__}: {e}"[:200])
 
 
 async def _wait(stop: asyncio.Event, trigger: Path, seconds: float) -> None:

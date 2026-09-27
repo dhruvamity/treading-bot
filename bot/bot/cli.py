@@ -109,7 +109,7 @@ async def _doctor(sessions: list[Any], mode: Any, *, adopt: bool = False, accoun
         lp = LiveParams(arcus=ar)
         await lp.refresh()
         return await run_doctor(sessions, mode=mode, app=load_app(), secrets=SecretStore(),
-                                calendar=TradingCalendar.load(), arcus_rest=ar, markets=lp.markets,
+                                calendar=TradingCalendar.for_app(load_app().state_dir), arcus_rest=ar, markets=lp.markets,
                                 adopt_positions=adopt, account_index=account_index, replacing=replacing)
     finally:
         await ar.close()
@@ -160,7 +160,7 @@ def cmd_run(a: argparse.Namespace) -> None:
     setup_logging(app.logs_dir)
     try:
         runner = BotRunner(sessions, mode=mode, cli_live=mode is RunMode.LIVE, app=app, arcus_cfg=load_arcus_config(),
-                           secrets=SecretStore(), calendar=TradingCalendar.load(),
+                           secrets=SecretStore(), calendar=TradingCalendar.for_app(app.state_dir),
                            state_db=a.state_db, typed_confirmation=typed)
         _run(runner.run(a.seconds))
     except BotError as e:
@@ -591,6 +591,24 @@ def cmd_scout(a: argparse.Namespace) -> None:
         from bot.scout.scan import limits_table
 
         print(limits_table(root / "data" / "scout", a.markets or None))
+    elif a.action == "playbook":
+        from bot.common import settings
+        from bot.core.calendar import TradingCalendar
+        from bot.scout import playbook as pbk
+        from bot.scout.service import scan_workers
+        from bot.telegram.control import Control
+
+        over = settings.load(app.state_dir)
+        z = settings.effective_sizing(app.sizing, over)
+        cap = float(a.capital) if a.capital and a.capital != "auto" else \
+            float(((pbk.load(root / "data" / "scout") or {}).get("capital")) or 100.0)
+        n = scan_workers(a.workers if a.workers != "auto" else over.get("scan_workers"),
+                         bool(Control(app).running_modes()))
+        book = pbk.Playbook(root / "data" / "scout", capital=cap, pct=z.pct(), lev_caps=settings.lev_caps(over),
+                            calendar=TradingCalendar.for_app(app.state_dir),
+                            markets=tuple(a.markets) if a.markets else pbk.MARKETS)
+        t = book.build(workers=n, budget_s=0)
+        print(pbk.table_text(t))
     elif a.action == "import":
         from bot.scout.bootstrap import import_arcusmm
         from bot.scout.tape import TapeStore
@@ -642,6 +660,47 @@ def cmd_pilot(a: argparse.Namespace) -> None:
         print(_run(pilot.approve(a.n, live=a.live, by="cli", profile=a.list, lev=lev)))
     elif a.action == "close":
         print(_run(pilot.close(by="cli")))
+
+
+def cmd_auto(a: argparse.Namespace) -> None:
+    """The autopilot: status and plan, on (paper or live), off, budget, cost ceiling (bot/scout/autopilot.py)."""
+    from bot.scout import autopilot as ap
+    from bot.scout import playbook as pbk
+
+    app = load_app()
+    state = Path(app.state_dir)
+    if a.action == "on":
+        if a.live:
+            if os.environ.get("BOT_PILOT_LIVE") != "1":
+                print("live is off: set BOT_PILOT_LIVE=1 in .env first")
+                sys.exit(2)
+            if input("REAL MONEY: the autopilot starts and stops LIVE runs by itself. Type LIVE: ").strip() != "LIVE":
+                print("aborted")
+                sys.exit(1)
+        kw: dict[str, Any] = {"on": True, "mode": "live" if a.live else "paper", "by": "cli"}
+        if a.budget is not None:
+            kw["budget_day"] = a.budget
+        if a.cost is not None:
+            kw.update(max_cost_bp=a.cost, auto_cost=False)
+        ap.configure(state, **kw)
+    elif a.action == "off":
+        print("was on" if ap.turn_off(state, "bot auto off") else "was already off")
+        print("the running run keeps going until `bot pilot close` (or Telegram /auto off, which closes it)")
+    elif a.action == "set":
+        kw = {}
+        if a.budget is not None:
+            kw["budget_day"] = a.budget
+        if a.cost is not None:
+            kw.update(max_cost_bp=a.cost, auto_cost=False)
+        ap.configure(state, **kw)
+    st = ap.load(state)
+    pb = pbk.load(Path.cwd() / "data" / "scout")
+    print("\n".join(ap.status_lines(st, pb)))
+    if pb.get("markets"):
+        print("\nNext 24 h at a usual market:")
+        print("\n".join("  " + x for x in ap.plan_lines(pb, ap.ceiling(ap.settings_of(st), pb))))
+    else:
+        print("\nNo playbook yet: the scout builds it after its next scan (or `bot scout playbook`)")
 
 
 def cmd_secrets(a: argparse.Namespace) -> None:
@@ -761,9 +820,10 @@ def build_parser() -> argparse.ArgumentParser:
     sp = add("telegram", cmd_telegram, "Telegram control bot: status, pause/stop/run, cancel/flatten, live alerts")
     sp.add_argument("--read-only", action="store_true", help="status and alerts only; every control is refused")
     sp = add("scout", cmd_scout, "record all Arcus perps, backtest every strategy on each, rank what to run now")
-    sp.add_argument("action", choices=["run", "scan", "limits", "import"],
+    sp.add_argument("action", choices=["run", "scan", "limits", "playbook", "import"],
                     help="run: record + scan every N min (the daemon); scan: one scan now; limits: the least and the "
-                         "most capital each market can use; import: old recordings")
+                         "most capital each market can use; playbook: build and print the autopilot's table (cost "
+                         "per session and market state); import: old recordings")
     sp.add_argument("src", nargs="?", default="../../arcus-mm", help="import: the arcus-mm folder")
     sp.add_argument("--every-min", type=float, default=30)
     sp.add_argument("--workers", type=_workers_arg, default="auto",
@@ -788,6 +848,12 @@ def build_parser() -> argparse.ArgumentParser:
                     help="which top 3: volume (most volume within /set volume_cost, default), cheapest or max "
                          "(bot/scout/profiles.py)")
     sp.add_argument("--max-lev", action="store_true", help="the same setting at the market's maximum leverage")
+    sp = add("auto", cmd_auto, "the autopilot: runs setups by itself within a daily budget (status, on, off, set)")
+    sp.add_argument("action", nargs="?", default="status", choices=["status", "on", "off", "set"])
+    sp.add_argument("--live", action="store_true", help="on: real money (needs BOT_PILOT_LIVE=1 and typing LIVE)")
+    sp.add_argument("--budget", type=float, help="dollars added to the pot each day at 00:00 UTC")
+    sp.add_argument("--cost", type=float,
+                    help="cost ceiling in bp (backtest); fixes it (otherwise the playbook tunes it daily for the budget)")
     sp = add("resume", cmd_resume, "clear safe mode / stops (after investigation)")
     sp.add_argument("--venue")
     sp.add_argument("--all", action="store_true")

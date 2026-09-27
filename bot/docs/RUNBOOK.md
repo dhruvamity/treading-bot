@@ -31,6 +31,9 @@ journalctl -u bot -f -o cat | jq -c 'select(.level!="DEBUG")'     # JSON logs; s
    under 40 minutes old.
 4. `$A keys` should show every Arcus key ACTIVE with more than 7 days left.
 5. `df -h /opt` should show more than 30% free. The scout records about 0.1-0.5 GB/day.
+6. If the autopilot is on: `$A auto` (or Telegram `/auto`) shows the pot, what it runs and why, and the last 7 days.
+   `data/scout/playbook.json` should be under a day old, and `state/calendars/earnings.csv` too (the scout's daily
+   fetch).
 
 ## 3. Start, stop, change a session
 
@@ -50,7 +53,8 @@ live in `/opt/bot/.env`. `/etc/bot.env` only carries the run arguments.
 
 | Situation | Do this |
 |---|---|
-| Anything looks wrong | `sudo systemctl stop bot`. The guardian stays up. |
+| Anything looks wrong | `sudo systemctl stop bot`. The guardian stays up. If the autopilot is on, turn it off first (`/auto off`, or `$A auto off`), or it starts the next run. |
+| The autopilot does something odd | `/auto off` closes its run and stops it. `$A auto off` only turns it off; then `$A pilot close`. |
 | Orders must go NOW | `$A cancel-all --venue arcus` (your key's subaccount, mainnet; `--yes` skips the prompt) |
 | Close positions | `$A flatten --venue arcus` (maker, reduce-only). Add `--taker` for IOC. |
 | VPS unreachable | The Arcus DMS (`scheduleCancel`) fires by itself within its 60 s deadline. Then use the Arcus web app: cancel all, then close positions. |
@@ -88,7 +92,11 @@ Every automatic action goes to the decision log (JSON logs, `component=decision`
   which writes `.env`), replace `ARCUS_API_PRIVATE_KEY` in `.env` on the server, and restart. `$A keys` confirms
   the new key is ACTIVE.
 - **Calendars:** keep `config/calendars/events.csv` at least 30 days ahead for FOMC and 14 days for CPI. The bot
-  warns hourly while coverage is short. Add NVDA/TSLA earnings and SPY/QQQ ex-dividend dates.
+  warns hourly while coverage is short. BLS publishes the next year's CPI and jobs-report dates late in the year
+  (bls.gov/schedule); add the 2027 CPI dates before mid-December 2026.
+  - Stock earnings: the scout fetches them daily from Nasdaq's public calendar into `state/calendars/earnings.csv`,
+    and the live bot re-reads them hourly.
+  - `config/calendars/earnings.csv` is for dates you add by hand. Add SPY/QQQ ex-dividend dates there too.
 - **Venue changes:** LiveParams refreshes hourly. Any change to tick, step, minimum, fees or margins is logged to
   `data/param_changes_jsonl/`, and quoting uses the new values immediately. Read the Arcus changelog monthly.
 - **Modify:** requotes go out as cancel + place. To use modifyOrder instead (one request per requote), run

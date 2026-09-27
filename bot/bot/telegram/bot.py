@@ -37,6 +37,7 @@ from bot.telegram.views import (
     HELP,
     _risk,
     ago,
+    auto_keyboard,
     balance_text,
     candidate_lines,
     cannot_start,
@@ -69,6 +70,8 @@ from bot.telegram.watcher import Prefs, Watcher
 log = Log("telegram_bot")
 VENUES = ("arcus",)
 # The commands' earlier names still work (not listed in Telegram's menu), so old habits and old buttons keep working.
+TAKEOVER = {"stop": "/stop", "deploy": "/run", "run": "/run", "pilotclose": "/pilotclose", "flatten": "/closeall",
+            "cancelall": "/cancelall"}   # the owner's own actions, which turn the autopilot off
 ALIASES = {"scout": "top3", "pilot": "openpositions", "report": "yesterdayreport", "pause": "pauseneworders",
            "resume": "resumeaftersl", "flatten": "closeall", "aggressive": "top3", "breakeven": "cheapest",
            "form": "run"}
@@ -241,7 +244,8 @@ class TelegramBot:
                 await self.api.send(self.owner_chat_id, text, keyboard=[[("📊 Dashboard", "dashboard")]],
                                     silent=True)
             else:
-                await self.api.send(self.owner_chat_id, text, silent=e.get("kind") not in ("failed", "paused"))
+                await self.api.send(self.owner_chat_id, text,
+                                    silent=e.get("kind") not in ("failed", "paused", "auto_alert"))
 
     # ------------------------------------------------------------------ updates
     async def handle(self, u: dict[str, Any]) -> None:
@@ -291,7 +295,7 @@ class TelegramBot:
                 "ok": self.c_ok, "no": self.c_no, "balance": self.c_balance, "settings": self.c_settings,
                 "dashboard": self.c_dashboard, "dashstop": self.c_dashstop, "dashresume": self.c_dashresume,
                 "volume": self.c_volume, "cheapest": self.c_cheapest, "maxvolume": self.c_maxvolume,
-                "pick": self.c_pick, "rm": self.c_rm, "f": self.c_f,
+                "pick": self.c_pick, "rm": self.c_rm, "f": self.c_f, "auto": self.c_auto,
                 "rs": self.c_old_button, "rl": self.c_old_button, "lev": self.c_old_button,
                 "deploy": self.c_old_button}
         write = {"pauseneworders": self.c_pause, "unpause": self.c_unpause, "stop": self.c_stop,
@@ -685,6 +689,79 @@ class TelegramBot:
             await self._ask(Ctx(ctx.chat_id, ctx.user_id, ctx.user), "deploy", args_,
                             card("🔴", "LIVE RUN", codes(w, *size_lines(c)), notes, _warnings(rep)), code=True)
         self._spawn(go())
+
+    # ------------------------------------------------------------------ autopilot
+    def _auto_card(self, title: str = "AUTOPILOT", emoji: str = "🤖") -> tuple[str, Keyboard]:
+        from bot.scout import autopilot as ap
+        from bot.scout import playbook as pbk
+
+        st = ap.load(self._state_dir())
+        s = ap.settings_of(st)
+        pb = pbk.load(self.pilot.root / "data" / "scout") if self.pilot is not None else {}
+        plan = ap.plan_lines(pb, ap.ceiling(s, pb)) if pb.get("markets") else ["No playbook yet: the scout builds it after "
+                                                                          "its next scan"]
+        return card(emoji, title, codes(*ap.status_lines(st, pb)),
+                    section("Next 24 h at a usual market", codes(*plan)),
+                    codes("Picks the most volume within the ceiling, per session and market state",
+                          "Flat around CPI · NFP · FOMC and a stock's earnings")), auto_keyboard(s.on)
+
+    async def c_auto(self, ctx: Ctx, args: list[str]) -> None:
+        """/auto: what the autopilot does now and would do next. /auto on [paper|live] [budget=5] [cost=1.5],
+        /auto off, /auto budget 5, /auto cost 1.5|auto."""
+        from bot.scout import autopilot as ap
+
+        sub = args[0].lower() if args else ""
+        if sub in ("", "status", "plan"):
+            text, kb = self._auto_card()
+            await self.reply(ctx, text, kb)
+            return
+        if self.read_only:
+            await self.reply(ctx, card("🔒", "READ-ONLY", codes("Controls are off on this bot")))
+            return
+        s = ap.settings_of(ap.load(self._state_dir()))
+        try:
+            if sub == "on":
+                live = any(a.lower() == "live" for a in args[1:])
+                kw = {k.lower(): v for k, _, v in (a.partition("=") for a in args[1:] if "=" in a)}
+                budget = _amount(kw["budget"]) if "budget" in kw else s.budget_day
+                cost = kw.get("cost")
+                args_ = {"live": live, "budget": budget, "cost": None if cost in (None, "auto") else float(cost)}
+                ap.validate(ap.Settings(budget_day=budget, max_cost_bp=args_["cost"] or s.max_cost_bp))
+                what = codes(f"{'LIVE' if live else 'PAPER'} · budget ${budget:.2f}/day (the pot holds "
+                             f"{ap.POT_DAYS:g} days)",
+                             f"Cost ceiling {args_['cost']:.2f} bp" if args_["cost"] else
+                             "Cost ceiling tuned daily for this budget",
+                             "Starts, switches and stops runs by itself; each run's stop is what is left of the pot",
+                             "Your /run, /stop or /closeall turns it off")
+                if not live:
+                    await self._ask(ctx, "auto_on", args_, card("🤖", "AUTOPILOT ON · PAPER", what))
+                    return
+                if os.environ.get("BOT_PILOT_LIVE") != "1":
+                    await self.reply(ctx, card("🔒", "LIVE IS OFF", codes("BOT_PILOT_LIVE=1 in .env, then restart")))
+                    return
+                await self._ask(ctx, "auto_on", args_, card("🔴", "AUTOPILOT ON · LIVE", what,
+                                                            codes("A doctor check runs before every start")),
+                                code=True)
+            elif sub == "off":
+                await self._ask(ctx, "auto_off", {}, card("⏹", "AUTOPILOT OFF",
+                                                          codes("Closes its run (maker, then taker) and stops")))
+            elif sub == "budget" and len(args) > 1:
+                ap.configure(self._state_dir(), budget_day=_amount(args[1]))
+                text, kb = self._auto_card("BUDGET SAVED", "✅")
+                await self.reply(ctx, text, kb)
+            elif sub == "cost" and len(args) > 1:
+                if args[1].lower() == "auto":
+                    ap.configure(self._state_dir(), auto_cost=True)
+                else:
+                    ap.configure(self._state_dir(), max_cost_bp=float(args[1].lower().removesuffix("bp")),
+                                 auto_cost=False)
+                text, kb = self._auto_card("COST CEILING SAVED", "✅")
+                await self.reply(ctx, text, kb)
+            else:
+                await self.reply(ctx, card("❔", "USAGE", codes("/auto", "/auto on paper|live [budget=5] [cost=1.5]",
+                                                               "/auto off", "/auto budget 5", "/auto cost 1.5|auto")))
+        except (ValueError, KeyError) as e:
+            await self.reply(ctx, card("❌", "NOT SAVED", codes(str(e))))
 
     async def c_pilotclose(self, ctx: Ctx, args: list[str]) -> None:
         a = self.pilot.active() if self.pilot is not None else None
@@ -1124,8 +1201,33 @@ class TelegramBot:
         await self.api.send(ctx.chat_id, card("❔", "UNKNOWN CODE", codes("No action waits for that code")))
 
     async def _execute(self, ctx: Ctx, p: Pending) -> None:
+        from bot.scout import autopilot as ap
+
         a = p.args
         log.info("operator_action", data={"action": p.action, "args": a, "by": ctx.user})
+        took = TAKEOVER.get(p.action)
+        if took and ap.turn_off(self._state_dir(), f"your {took} ({ctx.user})"):
+            await self.reply(ctx, card("🤖", "AUTOPILOT OFF", codes(f"You took over with {took}", "/auto to turn it "
+                                                                                                 "on again")))
+        if p.action == "auto_on":
+            ap.configure(self._state_dir(), on=True, mode="live" if a["live"] else "paper", budget_day=a["budget"],
+                         by=ctx.user, **({"max_cost_bp": a["cost"], "auto_cost": False} if a.get("cost") else {}))
+            text, kb = self._auto_card("AUTOPILOT ON", "🟢")
+            await self.reply(ctx, text, kb)
+            return
+        if p.action == "auto_off":
+            ap.turn_off(self._state_dir(), f"/auto off ({ctx.user})")
+            act = self.pilot.active() if self.pilot is not None else None
+            if act and act.get("by") == "autopilot" and self.control.alive(act["mode"]):
+                async def close() -> None:
+                    try:
+                        await self.pilot.close(by=f"Telegram ({ctx.user})")
+                    except Exception as e:
+                        await self.api.send(ctx.chat_id, card("⚠️", "CLOSE FAILED", codes(redact_str(str(e))[:400])))
+                self._spawn(close())
+            text, kb = self._auto_card("AUTOPILOT OFF", "⏹")
+            await self.reply(ctx, text, kb)
+            return
         if p.action == "stop":
             self.control.request_stop(a["mode"], f"Telegram ({ctx.user})")
             self.watcher.note_stop_requested(a["mode"])

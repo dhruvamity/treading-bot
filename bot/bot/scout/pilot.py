@@ -236,8 +236,16 @@ class Pilot:
 
     # ---------------------------------------------------------------- review after each scan
     def review(self, scan: dict[str, Any]) -> list[dict[str, Any]]:
+        from bot.scout import autopilot
+
         st = self.state()
         out: list[dict[str, Any]] = []
+        if autopilot.is_on(self.root / self.control.app.state_dir):
+            # the autopilot judges its runs every minute (session, regime, events) and starts its own: no offers,
+            # no pauses from here
+            st["last_review"] = {"ts": time.time(), "go": True, "reasons": [], "profile": "auto"}
+            self.save(st)
+            return out
         budget = self.budget()
         top = profiles.top(scan, profiles.DEFAULT, budget)
         keys = [f"{c['market']}|{c['config']}" for c in top]
@@ -443,7 +451,7 @@ class Pilot:
         risk = Risk(**c["risk"]) if c.get("risk") else self.risk
         s = session_for(c["market"], cfg, risk, live=live, account_index=self.account_index,
                         sizing=self.control.app.sizing)
-        s["run_id"] = f"{c['market']}-{time.time_ns() // 1000}"
+        s["run_id"] = c.get("run_id") or f"{c['market']}-{time.time_ns() // 1000}"
         s["sizing"]["cap_to_backtest"] = c.get("profile") != "manual"   # the owner's own pick follows the balance
         for k in ("max_loss_usd", "take_profit_usd", "volume_target_usd"):   # the run's limits: sl=, tp=, vol=
             if c.get(k):
@@ -482,10 +490,12 @@ class Pilot:
         cleared = self.control.paused(mode)
         if cleared:
             self.control.clear_pause(mode, None)
+        c = {**c, "run_id": f"{c['market']}-{time.time_ns() // 1000}"}   # the engine keeps the run's PnL under it
         self.write_session(c, live=live)
         self.control.clear_sizing_ok(mode)
         rec = self.control.start_run(SESSION, live=live)
         st.update(active={"market": c["market"], "config": c["config"], "mode": mode, "since": time.time(), "by": by,
+                          "run_id": c["run_id"],
                           "backtest": c, "pid": rec["pid"], "log": rec["log"], "profile": c["profile"],
                           "lev": c["lev"], "max_loss_usd": c.get("max_loss_usd"),
                           "take_profit_usd": c.get("take_profit_usd"),

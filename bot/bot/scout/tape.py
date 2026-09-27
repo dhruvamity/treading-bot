@@ -90,11 +90,13 @@ class TapeStore:
             return []
         return sorted(p.name for p in self.root.iterdir() if p.is_dir())
 
-    def days(self, market: str) -> list[str]:
+    def days(self, market: str, kind: str = "bbo") -> list[str]:
+        """Days with a part of this kind (the scan backtests book days; trades go back further, from the REST
+        history imports)."""
         d = self.root / market
         if not d.exists():
             return []
-        return sorted(p.name for p in d.iterdir() if p.is_dir() and any(p.glob("bbo-*.npz")))
+        return sorted(p.name for p in d.iterdir() if p.is_dir() and any(p.glob(f"{kind}-*.npz")))
 
     # ---------------------------------------------------------------- write
     def write_part(self, market: str, kind: str, part: str, arrays: dict[str, np.ndarray]) -> list[Path]:

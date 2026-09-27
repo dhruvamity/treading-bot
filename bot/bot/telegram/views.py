@@ -285,6 +285,11 @@ sl= run stop $ · tp= take profit $ · vol= volume target
 /pauseneworders · /unpause · /stop · /resumeaftersl
 /cancelall · /closeall ({code("taker")} to cross now)
 
+{b("Autopilot")}
+/auto · what it runs now and next, on or off
+{code("/auto on live budget=5")} · {code("/auto off")}
+{code("/auto budget 5")} $ a day · {code("/auto cost 1.5")} bp ceiling ({code("auto")}: tuned daily for the budget)
+
 {b("Settings")}
 /settings · {code("/set name value")} · /scannow · /alerts · /mute · /unmute
 {code("/status paper")} picks a bot"""
@@ -294,7 +299,8 @@ COMMANDS: list[tuple[str, str]] = [
     ("dashboard", "Live screen, every 10 s"),
     ("top3", "Most volume within your cost"), ("cheapest", "Cheapest per $1,000 traded"),
     ("maxvolume", "Most volume, any cost"),
-    ("run", "Run form: Mid/Grid, spread, bias, leverage"), ("openpositions", "Positions · what runs · go LIVE · close"),
+    ("run", "Run form: Mid/Grid, spread, bias, leverage"), ("auto", "Autopilot: trades by itself in a budget"),
+    ("openpositions", "Positions · what runs · go LIVE · close"),
     ("status", "Running? today's PnL and volume"), ("balance", "Account balance and history"),
     ("positions", "What you hold"), ("orders", "Orders on the book"),
     ("pauseneworders", "Stop new orders"), ("unpause", "Quote again"),
@@ -310,11 +316,17 @@ def menu_keyboard() -> Keyboard:
         [("📊 Dashboard", "dashboard"), ("▶️ Resume", "unpause")],
         [("⏸ Pause Orders", "pauseneworders"), ("⏹ Stop", "stop")],
         [("🚀 Most Volume", "top3"), ("💎 Cheapest", "cheapest"), ("🔥 Max Volume", "maxvolume")],
-        [("🎛 Run form", "run")],
+        [("🎛 Run form", "run"), ("🤖 Autopilot", "auto")],
         [("📌 Positions", "openpositions"), ("📋 Orders", "orders"), ("💰 Balance", "balance")],
         [("🩺 Status", "status"), ("⚙️ Settings", "settings"), ("🔔 Alerts", "alerts")],
         [("❌ Cancel all", "cancelall"), ("🧯 Close all", "closeall")],
     ]
+
+
+def auto_keyboard(on: bool) -> Keyboard:
+    if on:
+        return [[("⏹ Turn off", "auto off"), ("🔄 Refresh", "auto")]]
+    return [[("📝 On (paper)", "auto on paper"), ("🔴 On (LIVE)", "auto on live")], [("🔄 Refresh", "auto")]]
 
 
 def refresh_keyboard(cmd: str) -> Keyboard:
