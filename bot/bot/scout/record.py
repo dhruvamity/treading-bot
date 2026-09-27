@@ -19,6 +19,7 @@ import json
 import math
 import shutil
 import time
+from collections import deque
 from pathlib import Path
 from typing import Any
 
@@ -35,6 +36,8 @@ from bot.venues.symbols import canonical_base
 log = Log("scout.record")
 SUBS_PER_CONN = 90
 MARKETS_EVERY_S = 600.0
+RECENT_MIN = 240   # minutes of mids kept in memory per market (the autopilot's regime: bot/scout/regime.py)
+MINUTE_US = 60_000_000
 
 
 class ScoutRecorder:
@@ -55,6 +58,7 @@ class ScoutRecorder:
         self.books: dict[str, ArcusBookSync] = {}   # display -> live book (depth only)
         self.dirty: set[str] = set()                 # books changed since the last depth sample
         self.parts: dict[tuple[str, str], list[dict[str, np.ndarray]]] = {}   # (market, kind) -> this hour's rows
+        self.minutes: dict[str, deque[tuple[int, float]]] = {}   # market -> (minute end µs, last mid in it)
         self.part_hour = -1
         self.conns: list[ArcusWS] = []
         self.on_conn: list[set[str]] = []           # the markets each connection records
@@ -84,8 +88,14 @@ class ScoutRecorder:
         if d is None or self.paused_disk or not b.get("price") or not a.get("price"):
             return
         self.last_msg = time.time()
-        self.bbo[d].add(int(c.get("timestamp") or recv_us), float(b["price"]), float(a["price"]),
-                        float(b.get("size") or 0), float(a.get("size") or 0))
+        ts, bid, ask = int(c.get("timestamp") or recv_us), float(b["price"]), float(a["price"])
+        self.bbo[d].add(ts, bid, ask, float(b.get("size") or 0), float(a.get("size") or 0))
+        end = ts - ts % MINUTE_US + MINUTE_US
+        q = self.minutes.setdefault(d, deque(maxlen=RECENT_MIN))
+        if q and q[-1][0] == end:
+            q[-1] = (end, (bid + ask) / 2)
+        elif not q or end > q[-1][0]:
+            q.append((end, (bid + ask) / 2))
 
     def _on_trades(self, base: str, rows: list[dict[str, Any]], recv_us: int) -> None:
         d = self.display.get(base)
@@ -149,6 +159,10 @@ class ScoutRecorder:
             log.info("scout_record_subscribed", data={"new": new[:30], "markets": len(have) + len(new),
                                                       "connections": len(self.conns)})
         return new
+
+    def recent(self, market: str) -> list[tuple[int, float]]:
+        """The last RECENT_MIN minutes of mids held in memory: [(minute end µs, mid)], oldest first."""
+        return list(self.minutes.get(market, ()))
 
     # ---------------------------------------------------------------- writing
     def flush(self) -> int:

@@ -110,7 +110,8 @@ def _new_market_checks(r: Report, s: MMSession, m: Market, calendar: TradingCale
         nxt = calendar.next_event(now_us, {"earnings"}, s.market.upper())
         if nxt is None:
             r.add("WARN" if live else "INFO", "calendar", f"no {s.market} earnings date in "
-                  "config/calendars/earnings.csv: the bot will not pause around its earnings",
+                  "config/calendars/earnings.csv or the fetched state/calendars/earnings.csv: the bot will not pause "
+                  "around its earnings",
                   f"add the next {s.market} report date (symbol,date,session: bmo or amc)")
 
 

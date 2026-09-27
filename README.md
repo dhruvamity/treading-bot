@@ -15,6 +15,10 @@ It does three things:
    keeps checking it against fresh data.
 3. **Runner.** It trades the approved setting with the same risk rules the backtest used, plus kill switches, a dead
    man's switch, an independent guardian process and a Telegram control bot for your phone.
+4. **Autopilot** (optional, `/auto`). Given a daily budget, it picks, starts, switches and stops setups by itself:
+   - it chooses by the session of the week and each market's state now;
+   - it stays flat around CPI, jobs reports, FOMC and a stock's earnings;
+   - it spends the budget where volume is cheapest ([5.1](#51-the-autopilot-auto)).
 
 > **Risk warning.** This is experimental software that can place real orders with real money. Backtests are
 > estimates, not promises: markets change, and the backtest cannot see how your own orders change other traders'
@@ -31,12 +35,13 @@ From `treading-bot/bot` on the machine that runs the bot (after the one-time ins
 | `bot dashboard` | Live screen, redrawn every 10 s: today's volume and PnL, your capital's profit or loss (Ctrl-C leaves) |
 | `bot pilot approve 1` | Trades the #1 setup of the Most Volume list in paper (add `--live` for real money; `--list cheapest` or `--list max` picks from those top 3, `--max-lev` runs it at the market's maximum leverage) |
 | `bot pilot close` | Closes the position and stops trading |
+| `bot auto` | The autopilot: what it runs now and in the next 24 h (`bot auto on --budget 5`, `--live`, `bot auto off`) |
 | `bot down` | Stops the scout and the Telegram bot (`bot down --all`: the trading bot too, position kept) |
 
 (`bot` is `.venv/bin/bot`; activate the venv with `source .venv/bin/activate`, or type the full path.)
 
 On your phone, send `/menu` for buttons, or: `/dashboard` (a live screen that updates itself every 10 s), `/top3`
-(best setups, Run), `/openpositions` (what runs), `/status`, `/balance`, `/pauseneworders`, `/closeall`, `/settings` and `/set` (change capital, share of the balance, stops, scan
+(best setups, Run), `/auto` (the autopilot), `/openpositions` (what runs), `/status`, `/balance`, `/pauseneworders`, `/closeall`, `/settings` and `/set` (change capital, share of the balance, stops, scan
 interval without editing files). [Section 9](#9-the-telegram-bot) has them all.
 
 ---
@@ -512,6 +517,67 @@ What it says:
 
 State lives in `state/pilot.json`; every event is a line in `state/pilot_events.jsonl`, which the Telegram bot posts.
 
+### 5.1 The autopilot (`/auto`)
+
+With a small account the question is less *which* setup than *when* to spend the day's loss budget.
+- **BTC Mid 0 costs 0.6 bp in a calm weekend hour and 2.7 bp in a wild weekday one.**
+- **SPY Mid +3 costs 0.6 bp in the US afternoon and over 2 bp the rest of the day.**
+
+The autopilot spends a budget only where the backtests say volume is cheapest now. The research, with every number, is
+in the [research note](bot/docs/notes/2026-09-27-autopilot.md).
+
+**What it looks at, every minute** (inside the scout, on the server):
+
+| Input | What it is |
+|---|---|
+| The pot | `budget` dollars are added at 00:00 UTC. Unspent money carries over, up to a week of it, so a quiet weekend can use what a busy weekday did not. Each run's result comes out of it |
+| The session | Weekend (New York Fri 17:00 to Sun 18:00), Asia (from Tokyo 09:00), London (from 08:00 London), US open (09:30–12:00 New York), US afternoon (12:00–16:00), US evening. Each city's own clock, so daylight saving is handled |
+| Each market's state | The last hour's volatility against its usual level at that hour: **calm** (under 0.75x), **normal**, **busy** (1.25–2x), **wild** (over 2x). A one-minute move over 6x usual is a **shock**: that market is left out for 30 minutes |
+| Events | Flat from 45 minutes before CPI, the jobs report and FOMC until 30 minutes after (the dates are in `config/calendars/events.csv`). A stock is also left out from 24 h before its earnings to 24 h after; the scout fetches those dates from Nasdaq every day |
+| The playbook | Every hour of the last 42 days backtested from flat, for 7 setups (Mid 0 to +3, Grid 0, +1, +3) on 8 markets (BTC, SPY, ETH, SOL, QQQ, NVDA, GLD, HYPE). The result is the volume per hour and cost per dollar for each market, setup, session and state. Rebuilt daily (`bot scout playbook` prints it) |
+
+**What it does:**
+
+1. **Nothing running:** starts the setup with the most volume per hour whose predicted cost is within the **cost
+   ceiling**, at the market's maximum leverage and sized from the account. The run stop (`sl=`) is what is left of
+   the pot, at most 3 days of budget.
+2. **Running:** keeps it while its own prediction stays within the ceiling (plus 15%). It stops when:
+   - the market turns busy or wild;
+   - an event or a shock comes;
+   - the pot is gone.
+3. **Switching:** it switches when another setup gives 1.5x the volume and the run has lasted 20 minutes.
+4. **After a stop:** it rests 10 minutes before the next start.
+
+**The ceiling** is tuned daily for your budget. The playbook replays this rule over the last 4 weeks at every ceiling
+and keeps the one that bought the most volume:
+- a small budget buys most by waiting for the cheapest hours (about 1.3 bp in the backtest, about 1.0 bp live);
+- a large one needs a higher ceiling to be spent.
+
+`/auto cost 1.6` fixes it yourself; `/auto cost auto` gives the tuning back.
+
+Rehearsed over Sep 12–25 on the server's data, with the playbook and the ceiling from earlier days only:
+
+| Budget | Autopilot | BTC Mid 0 from 00:00 UTC until spent |
+|---|---|---|
+| $5/day | $40k/day at 1.23 bp | $26k/day at 1.91 bp |
+| $10/day | $74k/day at 1.35 bp | $52k/day |
+| $20/day | $125k/day, spending $16.84 | $107k/day for $20 |
+
+Backtest dollars; live BTC has cost about 0.8x the backtest.
+
+**Turning it on:** `/auto` → **📝 On (paper)** or **🔴 On (LIVE)**. You can also type `/auto on live budget=5`.
+- LIVE needs `BOT_PILOT_LIVE=1` and a typed code.
+- It runs the doctor before every live start; a failing doctor skips that market for 30 minutes and alerts you.
+- `/auto` shows the pot, what it is doing and why, each market's state, today and the last 7 days, and what it would
+  run in each session of the next 24 hours.
+- It posts one message per start, switch, stop and run end, and a summary each day.
+- It turns itself **off** when you take over: your `/run`, `/stop`, `/closeall`, `/cancelall` or `/pilotclose`, or a
+  run you start from the shell. `/auto off` closes its run and stops.
+- While it is on, the pilot's offers and pauses ([5](#5-the-pilot-approve-run-re-check)) stand aside.
+
+State: `state/autopilot.json`. Fetched earnings dates: `state/calendars/earnings.csv`. The playbook:
+`data/scout/playbook.json`.
+
 ---
 
 ## 6. Risk rules and safety systems
@@ -704,12 +770,12 @@ Arcus differs from their venues in two ways that matter:
 |---|---|
 | Mid / Grid, spread, Long / Neutral / Short | The same three fields (Mid and Grid, [7.2](#72-the-scout-menu-33-setups)–[7.5](#75-directional-bias-bias-long--short)) |
 | Stop loss, take profit, volume | `sl=`, `tp=`, `vol=` ([7.6](#76-run-limits-stop-take-profit-volume-target)) |
-| DGrid (the bot picks the setup by regime) | The lists pick the setup per market after every scan; no regime rule beat Mid 0 on BTC |
+| DGrid (the bot picks the setup by regime) | The autopilot picks market and setup per session and market state, every minute ([5.1](#51-the-autopilot-auto)) |
 | RGrid (trend, mostly taker) | Retired: taker fills at 2.25 bp lost on every market |
 | Blend (an outside price) | Not built: the oracle price is not recorded, so it cannot be backtested |
 | Signal (RSI skew) | Retired: about $80k a day on BTC |
 | Participation rate, duration | Not built: on a maker-only venue the spread sets the speed (Mid 0 fastest) |
-| "Avoid NYC hours" | On BTC every UTC hour costs 1.1–2.3 bp; the quiet hours (21:00–00:00 UTC) are cheapest but slowest |
+| "Avoid NYC hours" | The US open is BTC's dearest session (2.3 bp), but the market's state matters more than the clock: a calm hour costs half a wild one in any session. The autopilot judges both ([5.1](#51-the-autopilot-auto)) |
 | Several bots, delta-neutral bots | Not allowed: one setup at a time, Arcus only |
 
 ---
@@ -790,6 +856,16 @@ Send `/menu` for buttons. Telegram's `/` list shows the everyday commands; the r
 | `/positions`, `/orders` | What you hold; what is waiting on the book |
 | `/yesterdayreport [YYYY-MM-DD]` | The daily report: yesterday's, or the date given |
 
+**Autopilot** ([5.1](#51-the-autopilot-auto))
+
+| Command | What it does |
+|---|---|
+| `/auto` | What it runs now and why, the pot, each market's state, and the plan for the next 24 h, with On/Off buttons |
+| `/auto on paper\|live [budget=5] [cost=1.5]` | Turn it on (paper: Confirm button; LIVE: `BOT_PILOT_LIVE=1` and a typed code) |
+| `/auto off` | Turn it off; it closes its run |
+| `/auto budget 5` | Dollars added to the pot each day |
+| `/auto cost 1.5` / `/auto cost auto` | Fix the cost ceiling (bp, backtest) / let the playbook tune it for the budget |
+
 **Control and emergencies**
 
 | Command | What it does |
@@ -858,6 +934,11 @@ running it first closes its position and stops.
 - Fills (each, an hourly summary, or none) and a digest shortly after 00:00 UTC.
 - The pilot: a new #1 setup when nothing runs (at most every 3 hours), a deployment paused (with the reason),
   resumed, a better setup suggested, a deployment that failed to start.
+- The autopilot (silent unless something is wrong):
+  - each start, switch and stop, with why;
+  - each run's end (PnL, volume, cost);
+  - a summary after 00:00 UTC;
+  - loud: it cannot start (the doctor failed), an error, or LIVE turned off on the server.
 
 `/mute` silences everything except critical alerts.
 
@@ -874,6 +955,8 @@ running it first closes its position and stops.
 | `bot scout run [--workers auto\|N] [--every-min M] [--depth] [--ladder] [--capital auto\|USD]` | Record everything and scan every M minutes (the daemon; `bot up` runs it), at the account's equity or a fixed capital |
 | `bot scout scan [--markets …] [--ladder] [--capital auto\|USD] [--full]` | One scan now, printed as a table (`--full`: re-run the last 24 h for every setting) |
 | `bot scout limits [--markets …]` | Per market: the least capital it can run on, the order ceiling, and the capital it can fully use |
+| `bot scout playbook [--markets …] [--capital USD]` | Build (only the days not cached) and print the autopilot's playbook: volume per hour and cost per market, setup and session |
+| `bot auto [status\|on\|off\|set] [--live] [--budget USD] [--cost BP]` | The autopilot: see it, turn it on (paper, or `--live` with `BOT_PILOT_LIVE=1` and typing LIVE), off, or change its budget or ceiling |
 | `bot scout import PATH` | One-off import of older recordings |
 | `bot pilot status` / `approve N [--live]` / `close` | See, deploy, or close the one deployment |
 
@@ -941,7 +1024,10 @@ Each scan (the first one 10 s after start):
    change nothing. The picks are identical to re-running everything (`bot scout scan --full`), measured on 4 days of
    September data. It also reads the **last hour** for the "now" checks.
 4. Applies the GO checks ([4.4](#44-go-checks)) and ranks by maker volume per day.
-5. Writes the results:
+5. Once a day it also:
+   - fetches the stock perps' earnings dates;
+   - adds the finished day to the autopilot's playbook (a few minutes; the first build backtests 42 days).
+6. Writes the results:
 
 | File | Contents |
 |---|---|
@@ -969,6 +1055,8 @@ bot never waits for the CPU. The recorder itself uses about 4% of one core.
   - The native scout keeps using the same `data/scout/` folder, so no history is lost.
 - **No Telegram.** Alerts and control come from the machine that runs the trading bot.
 - **No live decisions.** Deploying stays on the machine with the keys, after you approve ([section 5](#5-the-pilot-approve-run-re-check)).
+  The autopilot ([5.1](#51-the-autopilot-auto)) runs inside the native scout (`bot up`) on that machine, next to the
+  bot it starts; a Docker scout cannot start or stop runs.
 
 ### 11.4 Set it up
 

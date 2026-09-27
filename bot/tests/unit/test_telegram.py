@@ -569,6 +569,7 @@ async def test_a_new_run_clears_an_old_pause_and_waits_for_a_closing_bot(tmp_pat
     earlier /pauseneworders ("paused by you 100%"); /resumeaftersl did not help. And a /run while the SPY bot was
     closing failed "already running": Telegram only looked at the heartbeat (15 s), the doctor at the process."""
     import bot.scout.pilot as pilot_mod
+    from bot import ops
 
     rows = [_cand("BTC-USD", "Mid 0", lev=20, go=False)]
     bot, api, pilot, _calls = _with_pilot(tmp_path, rows, top=[])
@@ -581,6 +582,8 @@ async def test_a_new_run_clears_an_old_pause_and_waits_for_a_closing_bot(tmp_pat
     monkeypatch.setattr(ctl, "is_running", lambda mode: bool(started))
     monkeypatch.setattr(ctl, "alive", lambda mode: bool(started) or (closing.pop(0) if closing else False))
     monkeypatch.setattr(ctl, "start_run", lambda name, live: started.append(True) or {"pid": 1, "log": "x.log"})
+    guardians: list[str] = []   # the real ops.start spawned a real guardian from the repo (2026-09-26)
+    monkeypatch.setattr(ops, "start", lambda app, name: guardians.append(name) or (True, "started"))
     pilot.write_session = lambda c, live, path=None: tmp_path / "x.yaml"  # type: ignore[method-assign,assignment]
     checked: list[bool] = []
 
@@ -601,6 +604,7 @@ async def test_a_new_run_clears_an_old_pause_and_waits_for_a_closing_bot(tmp_pat
     c = {**bot._find("BTC-USD", "Mid 0", 20.0, "manual"), "max_loss_usd": 10.0}
     assert await pilot_mod.Pilot.deploy(pilot, c, live=True, by="test") == "running in live"
     assert not closing and started == [True]                                 # waited for the old process first
+    assert guardians == ["guardian"]                                         # a live run brings its watchdog
     assert ctl.paused("live") == {}
     ev, _ = pilot.events_since(0)
     assert any("Cleared the pause on new orders (all markets, QQQ)" in e["text"] for e in ev)

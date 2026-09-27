@@ -30,33 +30,56 @@ class Event:
 class TradingCalendar:
     events: list[Event] = field(default_factory=list)
     holidays: dict[date, str | None] = field(default_factory=dict)  # date -> early close "HH:MM" or None
+    sources: tuple[str, str | None] | None = None   # (root, auto) it was loaded from: reload() re-reads them
 
     @classmethod
-    def load(cls, root: Path | str = "config/calendars") -> TradingCalendar:
+    def load(cls, root: Path | str = "config/calendars", auto: Path | str | None = None) -> TradingCalendar:
+        """root: the owner's files; auto: state/calendars, where the scout writes the earnings dates it fetches
+        every day (bot/core/earnings.py)."""
         root = Path(root)
-        cal = cls()
+        cal = cls(sources=(str(root), str(auto) if auto is not None else None))
         p = root / "events.csv"
         if p.exists():
             for r in csv.DictReader(p.open()):
                 ts = datetime.strptime(r["ts_et"], "%Y-%m-%d %H:%M").replace(tzinfo=NEW_YORK)
                 cal.events.append(Event(dt_to_us(ts), r["kind"].lower(), None, r.get("provisional", "") == "true"))
-        for fname, kind in (("earnings.csv", "earnings"), ("exdiv.csv", "ex_dividend")):
-            p = root / fname
+        files = [(root / "earnings.csv", "earnings"), (root / "exdiv.csv", "ex_dividend")]
+        if auto is not None:
+            files.append((Path(auto) / "earnings.csv", "earnings"))
+        seen: set[tuple[int, str, str]] = set()
+        for p, kind in files:
             if not p.exists():
                 continue
             for r in csv.DictReader(p.open()):
                 d = r.get("date") or r.get("ex_date")
                 if not d:
                     continue
-                hh = 16 if r.get("session", "").lower() == "amc" else 9
+                # before the open: 09:30 New York; after the close, or not known: 16:00, whose +/- 24 h window also
+                # covers a report before that day's open
+                hh = 9 if r.get("session", "").lower() == "bmo" or kind == "ex_dividend" else 16
                 ts = datetime.strptime(d, "%Y-%m-%d").replace(hour=hh, minute=30 if hh == 9 else 0, tzinfo=NEW_YORK)
-                cal.events.append(Event(dt_to_us(ts), kind, r["symbol"].upper()))
+                k = (dt_to_us(ts), kind, r["symbol"].upper())
+                if k not in seen:
+                    seen.add(k)
+                    cal.events.append(Event(k[0], kind, k[2]))
         p = root / "nyse_holidays.csv"
         if p.exists():
             for r in csv.DictReader(p.open()):
                 cal.holidays[date.fromisoformat(r["date"])] = r.get("early_close_et") or None
         cal.events.sort(key=lambda e: e.ts_us)
         return cal
+
+    def reload(self) -> None:
+        """Re-read the files in place (the engines hold this object): the scout fetches new earnings dates daily."""
+        if self.sources is None:
+            return
+        new = TradingCalendar.load(self.sources[0], self.sources[1])
+        self.events, self.holidays = new.events, new.holidays
+
+    @classmethod
+    def for_app(cls, state_dir: Path | str, root: Path | str = "config/calendars") -> TradingCalendar:
+        """The owner's calendar files plus the fetched earnings dates in <state_dir>/calendars."""
+        return cls.load(root, auto=Path(state_dir) / "calendars")
 
     # ---------------------------------------------------------------- windows
     def active_events(self, ts_us: int, symbol: str | None = None, skip: set[str] | None = None) -> list[Event]:
