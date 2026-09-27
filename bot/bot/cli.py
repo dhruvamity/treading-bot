@@ -361,9 +361,14 @@ def cmd_cancel_all(a: argparse.Namespace) -> None:
 
 
 def cmd_flatten(a: argparse.Namespace) -> None:
+    from bot.core.state import note_closeall
+
     if not a.testnet:
         _confirm(f"FLATTEN every position on {a.venue} MAINNET with reduce-only orders ({'IOC' if a.taker else 'maker'})")
-    print(_flatten_line(_run(venue_flatten(a.venue, a.account, not a.testnet, a.taker))))
+    r = _run(venue_flatten(a.venue, a.account, not a.testnet, a.taker))
+    if r.get("orders"):   # the next start then knows who closed the bot's position
+        note_closeall(load_app().state_db_for("testnet" if a.testnet else "live"), a.venue)
+    print(_flatten_line(r))
 
 
 def cmd_selftest(a: argparse.Namespace) -> None:

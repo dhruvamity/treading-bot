@@ -4,7 +4,9 @@ event-sourced log in SQLite (WAL) so state can be replayed after a crash.
 Reconciliation (on start and every 5 min): compare venue open orders / positions with local state.
 - live venue order we don't know  -> cancel, reason `reconcile_unknown`
 - local open order missing at venue -> mark CANCELED (reason `reconcile_missing`)
-- position mismatch               -> trust the venue, log, alert
+- position mismatch               -> trust the venue, log, alert. At a start, a market the venue holds flat was
+  closed while the bot was stopped; a /closeall recorded after the bot's last change (kv "closeall") explains it, so
+  it is only logged (bot/core/runner.py words the alerts)
 """
 
 from __future__ import annotations
@@ -65,13 +67,15 @@ class LocalOrder:
 
 FILL_IDS_KEPT = 50_000     # recent fill ids kept to drop replays (a reconnect re-sends minutes, not days)
 PENDING_GRACE_S = 10.0   # reconcile leaves an unacknowledged order alone this long after it was sent
+CLOSEALL_KEY = "closeall"   # kv: {"at_us", "venue"} of the last /closeall or `bot flatten`, read at the next start
 
 
 @dataclass
 class ReconcileReport:
     unknown_live: list[OrderState] = field(default_factory=list)
     missing_local: list[str] = field(default_factory=list)
-    position_mismatch: list[tuple[str, Decimal, Decimal]] = field(default_factory=list)
+    position_mismatch: list[tuple[str, Decimal, Decimal]] = field(default_factory=list)   # (base, bot's, venue's)
+    since_us: dict[str, int] = field(default_factory=dict)   # base -> when the bot's record of it last changed
 
     @property
     def clean(self) -> bool:
@@ -280,6 +284,9 @@ class StateStore:
             remote = vpos[b].size if b in vpos else Decimal(0)
             if local != remote:
                 rep.position_mismatch.append((b, local, remote))
+                row = self._db.execute("SELECT ts_us FROM positions WHERE venue=? AND base=?", (venue.value, b)).fetchone()
+                if row and row[0]:
+                    rep.since_us[b] = int(row[0])
                 self.set_position(venue, b, remote, vpos[b].entry_price if b in vpos else None)
         self.event("reconcile", venue=venue.value, unknown=len(rep.unknown_live), missing=len(rep.missing_local),
                    pos_mismatch=[(b, str(a), str(c)) for b, a, c in rep.position_mismatch])
@@ -287,3 +294,36 @@ class StateStore:
 
     def close(self) -> None:
         self._db.close()
+
+
+def side_size(x: Decimal) -> str:
+    """Decimal("-0.3553090") -> "short 0.355309"; 0 -> "flat"."""
+    return f"{'long' if x > 0 else 'short'} {abs(x).normalize():f}" if x else "flat"
+
+
+def note_closeall(db_path: Path | str, venue: str) -> bool:
+    """Record a /closeall (or `bot flatten`) in a mode's state DB, so the next start knows the bot's position was
+    closed by it. False when that mode has never run (nothing to reconcile) or the DB could not be written."""
+    p = Path(db_path)
+    if not p.exists():
+        return False
+    try:
+        con = sqlite3.connect(f"file:{p}?mode=rw", uri=True, timeout=5)
+        try:
+            with con:
+                con.execute("INSERT OR REPLACE INTO kv VALUES (?,?)",
+                            (CLOSEALL_KEY, orjson.dumps({"at_us": now_us(), "venue": venue}).decode()))
+        finally:
+            con.close()
+    except sqlite3.Error:
+        return False
+    return True
+
+
+def closeall_us(raw: str | None, venue: Venue) -> int | None:
+    """When the last recorded /closeall ran on this venue (kv "closeall"), or None."""
+    try:
+        d = orjson.loads(raw or "null")
+        return int(d["at_us"]) if d and d.get("venue") == venue.value else None
+    except (ValueError, TypeError, KeyError, AttributeError):
+        return None
