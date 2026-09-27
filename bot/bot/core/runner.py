@@ -46,7 +46,7 @@ from bot.core.livelock import RunMode, lock_state, mainnet_writes_allowed, resol
 from bot.core.liveparams import LiveParams
 from bot.core.marketdata import MarketDataHub
 from bot.core.risk import RiskEngine
-from bot.core.state import StateStore
+from bot.core.state import CLOSEALL_KEY, ReconcileReport, StateStore, closeall_us, side_size
 from bot.strategies import make_strategy
 from bot.venues.arcus.adapter import ArcusAdapter
 from bot.venues.arcus.models import parse_public_trade
@@ -521,7 +521,7 @@ class BotRunner:
                 log.warning("status_publish_failed", reason=type(e).__name__, data={"err": str(e)[:200]})
             await asyncio.sleep(5)
 
-    async def reconcile_once(self) -> None:
+    async def reconcile_once(self, *, start: bool = False) -> None:
         for v, ad in self.adapters.items():
             try:
                 rep = self.state.reconcile(v, await ad.open_orders(), await ad.positions())
@@ -536,8 +536,34 @@ class BotRunner:
                 if any(not s.client_id for s in rep.unknown_live):
                     await ad.cancel_all(None)
             if rep.position_mismatch:
-                await self.alerter.send(Level.WARN, "reconcile", f"⚠️ POSITION MISMATCH\n{v.value} · the venue's "
-                                        f"position is used\n{rep.position_mismatch}")
+                await self._position_alerts(v, rep, start)
+
+    async def _position_alerts(self, v: Venue, rep: ReconcileReport, start: bool) -> None:
+        """The venue's position is used either way; this says what differed. At a start, a market the venue holds
+        flat was closed while the bot was stopped: only logged after a recorded /closeall, else said plainly."""
+        closed_at = closeall_us(self.state.kv_get(CLOSEALL_KEY), v)
+        name = v.value.title()
+        closeall: list[str] = []
+        stopped: list[str] = []
+        other: list[str] = []
+        for b, local, remote in rep.position_mismatch:
+            line = f"{b}: bot's record {side_size(local)} · {name} {side_size(remote)}"
+            if not (start and remote == 0):
+                other.append(line)
+            elif closed_at is not None and closed_at > rep.since_us.get(b, 0):
+                closeall.append(line)
+            else:
+                stopped.append(line)
+        if closeall:
+            await self.alerter.send(Level.INFO, "reconcile_closeall", "\n".join(
+                ["ℹ️ CLOSED BY /CLOSEALL", *closeall, "Starting flat"]))
+        if stopped:
+            await self.alerter.send(Level.WARN, "reconcile_stopped", "\n".join(
+                ["⚠️ CLOSED WHILE STOPPED", *stopped, "", f"Not by /closeall: on the {name} site, by the guardian or "
+                 "a liquidation", "Starting flat"]))
+        if other:
+            await self.alerter.send(Level.WARN, "reconcile", "\n".join(
+                ["⚠️ POSITION MISMATCH", *other, "", f"{name}'s position is used"]))
 
     async def _reconcile_loop(self) -> None:
         """Every 5 minutes, and within 5 s of an adapter asking (an account stream went `degraded`)."""
@@ -596,7 +622,7 @@ class BotRunner:
         self.arcus_ws.start()
         await self.arcus_ws.ws.wait_connected()
         await asyncio.sleep(3)  # let the books snapshot
-        await self.reconcile_once()
+        await self.reconcile_once(start=True)
         for d in self.dms:
             d.start()
         self.tasks = [asyncio.create_task(self._tick_loop()), asyncio.create_task(self._heartbeat()),

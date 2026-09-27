@@ -349,10 +349,14 @@ class Control:
     async def flatten(self, mode: str, venue: str, taker: bool) -> dict[str, Any]:
         """{positions, orders sent, open: positions a moment later, taker}. Real accounts only."""
         from bot.cli import venue_flatten
+        from bot.core.state import note_closeall
 
         if mode == "paper":
             raise ValueError("paper positions live inside the paper bot: Pause lets its exit orders work them off")
-        return await venue_flatten(venue, None, mode == "live", taker)
+        res = await venue_flatten(venue, None, mode == "live", taker)
+        if res.get("orders"):   # the next start then knows who closed the bot's position
+            note_closeall(self.db_path(mode), venue)
+        return res
 
     # ------------------------------------------------------------------ reports and logs
     def report(self, mode: str, date: str) -> str | None:
