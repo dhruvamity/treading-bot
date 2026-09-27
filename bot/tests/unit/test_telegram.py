@@ -441,7 +441,7 @@ async def test_the_run_form_changes_one_field_at_a_time(tmp_path: Path) -> None:
     assert text.startswith("🎛 <b>BTC · RUN SETUP</b>\n\n<code>BTC · Mid 0 · Neutral · 20x</code>")
     assert "Quotes the best bid and ask, following the mid" in text
     labels = [[t for t, _d in row] for row in kb]
-    assert labels[0] == ["• Mid", "Grid"] and labels[1] == ["-1 bp", "• 0 bp", "+1 bp", "+2 bp", "+3 bp", "+5 bp"]
+    assert labels[0] == ["• Mid", "Grid", "Smart"] and labels[1] == ["-1 bp", "• 0 bp", "+1 bp", "+2 bp", "+3 bp", "+5 bp"]
     assert labels[2] == ["Short", "• Neutral", "Long"] and labels[4][0] == "• No SL" and labels[5][0] == "• No target"
     data = {t: d for row in kb for t, d in row}
     await bot.handle(press(data["Grid"]))                               # Grid keeps the spread (never below 0)

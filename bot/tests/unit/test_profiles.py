@@ -202,7 +202,7 @@ async def test_a_stale_list_asks_for_a_scan_and_posts_the_fresh_list(tmp_path: P
     text, kb = api.sent[-1][1], api.sent[-1][2]
     assert text.startswith("🚀 <b>Most Volume · Top 3</b>\n\n<code>Capital $28 · Budget $0.20 / $1k · Scan")
     assert "<b>1. SPY</b>\n<code>Mid +1 · Neutral · 50x · $" in text and "Cost $0.12/k" in text
-    assert "/run &lt;symbol&gt; &lt;mid|grid&gt; &lt;spread&gt; &lt;bias&gt; &lt;leverage&gt; &lt;paper|live&gt;" in text
+    assert "/run &lt;symbol&gt; &lt;mid|grid|smart&gt; &lt;spread&gt; &lt;bias&gt; &lt;leverage&gt; &lt;paper|live&gt;" in text
     assert (tmp_path / "state" / SCAN_NOW).exists() and "Scan started" in text
     assert kb[0][0] == ("▶️ 1", "pick volume 1") and ("🔄 Scan", "rescan volume") in kb[-1]
     n = len(api.sent)

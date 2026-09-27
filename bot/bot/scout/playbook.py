@@ -11,7 +11,8 @@ The table (data/scout/playbook.json) gives, per market, setup, session and regim
 dollar traded, shrunk towards the same setup's session-wide and overall numbers where a cell has few hours.
 
 BTC and SPY days recorded before the scout kept their order book (their trades go back to June) use a book rebuilt
-from trades: one tick around the last print. Checked against recorded books (2026-09-27): BTC Mid 0 within 1% of the
+from trades: one tick around the last print; Smart setups are left out of those days (the rebuilt book has no real
+sizes, and Smart reads them), so theirs come from recorded days only. Checked against recorded books (2026-09-27): BTC Mid 0 within 1% of the
 volume at 1.86 vs 1.68 bp (0.99 hourly correlation), SPY Mid 0 1.41 vs 1.18 bp; it overstates the cost of SPY's wider
 spreads on weekends (Mid +1 1.58 vs 0.65 bp), which only makes those setups look worse than they are. Other markets
 use recorded books only.
@@ -55,7 +56,8 @@ from bot.scout.tape import US_DAY, DayTape, TapeStore, day_start_us, day_str
 S = 1_000_000
 HOUR = 3600 * S
 VERSION = f"{SIM_VERSION}.1"
-SETUPS = ("Mid 0", "Mid +1", "Mid +2", "Mid +3", "Grid 0", "Grid +1", "Grid +3")
+SETUPS = ("Mid 0", "Mid +1", "Mid +2", "Mid +3", "Grid 0", "Grid +1", "Grid +3", "Smart 0", "Smart +2", "Smart +3")
+FIRST_SETUPS = SETUPS[:7]   # what a day cached before 2026-09-27 holds (a plain list of rows)
 MARKETS = ("BTC-USD", "SPY-USD", "ETH-USD", "SOL-USD", "QQQ-USD", "NVDA-USD", "GLD-USD", "HYPE-USD")
 SYNTH = ("BTC-USD", "SPY-USD")   # a book rebuilt from trades stands in for days without a recorded one
 DAYS = 42
@@ -92,9 +94,29 @@ def _hours_traded(ts: np.ndarray, s0: int) -> int:
     return len(np.unique(h))
 
 
+def setups_for(synth: bool) -> tuple[str, ...]:
+    """The playbook setups a day is backtested for: Smart reads the book's sizes, which a rebuilt book does not have."""
+    return tuple(n for n in SETUPS if not (synth and n.startswith("Smart")))
+
+
+def read_day(p: Path) -> tuple[set[str], list[list[Any]]]:
+    """(setups done, rows) of a cached day: {"setups": [...], "rows": [...]}, or a plain list of rows from before
+    2026-09-27 (FIRST_SETUPS)."""
+    d = json.loads(p.read_text())
+    if isinstance(d, list):
+        return set(FIRST_SETUPS), d
+    return set(d.get("setups") or ()), list(d.get("rows") or [])
+
+
+def write_day(p: Path, setups: set[str], rows: list[list[Any]]) -> None:
+    p.parent.mkdir(parents=True, exist_ok=True)
+    p.write_text(json.dumps({"setups": sorted(setups), "rows": rows}))
+
+
 def _day_job(args: tuple[Any, ...]) -> list[list[Any]]:
-    """One market-day: [[hour, setup, volume, pnl, session, regime, ratio], ...]; hours in `blocked` are skipped."""
-    root, market, day, mi, rth, risk, synth, touch, usual_rv, blocked = args
+    """One market-day: [[hour, setup, volume, pnl, session, regime, ratio], ...] for the setups in `names`; hours in
+    `blocked` are skipped."""
+    root, market, day, mi, rth, risk, synth, touch, usual_rv, blocked, names = args
     store = TapeStore(root)
     s0 = day_start_us(day)
     tape = store.load_range(market, s0 - 3 * HOUR, s0 + US_DAY)
@@ -120,7 +142,7 @@ def _day_job(args: tuple[Any, ...]) -> list[list[Any]]:
             continue
         sess = sessions.session_of(a / S + 1800)
         ratio = round(before.ratio, 3) if math.isfinite(before.ratio) else None
-        for name in SETUPS:
+        for name in names:
             res = Sim(config_for(name), r, info, SimParams(queue=True)).run(w)
             out.append([h, name, round(res.maker_usd + res.taker_usd, 2), round(res.pnl, 4), sess, before.bucket,
                         ratio])
@@ -185,7 +207,8 @@ class Playbook:
 
     def build(self, now_us: int | None = None, *, workers: int = 2, stop: threading.Event | None = None,
               budget_s: float = 1800.0) -> dict[str, Any]:
-        """Backtest the days not cached yet (most recent first, at most budget_s), then write the table."""
+        """Backtest the days not cached yet, and the setups a cached day is missing (one added since), most recent
+        first and for at most budget_s; then write the table."""
         now_us = now_us or time.time_ns() // 1000
         mis = load_markets(self.root / "markets.json")
         meta = market_meta(self.root / "markets.json")
@@ -204,12 +227,16 @@ class Playbook:
             have[m] = []
             touch = self._touch_size(m)
             for d, syn in days:
-                if self.cache_path(m, d, rk).exists():
-                    have[m].append(d)
+                cp = self.cache_path(m, d, rk)
+                done_setups = read_day(cp)[0] if cp.exists() else set()
+                missing = tuple(n for n in setups_for(syn) if n not in done_setups)
+                if done_setups:
+                    have[m].append(d)   # it counts with what it has while the rest is computed
+                if not missing:
                     continue
                 u = rg.usual(self.store, m, day_start_us(d))
                 jobs.append((str(self.store.root), m, d, asdict(mis[m]), meta[m].get("regularTradingHours"), r, syn,
-                             touch, [((int(k[0]), k[1]), v) for k, v in u.rv.items()], self.blocked(m, d)))
+                             touch, [((int(k[0]), k[1]), v) for k, v in u.rv.items()], self.blocked(m, d), missing))
                 where.append((m, d))
         order = sorted(range(len(jobs)), key=lambda i: where[i][1], reverse=True)
         jobs, where = [jobs[i] for i in order], [where[i] for i in order]
@@ -221,9 +248,10 @@ class Playbook:
                 for i, rows in _gather(ex, jobs, stop, fn=_day_job, deadline=deadline):
                     m, d = where[i]
                     cp = self.cache_path(m, d, risk_key(risks[m]))
-                    cp.parent.mkdir(parents=True, exist_ok=True)
-                    cp.write_text(json.dumps(rows))
-                    have[m].append(d)
+                    done_setups, old = read_day(cp) if cp.exists() else (set(), [])
+                    write_day(cp, done_setups | set(jobs[i][-1]), old + rows)
+                    if d not in have[m]:
+                        have[m].append(d)
                     done += 1
             except ScanStopped:
                 _halt(ex)
@@ -252,7 +280,7 @@ class Playbook:
             rows: list[list[Any]] = []
             for d in ds:
                 try:
-                    r = json.loads(self.cache_path(m, d, rk).read_text())
+                    r = read_day(self.cache_path(m, d, rk))[1]
                 except (OSError, ValueError):
                     continue
                 rows += r

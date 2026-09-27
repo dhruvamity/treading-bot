@@ -703,6 +703,18 @@ def cmd_auto(a: argparse.Namespace) -> None:
         print("\nNo playbook yet: the scout builds it after its next scan (or `bot scout playbook`)")
 
 
+def cmd_account(a: argparse.Namespace) -> None:
+    """All-time perps volume, fees paid and earned, the fee tier and the realized result, as Arcus keeps them."""
+    from bot.core import account_stats
+
+    raw = asyncio.run(account_stats.read(load_arcus_config().rest.mainnet))
+    head, blocks = account_stats.lines(raw)
+    print(head)
+    for label, lines in blocks:
+        print(f"\n{label}")
+        print("\n".join(f"  {x}" for x in lines))
+
+
 def cmd_secrets(a: argparse.Namespace) -> None:
     s = SecretStore()
     if a.action == "init":
@@ -771,7 +783,7 @@ def build_parser() -> argparse.ArgumentParser:
         sp.set_defaults(fn=fn)
         return sp
 
-    modes = ("mid", "grid")
+    modes = ("mid", "grid", "smart")
     add("sessions", cmd_sessions, "list the session files: venue, subaccount, market, mode, capital, live_enabled")
     sp = add("doctor", cmd_doctor, "check everything a live run needs (credentials, account, sizing, clock); no orders")
     sp.add_argument("sessions", nargs="*", help="session names (default: credentials and account only)")
@@ -854,6 +866,7 @@ def build_parser() -> argparse.ArgumentParser:
     sp.add_argument("--budget", type=float, help="dollars added to the pot each day at 00:00 UTC")
     sp.add_argument("--cost", type=float,
                     help="cost ceiling in bp (backtest); fixes it (otherwise the playbook tunes it daily for the budget)")
+    add("account", cmd_account, "all-time volume, fees paid and earned, fee tier and result, as Arcus reports them")
     sp = add("resume", cmd_resume, "clear safe mode / stops (after investigation)")
     sp.add_argument("--venue")
     sp.add_argument("--all", action="store_true")

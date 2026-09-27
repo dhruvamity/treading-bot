@@ -317,8 +317,20 @@ class SessionEngine:
             inventory=self.state.position(self.venue, self.base), entry_price=self.state.entry.get((self.venue, self.base)),
             quoting_allowed=ok and mode is not BudgetMode.CANCELS_ONLY,
             quoting_block_reason=why if not ok else ("budget: cancels only" if mode is BudgetMode.CANCELS_ONLY else ""),
-            event_window=ev, off_hours=off_hours, our_fill_usd_5m=sum(x for _, x in self._fill_usd_5m))
+            event_window=ev, off_hours=off_hours, our_fill_usd_5m=sum(x for _, x in self._fill_usd_5m),
+            own_touch=self._own_touch(view, m))
         return ctx
+
+    def _own_touch(self, view: Any, m: Market) -> tuple[float, float]:
+        """Our open orders' remaining size (base units) at the best bid and at the best ask (Smart leaves them out of
+        the book's imbalance)."""
+        bb, ba = view.book.best_bid(), view.book.best_ask()
+        out = [0.0, 0.0]
+        for o in self.state.open_orders(self.venue, self.base):
+            for k, best, side in ((0, bb, Side.BUY), (1, ba, Side.SELL)):
+                if best is not None and o.req.side is side and o.req.price == best[0]:
+                    out[k] += float(o.remaining)
+        return out[0], out[1]
 
     # ---------------------------------------------------------------- tick
     async def tick(self, now_us: int) -> StrategyOutput | None:

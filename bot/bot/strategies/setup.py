@@ -6,10 +6,13 @@ bias. "Mid 0", "Mid +1 Long", "Grid +3 Short".
 - Grid: quotes around the last fill (Tread "Grid"): a sell never below the last buy + spread, a buy never above the
   last sell - spread. Flat, it quotes around the mid. A soft reset closes the position at the touch when the mid runs
   GRID_RESET_PCT against it.
+- Smart: Mid that leaves a side out for the second its fill would likely lose (the book leans hard against it, or the
+  price has just moved against it); the side that reduces the position always stays (bot/strategies/smart.py).
 - Bias: Long holds about BIAS_FRAC of the position cap long while quoting both sides (gains when the price rises),
   Short the same short, Neutral none.
 
-The research behind the defaults below is in docs/notes/2026-09-26-tread-style-setups.md.
+The research behind the defaults below is in docs/notes/2026-09-26-tread-style-setups.md (Mid, Grid) and
+docs/notes/2026-09-27-profitability.md (Smart).
 """
 
 from __future__ import annotations
@@ -17,12 +20,13 @@ from __future__ import annotations
 import re
 from dataclasses import dataclass
 
-MODES = ("mid", "grid")
+MODES = ("mid", "grid", "smart")
 BIASES = ("neutral", "long", "short")
 BIAS_FRAC = 0.5          # the share of the position cap a Long or Short bias holds
 GRID_RESET_PCT = 0.5     # Grid soft reset: the mid this far (%) against the position from the last fill
 MID_SPREADS = (-1.0, 0.0, 1.0, 2.0, 3.0, 5.0)    # the scout backtests these on every market ...
 GRID_SPREADS = (0.0, 1.0, 2.0, 3.0, 5.0)
+SMART_SPREADS = (0.0, 1.0, 2.0, 3.0)               # Smart: Neutral only (a bias fights the side it leaves out)
 SPREAD_RANGE = (-5.0, 50.0)                        # ... and the owner may run any spread in this range
 
 # Names from before 2026-09-26 that mean the same thing (old buttons, old habits: "/run BTC touch 0bp 40x")
@@ -42,7 +46,7 @@ class Setup:
 
     @property
     def name(self) -> str:
-        """"Mid 0", "Mid +1 Long", "Grid +3 Short": the scout's setting name (Neutral is left out)."""
+        """"Mid 0", "Mid +1 Long", "Grid +3 Short", "Smart 0": the scout's setting name (Neutral is left out)."""
         b = "" if self.bias == "neutral" else f" {self.bias.capitalize()}"
         return f"{self.mode.capitalize()} {spread_text(self.spread)}{b}"
 
@@ -57,7 +61,7 @@ class Setup:
 
     @property
     def sid(self) -> str:
-        """A short id for Telegram buttons: m0n, m+1l, g+3s, m-0.5n."""
+        """A short id for Telegram buttons: m0n, m+1l, g+3s, m-0.5n, s0n."""
         return f"{self.mode[0]}{spread_text(self.spread)}{self.bias[0]}"
 
     def with_(self, **kw: object) -> Setup:
@@ -73,10 +77,10 @@ def spread_text(x: float) -> str:
 
 
 def from_sid(sid: str) -> Setup | None:
-    m = re.fullmatch(r"([mg])([+-]?\d+(?:\.\d+)?)([nls])", sid or "")
+    m = re.fullmatch(r"([mgs])([+-]?\d+(?:\.\d+)?)([nls])", sid or "")
     if not m:
         return None
-    mode = "mid" if m.group(1) == "m" else "grid"
+    mode = {"m": "mid", "g": "grid", "s": "smart"}[m.group(1)]
     bias = {"n": "neutral", "l": "long", "s": "short"}[m.group(3)]
     try:
         return checked(Setup(mode, float(m.group(2)), bias))
@@ -86,7 +90,7 @@ def from_sid(sid: str) -> Setup | None:
 
 def checked(s: Setup) -> Setup:
     if s.mode not in MODES:
-        raise ValueError(f"unknown mode {s.mode!r}: Mid or Grid")
+        raise ValueError(f"unknown mode {s.mode!r}: Mid, Grid or Smart")
     if s.bias not in BIASES:
         raise ValueError(f"unknown bias {s.bias!r}: Long, Neutral or Short")
     lo, hi = SPREAD_RANGE
@@ -98,7 +102,7 @@ def checked(s: Setup) -> Setup:
 
 
 def parse(text: str) -> Setup:
-    """"mid 0", "Mid +1 long", "grid 3 short", "mid -1", and the names from before 2026-09-26 ("touch 0bp",
+    """"mid 0", "Mid +1 long", "grid 3 short", "mid -1", "smart 0", and the names from before 2026-09-26 ("touch 0bp",
     "deep 3bp", "improve touch", "anchor 3bp"). Raises ValueError with what to type instead."""
     t = " ".join(text.lower().replace(",", " ").replace("·", " ").split())
     if t in ("", "auto"):
@@ -113,8 +117,8 @@ def parse(text: str) -> Setup:
     bias = "neutral"
     if words and words[-1] in BIASES:
         bias = words.pop()
-    if len(words) == 1 and re.fullmatch(r"(mid|grid)[+-]?\d+(\.\d+)?", words[0]):   # "mid+1", "grid0"
-        m = re.fullmatch(r"(mid|grid)([+-]?\d+(?:\.\d+)?)", words[0])
+    if len(words) == 1 and re.fullmatch(r"(mid|grid|smart)[+-]?\d+(\.\d+)?", words[0]):   # "mid+1", "grid0"
+        m = re.fullmatch(r"(mid|grid|smart)([+-]?\d+(?:\.\d+)?)", words[0])
         assert m is not None
         words = [m.group(1), m.group(2)]
     if len(words) == 2 and words[0] in MODES:
@@ -127,10 +131,11 @@ def parse(text: str) -> Setup:
         raise ValueError(f"{words[0].capitalize()} needs a spread, e.g. {words[0]} 0 or {words[0]} +1")
     if t.startswith(_RETIRED):
         raise ValueError(f"{text!r} was retired on 2026-09-26: use Mid or Grid (e.g. mid 0, grid +1)")
-    raise ValueError(f"unknown setup {text!r}: e.g. mid 0, mid +1 long, grid +3 short")
+    raise ValueError(f"unknown setup {text!r}: e.g. mid 0, mid +1 long, grid +3 short, smart 0")
 
 
 def menu() -> list[Setup]:
-    """What the scout backtests on every market: every Mid and Grid spread, each Neutral, Long and Short."""
+    """What the scout backtests on every market: every Mid and Grid spread, each Neutral, Long and Short, and the
+    Smart spreads (Neutral)."""
     return [Setup(mode, s, b) for mode, spreads in (("mid", MID_SPREADS), ("grid", GRID_SPREADS))
-            for s in spreads for b in BIASES]
+            for s in spreads for b in BIASES] + [Setup("smart", s) for s in SMART_SPREADS]

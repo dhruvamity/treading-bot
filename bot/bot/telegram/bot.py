@@ -36,6 +36,7 @@ from bot.telegram.views import (
     COMMANDS,
     HELP,
     _risk,
+    account_text,
     ago,
     auto_keyboard,
     balance_text,
@@ -292,7 +293,8 @@ class TelegramBot:
                 "pnl": self.c_pnl, "positions": self.c_positions, "orders": self.c_orders,
                 "sessions": self.c_sessions, "logs": self.c_logs, "yesterdayreport": self.c_report,
                 "ping": self.c_ping, "alerts": self.c_alerts, "mute": self.c_mute, "unmute": self.c_unmute,
-                "ok": self.c_ok, "no": self.c_no, "balance": self.c_balance, "settings": self.c_settings,
+                "ok": self.c_ok, "no": self.c_no, "balance": self.c_balance, "account": self.c_account,
+                "settings": self.c_settings,
                 "dashboard": self.c_dashboard, "dashstop": self.c_dashstop, "dashresume": self.c_dashresume,
                 "volume": self.c_volume, "cheapest": self.c_cheapest, "maxvolume": self.c_maxvolume,
                 "pick": self.c_pick, "rm": self.c_rm, "f": self.c_f, "auto": self.c_auto,
@@ -800,6 +802,20 @@ class TelegramBot:
         live = next((x.get("size_capital") for x in ((view.snapshot or {}).get("sessions") or [])), None) \
             if view else None
         await self.reply(ctx, balance_text(snap, blog.summary(), held, live, idx), refresh_keyboard("balance"))
+
+    async def c_account(self, ctx: Ctx, args: list[str]) -> None:
+        """All-time perps volume, fees paid and earned, the fee tier and the realized result, as Arcus keeps them."""
+        from bot.common.config import load_arcus_config
+        from bot.core import account_stats
+
+        raw, err = None, ""
+        try:
+            url = load_arcus_config(Path(self.control.root) / "config" / "venues" / "arcus.yaml").rest.mainnet
+            raw = await account_stats.read(url)
+        except Exception as e:
+            log.warning("account_read_failed", reason=type(e).__name__)
+            err = _reason(e)[:120]
+        await self.reply(ctx, account_text(raw, err), refresh_keyboard("account"))
 
     async def c_settings(self, ctx: Ctx, args: list[str]) -> None:
         over = settings.load(self._state_dir())

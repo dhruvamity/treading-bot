@@ -2,14 +2,15 @@
 
 A maker (limit-order) trading bot for **Arcus perpetual futures**. Its goal is as much **maker volume** as possible at
 the lowest cost per dollar traded. Its setups are Tread.fi's: **Mid** or **Grid**, a **spread** in bps and a
-**directional bias** ("Mid 0", "Mid +1 Long", "Grid +3 Short"; [section 7](#7-strategies)). It sizes itself from your account: every order size, position cap and
+**directional bias** ("Mid 0", "Mid +1 Long", "Grid +3 Short"), plus **Smart**: Mid that leaves a side out for the
+seconds its fill would likely lose ([section 7](#7-strategies-explained)). It sizes itself from your account: every order size, position cap and
 stop is a fixed share of the capital, so the same setup runs on $20 or $20,000 ([4.6](#46-capital-the-least-and-the-most)).
 The examples in this guide use $100.
 
 It does three things:
 
-1. **Scout.** It records every Arcus perp around the clock and, every 30 minutes, backtests 33 setups (Mid and Grid,
-   every spread, each Neutral, Long and Short) on every market at its maximum leverage. It ranks them by volume and by
+1. **Scout.** It records every Arcus perp around the clock and, every 30 minutes, backtests 37 setups (Mid and Grid,
+   every spread, each Neutral, Long and Short, and Smart) on every market at its maximum leverage. It ranks them by volume and by
    cost per $1,000 traded, among those that pass a set of safety checks.
 2. **Pilot.** It offers you the **top 3**. You approve one, and it deploys that exact setting (paper or live), then
    keeps checking it against fresh data.
@@ -41,7 +42,7 @@ From `treading-bot/bot` on the machine that runs the bot (after the one-time ins
 (`bot` is `.venv/bin/bot`; activate the venv with `source .venv/bin/activate`, or type the full path.)
 
 On your phone, send `/menu` for buttons, or: `/dashboard` (a live screen that updates itself every 10 s), `/top3`
-(best setups, Run), `/auto` (the autopilot), `/openpositions` (what runs), `/status`, `/balance`, `/pauseneworders`, `/closeall`, `/settings` and `/set` (change capital, share of the balance, stops, scan
+(best setups, Run), `/auto` (the autopilot), `/openpositions` (what runs), `/status`, `/balance`, `/account` (all-time volume and fees), `/pauseneworders`, `/closeall`, `/settings` and `/set` (change capital, share of the balance, stops, scan
 interval without editing files). [Section 9](#9-the-telegram-bot) has them all.
 
 ---
@@ -71,7 +72,7 @@ interval without editing files). [Section 9](#9-the-telegram-bot) has them all.
 ```mermaid
 flowchart LR
     A[Arcus WebSocket<br/>best bid/offer + trades<br/>all perps] --> B[Scout recorder<br/>data/scout/tape]
-    B --> C[Backtest every 30 min<br/>33 setups at max leverage<br/>x every market]
+    B --> C[Backtest every 30 min<br/>37 setups at max leverage<br/>x every market]
     C --> D[GO checks + ranking<br/>data/scout/report.txt]
     D --> E[Top 3 offered<br/>CLI or Telegram]
     E -->|you approve| F[Pilot writes<br/>config/sessions/pilot.yaml]
@@ -223,7 +224,7 @@ MOST VOLUME top 3 (the most volume for at most your cost per $1,000 traded, at m
 
 | Column | Meaning |
 |---|---|
-| setting | The setup ([section 7.2](#72-the-scout-menu-33-setups)) and the leverage it was sized at |
+| setting | The setup ([section 7.2](#72-the-scout-menu-37-setups)) and the leverage it was sized at |
 | order | Dollar size of each order |
 | fills/d, volume/d | Average maker fills and maker volume (USD) per full day |
 | pnl/d, worst | Average and worst daily PnL in USD, after fees and after closing any leftover position |
@@ -534,7 +535,7 @@ in the [research note](bot/docs/notes/2026-09-27-autopilot.md).
 | The session | Weekend (New York Fri 17:00 to Sun 18:00), Asia (from Tokyo 09:00), London (from 08:00 London), US open (09:30–12:00 New York), US afternoon (12:00–16:00), US evening. Each city's own clock, so daylight saving is handled |
 | Each market's state | The last hour's volatility against its usual level at that hour: **calm** (under 0.75x), **normal**, **busy** (1.25–2x), **wild** (over 2x). A one-minute move over 6x usual is a **shock**: that market is left out for 30 minutes |
 | Events | Flat from 45 minutes before CPI, the jobs report and FOMC until 30 minutes after (the dates are in `config/calendars/events.csv`). A stock is also left out from 24 h before its earnings to 24 h after; the scout fetches those dates from Nasdaq every day |
-| The playbook | Every hour of the last 42 days backtested from flat, for 7 setups (Mid 0 to +3, Grid 0, +1, +3) on 8 markets (BTC, SPY, ETH, SOL, QQQ, NVDA, GLD, HYPE). The result is the volume per hour and cost per dollar for each market, setup, session and state. Rebuilt daily (`bot scout playbook` prints it) |
+| The playbook | Every hour of the last 42 days backtested from flat, for 10 setups (Mid 0 to +3, Grid 0, +1, +3, and Smart 0, +2, +3 on days with a recorded book) on 8 markets (BTC, SPY, ETH, SOL, QQQ, NVDA, GLD, HYPE). The result is the volume per hour and cost per dollar for each market, setup, session and state. Rebuilt daily (`bot scout playbook` prints it) |
 
 **What it does:**
 
@@ -650,18 +651,19 @@ drawdown 10%.
 - **Requote tolerance.** A live order is kept (keeping its queue place) while it is within max(2 ticks,
   0.25 × half-spread) of the wanted price and within 20% of the wanted size; otherwise it is replaced.
 
-### 7.2 The scout menu (33 setups)
+### 7.2 The scout menu (37 setups)
 
 A setup is named the way Tread.fi names its runs: the mode, the spread in bps, and the bias when it is not Neutral.
-The scout backtests all 33 on every market at its maximum leverage, so the report labels look like `Mid +1 @ 50x`
+The scout backtests all 37 on every market at its maximum leverage, so the report labels look like `Mid +1 @ 50x`
 or `Grid +3 Short @ 40x` (`bot/strategies/setup.py`).
 
 | Mode | Spreads backtested | Biases | What it quotes |
 |---|---|---|---|
 | **Mid** | −1, 0, +1, +2, +3, +5 | Neutral, Long, Short | both sides `spread` bps from the book's mid, following it ([7.3](#73-mid-mode-mid)) |
 | **Grid** | 0, +1, +2, +3, +5 | Neutral, Long, Short | around the **last fill**, soft reset at 0.5% ([7.4](#74-grid-mode-grid)) |
+| **Smart** | 0, +1, +2, +3 | Neutral | as Mid, less a side while its fill would likely lose ([7.9](#79-smart-mode-smart-and-where-the-profit-is)) |
 
-- Any other spread (e.g. Mid +0.5, Grid +4) runs from `/run` without a backtest.
+- Any other spread or bias (e.g. Mid +0.5, Grid +4, Smart +5) runs from `/run` without a backtest.
 - The names from before 2026-09-26 still work in `/run` and old buttons: `touch 0bp` = Mid 0, `touch 1bp` = Mid +1,
   `deep 3bp` = Mid +3, `improve touch` = Mid −1, `anchor 3bp` = Grid +3.
 - RGrid, the RSI signal, the static grid and the "skip US session" variants were retired: they lost on every market in
@@ -768,15 +770,60 @@ Arcus differs from their venues in two ways that matter:
 
 | Tread | Here |
 |---|---|
-| Mid / Grid, spread, Long / Neutral / Short | The same three fields (Mid and Grid, [7.2](#72-the-scout-menu-33-setups)–[7.5](#75-directional-bias-bias-long--short)) |
+| Mid / Grid, spread, Long / Neutral / Short | The same three fields (Mid and Grid, [7.2](#72-the-scout-menu-37-setups)–[7.5](#75-directional-bias-bias-long--short)) |
 | Stop loss, take profit, volume | `sl=`, `tp=`, `vol=` ([7.6](#76-run-limits-stop-take-profit-volume-target)) |
 | DGrid (the bot picks the setup by regime) | The autopilot picks market and setup per session and market state, every minute ([5.1](#51-the-autopilot-auto)) |
 | RGrid (trend, mostly taker) | Retired: taker fills at 2.25 bp lost on every market |
-| Blend (an outside price) | Not built: the oracle price is not recorded, so it cannot be backtested |
+| Blend (an outside price) | Tested with Binance's BTC price (2026-09-27): Arcus follows it within seconds, but at the bot's once-a-second pace it adds little beyond Arcus's own book, which Smart reads ([7.9](#79-smart-mode-smart-and-where-the-profit-is)) |
 | Signal (RSI skew) | Retired: about $80k a day on BTC |
 | Participation rate, duration | Not built: on a maker-only venue the spread sets the speed (Mid 0 fastest) |
 | "Avoid NYC hours" | The US open is BTC's dearest session (2.3 bp), but the market's state matters more than the clock: a calm hour costs half a wild one in any session. The autopilot judges both ([5.1](#51-the-autopilot-auto)) |
 | Several bots, delta-neutral bots | Not allowed: one setup at a time, Arcus only |
+
+### 7.9 Smart (`mode: smart`), and where the profit is
+
+The first live SPY run (26–27 Sep) raised a fair question: after all the backtests, why does almost every trade close at
+a loss? The research is in the [research note](bot/docs/notes/2026-09-27-profitability.md).
+
+**Why a quote at the best price loses on Arcus:**
+- **The most it can earn is half the spread.** BTC and SPY sit at one tick most of the time, and half a tick is about
+  0.07 bp on SPY.
+- **Makers get nothing else.** The maker fee is 0, with no rebate below Arcus's VIP tier ($1B in 30 days).
+- **The traders who hit it know more.** Across every trade at the best price (Sep 19–26), the price moved against the
+  maker by 0.9 bp on SPY and 1.4 bp on BTC within a minute.
+- **The profitable accounts are a different game.** The biggest ones on Arcus's leaderboard are mostly makers and earn
+  2–9 bp overall, but their fills lose about as much in the first minute as ours. Their profit comes from positions
+  held for hours and, very likely, hedges on other exchanges or fee terms of their own. None of that is available to
+  one Arcus market and about $100.
+- **An outside price is too slow for us.** Binance leads Arcus BTC, but by the time a once-a-second bot acts, Arcus has
+  already covered two-thirds of the move.
+
+**What does help: choosing the seconds.** A fill loses most when:
+- the other side of the book holds far more than ours (a bid facing 10x its size on the ask is about to be traded
+  through);
+- the price has just moved against that side (a bid right after a drop).
+
+**Smart** quotes as Mid and, each second, leaves out a side that would add to the position when either holds (imbalance
+beyond 0.6, or 0.5 bp against it over 5 s; our own orders are not counted in the book). The side that reduces the
+position always stays. The backtest runs the same rule, so the scout ranks Smart like any other setup.
+
+| Backtest, Sep 19–26 | Mid 0 | Smart 0 | Smart's volume |
+|---|---|---|---|
+| SPY, position stop $0.90 (1%) | 1.57 bp | **1.15 bp** | 81% |
+| SPY, position stop $2.70 (3%) | 1.06 bp | **0.82 bp** | 86% |
+| Other markets (NVDA, GLD, BTC, ETH, SOL, QQQ, HYPE) | 1.0–2.9 bp | 0–16% less | 70–87% |
+
+- **The position stop matters as much.** At 1% it fires about 20 times a day on SPY and every exit ends as a taker
+  order. `/set position_stop 3` cuts SPY Mid 0 from 1.57 to 1.06 bp in the backtest.
+- **Wider quotes on the index perps are the closest thing to a profit.** SPY Smart +3 (about $35k a day) and QQQ Mid +3
+  (about $19k a day) made money on 6 of 8 days (+$2 and +$3 a day, backtest), best in the US morning.
+  - SPY and QQQ follow a real index, so after a large order pushes the perp it tends to come back.
+  - Eight days is not proof, and about 120 market × setup cases were tried. Paper-run one for a week first.
+
+| You want | Run | Backtest |
+|---|---|---|
+| Volume, as cheaply as possible | **SPY Smart 0** with `/set position_stop 3` | 0.82 bp, about $300k a day |
+| A small profit, slowly (to be proven) | **SPY Smart +3** or **QQQ Mid +3**, in paper first | +$2–3 a day, $20–35k a day |
 
 ---
 
@@ -789,7 +836,7 @@ A session is one YAML file in `bot/config/sessions/`. The pilot writes `pilot.ya
 |---|---|
 | `session_id`, `venue`, `market` | Name, `arcus`, and the base asset (e.g. `QQQ` for QQQ-USD) |
 | `account_index` | Arcus subaccount 0–9 (must match the one your key is bound to; `bot keys`) |
-| `mode` | `mid` or `grid` (Tread's Mid and Grid; `anchor` in an older file means `grid`) |
+| `mode` | `mid`, `grid` or `smart` (Tread's Mid and Grid, and Smart; `anchor` in an older file means `grid`) |
 | `bias`, `bias_frac` | `neutral`, `long` or `short`, and the share of the position cap it holds (0.5; [7.5](#75-directional-bias-bias-long--short)) |
 | `live_enabled` | Part of the live lock: required for unattended live starts |
 | `capital_usd`, `leverage_max` | Capital, and the leverage the runner sets on Arcus before quoting |
@@ -848,11 +895,12 @@ Send `/menu` for buttons. Telegram's `/` list shows the everyday commands; the r
 | `/cheapest` | 💎 **Cheapest**: the lowest cost per $1,000 traded within the budget, among setups that trade at least 50x the capital a day |
 | `/maxvolume` | 🔥 **Max Volume**: the most volume whatever it costs; every safety check still applies (no kill or liquidation in the backtest, enough fills, 3 full days of data, market not trending now). Its last 24 h may not be re-checked: the card says so |
 | ▶️ **k** | That setup in the **run form** at the leverage the list backtested |
-| `/run` | 🎛 **The run form**, Tread's order form as buttons: pick a market, then one tap per field (Mid or Grid · spread −1…+5 bp · Short / Neutral / Long · leverage · run stop · volume target). The message shows the sizes, how it quotes, and the backtest of exactly that setup (or that it has none), then **📝 Paper** or **🔴 LIVE**. In one line: `/run BTC mid 0 40x live sl=10`, `/run BTC mid +1 long 40x paper`, `/run SPY grid 3 short max live sl=15 vol=100k tp=5` (any part left out opens the form with the rest filled in; the old names such as `touch 0bp` still work). It never waits for a scan: it sizes for the capital the scout uses now. A setup picked from a list is judged by that list (paused if it drops out); anything else runs as **your pick**, never paused for its numbers, only if Arcus takes the market offline |
+| `/run` | 🎛 **The run form**, Tread's order form as buttons: pick a market, then one tap per field (Mid, Grid or Smart · spread −1…+5 bp · Short / Neutral / Long · leverage · run stop · volume target). The message shows the sizes, how it quotes, and the backtest of exactly that setup (or that it has none), then **📝 Paper** or **🔴 LIVE**. In one line: `/run BTC mid 0 40x live sl=10`, `/run BTC mid +1 long 40x paper`, `/run SPY grid 3 short max live sl=15 vol=100k tp=5`, `/run SPY smart +3 50x paper` (any part left out opens the form with the rest filled in; the old names such as `touch 0bp` still work). It never waits for a scan: it sizes for the capital the scout uses now. A setup picked from a list is judged by that list (paused if it drops out); anything else runs as **your pick**, never paused for its numbers, only if Arcus takes the market offline |
 | `/openpositions` | What is deployed: state, today's PnL and volume vs the backtest, the last check, **🔴 Go LIVE with this setup** (on a paper run), **Close & stop** |
 | `/dashboard` | A live screen that updates itself every 10 s, pinned at the top of the chat: today's volume (and its maker pace vs the backtest), how much of the day it quoted and what blocked it (e.g. "Quoting 39% · safety pause 61%"), how often it rested at the best bid and ask (else how many ticks behind), today's PnL, the position, and your capital's profit or loss (equity minus deposits). ⏹ stops it, ▶️ starts it again; a newer `/dashboard` replaces the old one |
 | `/status` | Is it running, today's PnL, fills, volume |
 | `/balance` | The account now (read live and logged): equity, free collateral, deposits vs trading PnL, the 1/7/30-day change, and the capital the scout and the bot size for |
+| `/account` | 📒 The account as Arcus keeps it: futures (perps) volume all-time, 30 days, 24 h and 7 days; fees paid; fees earned (maker rebates, referral commission); the fee tier and the volume the next one needs; all-time realized PnL and rank. Spot volume is not in Arcus's API (stock tokens trade on-chain from the wallet), and the bot trades perps only. Also in the menu (📒 Account) and `bot account` |
 | `/positions`, `/orders` | What you hold; what is waiting on the book |
 | `/yesterdayreport [YYYY-MM-DD]` | The daily report: yesterday's, or the date given |
 
@@ -957,6 +1005,7 @@ running it first closes its position and stops.
 | `bot scout limits [--markets …]` | Per market: the least capital it can run on, the order ceiling, and the capital it can fully use |
 | `bot scout playbook [--markets …] [--capital USD]` | Build (only the days not cached) and print the autopilot's playbook: volume per hour and cost per market, setup and session |
 | `bot auto [status\|on\|off\|set] [--live] [--budget USD] [--cost BP]` | The autopilot: see it, turn it on (paper, or `--live` with `BOT_PILOT_LIVE=1` and typing LIVE), off, or change its budget or ceiling |
+| `bot account` | All-time volume, fees paid and earned, the fee tier and the result, as Arcus reports them (Telegram `/account`) |
 | `bot scout import PATH` | One-off import of older recordings |
 | `bot pilot status` / `approve N [--live]` / `close` | See, deploy, or close the one deployment |
 
@@ -1013,7 +1062,7 @@ Files: `data/scout/tape/<MARKET>/<YYYY-MM-DD>/{bbo,trades,depth}-*.npz`. Arcus s
 Each scan (the first one 10 s after start):
 
 1. Takes every market with at least one full recorded UTC day.
-2. Backtests **all 33 setups** ([7.2](#72-the-scout-menu-33-setups)) at each market's **maximum leverage**
+2. Backtests **all 37 setups** ([7.2](#72-the-scout-menu-37-setups)) at each market's **maximum leverage**
    (`--ladder`: also 20x, 10x, 5x and 2x). It sizes them for the **capital** in
    `SCOUT_CAPITAL` (default `auto`: the Docker container has no keys, so that means the $100 paper capital; set
    `SCOUT_CAPITAL=500` to rank for a $500 account). With today's 59 markets that is 59

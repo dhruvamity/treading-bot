@@ -271,15 +271,17 @@ HELP = f"""❔ {b("Commands")}
 
 {b("Pick and run")}
 /top3 (most volume) · /cheapest · /maxvolume
-/run · the run form: market, Mid or Grid, spread, bias, leverage
+/run · the run form: market, Mid, Grid or Smart, spread, bias, leverage
 {code("/run BTC mid 0 neutral 40x paper")}
 {code("/run BTC mid 0 40x live sl=10 vol=100k")}
 {code("/run SPY grid +1 long max live tp=5")}
+{code("/run SPY smart 0 50x paper")} Smart: Mid that skips likely losing fills
 sl= run stop $ · tp= take profit $ · vol= volume target
 /openpositions · what runs · go LIVE · close
 
 {b("Watch")}
 /dashboard · /status · /balance · /positions · /orders · /pnl · /logs · /yesterdayreport
+/account · all-time volume, fees paid and earned, fee tier
 
 {b("Control")}
 /pauseneworders · /unpause · /stop · /resumeaftersl
@@ -299,9 +301,10 @@ COMMANDS: list[tuple[str, str]] = [
     ("dashboard", "Live screen, every 10 s"),
     ("top3", "Most volume within your cost"), ("cheapest", "Cheapest per $1,000 traded"),
     ("maxvolume", "Most volume, any cost"),
-    ("run", "Run form: Mid/Grid, spread, bias, leverage"), ("auto", "Autopilot: trades by itself in a budget"),
+    ("run", "Run form: Mid/Grid/Smart, spread, bias, leverage"), ("auto", "Autopilot: trades by itself in a budget"),
     ("openpositions", "Positions · what runs · go LIVE · close"),
     ("status", "Running? today's PnL and volume"), ("balance", "Account balance and history"),
+    ("account", "All-time volume, fees paid and earned, fee tier"),
     ("positions", "What you hold"), ("orders", "Orders on the book"),
     ("pauseneworders", "Stop new orders"), ("unpause", "Quote again"),
     ("stop", "Shut the bot down (position kept)"), ("closeall", "Close every position"),
@@ -317,7 +320,8 @@ def menu_keyboard() -> Keyboard:
         [("⏸ Pause Orders", "pauseneworders"), ("⏹ Stop", "stop")],
         [("🚀 Most Volume", "top3"), ("💎 Cheapest", "cheapest"), ("🔥 Max Volume", "maxvolume")],
         [("🎛 Run form", "run"), ("🤖 Autopilot", "auto")],
-        [("📌 Positions", "openpositions"), ("📋 Orders", "orders"), ("💰 Balance", "balance")],
+        [("📌 Positions", "openpositions"), ("📋 Orders", "orders")],
+        [("💰 Balance", "balance"), ("📒 Account", "account")],
         [("🩺 Status", "status"), ("⚙️ Settings", "settings"), ("🔔 Alerts", "alerts")],
         [("❌ Cancel all", "cancelall"), ("🧯 Close all", "closeall")],
     ]
@@ -418,7 +422,7 @@ def candidate_lines(top: list[dict[str, Any]], *, cost: bool = False) -> str:
     return "\n\n".join("\n".join(setup_block(c, i, cost=cost)) for i, c in enumerate(top, 1))
 
 
-RUN_HINT = "/run <symbol> <mid|grid> <spread> <bias> <leverage> <paper|live>"
+RUN_HINT = "/run <symbol> <mid|grid|smart> <spread> <bias> <leverage> <paper|live>"
 
 
 def profile_text(scan: dict[str, Any] | None, profile: str, budget: float, now: float, note: str = "") -> str:
@@ -494,7 +498,7 @@ def how_it_quotes(s: Any, c: dict[str, Any] | None = None) -> list[str]:
     from bot.strategies import setup as su
 
     x = s.spread
-    if s.mode == "mid":
+    if s.mode in ("mid", "smart"):
         line = ("Quotes the best bid and ask, following the mid" if x == 0 else
                 f"Quotes {su.spread_text(x).lstrip('+')} bp either side of the mid, following it" if x > 0 else
                 "Quotes inside the mid, 1 tick from the other side")
@@ -503,6 +507,8 @@ def how_it_quotes(s: Any, c: dict[str, Any] | None = None) -> list[str]:
                 f"Sells {x:g} bp above the last buy, buys {x:g} bp below the last sell")
         line += f" · reset at {su.GRID_RESET_PCT:g}%"
     out = [line]
+    if s.mode == "smart":
+        out.append("Smart: leaves a side out while the book leans against it or the price just moved against it")
     if s.bias != "neutral":
         held = f" (~{money(su.BIAS_FRAC * float(c['cap_usd']))})" if c and c.get("cap_usd") else ""
         out.append(f"{s.bias.capitalize()} bias: holds about half the position cap {s.bias}{held}")
@@ -561,7 +567,7 @@ def form_keyboard(market: str, s: Any, lev: float, levs: list[float], sl: float,
     def on(x: bool, t: str) -> str:
         return f"• {t}" if x else t
 
-    spreads = list(su.MID_SPREADS if s.mode == "mid" else su.GRID_SPREADS)
+    spreads = list({"mid": su.MID_SPREADS, "grid": su.GRID_SPREADS}.get(s.mode, su.SMART_SPREADS))
     if s.spread not in spreads:
         spreads = sorted([*spreads, s.spread])
     lev_row = sorted({*levs, lev}, reverse=True)
@@ -654,6 +660,17 @@ def balance_text(snap: dict[str, float] | None, summary: dict[str, Any], held: d
                       f"Deposited {usd(nd, sign=False)} · trading PnL {usd(eq - nd)}" if nd is not None else ""),
                 section("Change", codes(" · ".join(changes))), section("Sizing", sizing),
                 codes(f"{summary.get('rows_30d', 0)} readings in the last 30 days"))
+
+
+def account_text(raw: dict[str, Any] | None, error: str = "") -> str:
+    """/account: the account's figures as Arcus keeps them (bot/core/account_stats.py)."""
+    from bot.core import account_stats
+
+    if raw is None:
+        return card("📒", "ACCOUNT", codes("Arcus did not answer" + (f": {error}" if error else "")),
+                    codes("Is ARCUS_ADDRESS in .env? Try again in a minute"))
+    head_line, blocks = account_stats.lines(raw)
+    return card("📒", "ACCOUNT", codes(head_line), *(section(label, codes(*ls)) for label, ls in blocks))
 
 
 SET_LABELS = {"volume_cost": "Budget", "capital": "Capital", "trade_share": "Share of the balance",
