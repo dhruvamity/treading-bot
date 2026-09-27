@@ -31,6 +31,7 @@ class StrategyContext:
     event_window: bool = False
     off_hours: bool = False  # Arcus RWA outside RTH
     our_fill_usd_5m: float = 0.0
+    own_touch: tuple[float, float] = (0.0, 0.0)  # our resting size (base units) at the best bid and at the best ask
 
     @property
     def mid(self) -> Decimal | None:

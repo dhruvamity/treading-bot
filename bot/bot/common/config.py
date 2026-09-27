@@ -193,7 +193,7 @@ class MMSession(_Model):
     venue: Literal["arcus"] = "arcus"
     account_index: int = 1
     market: str
-    mode: Literal["mid", "grid"] = "mid"          # Tread.fi's reference price: Mid or Grid (bot/strategies/setup.py)
+    mode: Literal["mid", "grid", "smart"] = "mid"  # Tread.fi's Mid or Grid, or Smart (bot/strategies/setup.py)
     live_enabled: bool = False
     capital_usd: float = 35
     leverage_max: float = 5

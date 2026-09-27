@@ -103,7 +103,7 @@ def session_for(market: str, cfg: Config, risk: Risk, *, live: bool, account_ind
     # quotes around the last fill. The bias holds bias_frac of the position cap (bot/strategies/setup.py).
     s.update(bias={1: "long", -1: "short"}.get(cfg.bias, "neutral"), bias_frac=cfg.bias_frac,
              skew_kappa=cfg.kappa)
-    if cfg.mode == "mid":
+    if cfg.mode in ("mid", "smart"):
         s.update(execution_style=cfg.style, passive_k_sigma=0.0, level_step_bps=cfg.level_step_bps)
     else:
         s.update(reset_threshold_pct=cfg.reset_pct)

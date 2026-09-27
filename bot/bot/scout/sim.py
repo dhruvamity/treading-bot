@@ -48,6 +48,7 @@ import numpy as np
 from bot.common.sizing import Pct, sizes
 from bot.common.time import NEW_YORK
 from bot.scout.tape import DayTape
+from bot.strategies import smart
 
 S = 1_000_000
 BP = 1e-4
@@ -230,6 +231,9 @@ class Book:
     entry: float | None
     sigma_1m: float
     sigma_1h: float
+    bid_sz: float = 0.0          # size at the best bid and ask (the recorded book: our own orders are not in it)
+    ask_sz: float = 0.0
+    move_bps: float = 0.0        # the mid's move over the last smart.LOOKBACK_S seconds
 
 
 # ------------------------------------------------------------------------------------------------ policies
@@ -319,6 +323,18 @@ class MidPolicy(Policy):
         return self.two_sided(b, levels, q, u, nb, ns), 0.0
 
 
+class SmartPolicy(MidPolicy):
+    """Mid, less a side that would add to the position while its fill would likely lose (bot/strategies/smart.py,
+    the same rule)."""
+
+    def quotes(self, b: Book) -> tuple[list[tuple[int, float, float, str]], float]:
+        q, tq = super().quotes(b)
+        no_bid, no_ask = smart.left_out(smart.imbalance(b.bid_sz, b.ask_sz), b.move_bps, self.u(b))
+        if no_bid or no_ask:
+            q = [x for x in q if not ((x[0] == BUY and no_bid) or (x[0] == SELL and no_ask))]
+        return q, tq
+
+
 class GridPolicy(Policy):
     """Tread's Grid: quotes around the last fill. Flat, mid +/- max(d, half the spread); holding a position, last
     fill x (1 -/+ d), so a sell never goes below the last buy + d. When the mid runs more than reset_pct against the
@@ -363,7 +379,7 @@ class GridPolicy(Policy):
             self.ref = px
 
 
-POLICIES: dict[str, type[Policy]] = {"mid": MidPolicy, "grid": GridPolicy}
+POLICIES: dict[str, type[Policy]] = {"mid": MidPolicy, "grid": GridPolicy, "smart": SmartPolicy}
 
 
 # ------------------------------------------------------------------------------------------------ simulator
@@ -524,6 +540,7 @@ class Sim:
         policy = POLICIES[cfg.mode](cfg, risk, mi)
         T, OK, MID, BID, ASK, AGE, PAUSED, RTH, BSZ, ASZ, TIDX = w.columns()
         dt_s = w.step / S                  # seconds per decision (1 = the live bot's 1 Hz loop)
+        look = smart.LOOKBACK_S * w.spp    # Smart's lookback in decision steps
         SKIP = w.skip(cfg.skip_et) if cfg.skip_et else None
         lat = int(sp.latency_ms * 1000)
         tick = mi.tick
@@ -767,8 +784,10 @@ class Sim:
                             q, tq = cache_q, 0.0
                         else:
                             sig = math.sqrt(vol_1m) if vol_1m else 0.0
+                            k0 = i - look
+                            move = (mid / MID[k0] - 1) / BP if k0 >= 0 and OK[k0] else 0.0
                             b = Book(t, BID[i], ASK[i], mid, st["pos"], st["entry"], sig,
-                                     sig * math.sqrt(60))
+                                     sig * math.sqrt(60), BSZ[i], ASZ[i], move)
                             q, tq = policy.quotes(b)
                             cache_key, cache_q = key, q
                         desired = [(s, p, qq, tg, tg == "exit") for s, p, qq, tg in q]

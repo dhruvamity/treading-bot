@@ -60,11 +60,11 @@ HOLIDAYS_CSV = Path(__file__).resolve().parents[2] / "config" / "calendars" / "n
 
 def config_of(s: su.Setup) -> Config:
     """A setup's backtest config, with the defaults the research picked (docs/notes/2026-09-26-tread-style-setups.md):
-    Mid runs without the safety pause (the same cost per dollar with 13-66% more volume) and, for a positive spread,
-    skews its reservation price with the position; Grid keeps the safety pause (cheaper on 6 of 10 markets) and a
+    Mid (and Smart) runs without the safety pause (the same cost per dollar with 13-66% more volume) and, for a positive
+    spread, skews its reservation price with the position; Grid keeps the safety pause (cheaper on 6 of 10 markets) and a
     0.5% soft reset. One order per side."""
-    if s.mode == "mid":
-        return Config(s.name, "mid", style="passive", spacing_bps=s.spread, kappa=1.0 if s.spread > 0 else 0.0,
+    if s.mode in ("mid", "smart"):   # Smart: Mid's config; the mode picks the rule that leaves sides out
+        return Config(s.name, s.mode, style="passive", spacing_bps=s.spread, kappa=1.0 if s.spread > 0 else 0.0,
                       bias=s.sign, bias_frac=su.BIAS_FRAC, safety=False)
     return Config(s.name, "grid", spacing_bps=s.spread, reset_pct=su.GRID_RESET_PCT, bias=s.sign,
                   bias_frac=su.BIAS_FRAC, safety=True)

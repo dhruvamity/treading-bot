@@ -12,15 +12,21 @@
   - 13:12 UTC (18:42 IST): account equity had fallen more than 10% below what it read at start. It cancelled all
     orders again, then tried to close the positions (reduce-only, maker first).
 - **The server agent found and stopped two stray guardians on the server** (22:22 and 22:3x IST).
-- **What the orders cost is not known yet.** A running bot re-quotes after a cancel-all, so the first costs little.
-  Whether the 13:12 UTC one closed a live position is being checked on the server: look for reduce-only fills around
-  13:12:49 UTC with a client id from outside the running bot.
+- **What it cost: about $1.** Arcus's fill history for the account (`/v1/fills`, checked 2026-09-27) shows:
+  - the running bot opened a BTC short of 0.0286 at 13:12:33–41 UTC;
+  - 32 s after the guardian fired, at 13:13:21 UTC (18:43 IST), a taker buy of exactly that size closed it. That
+    matches the guardian's "maker, then taker after 30 s";
+  - the position was down about $0.5 then, under the bot's own $0.90 stop, so the bot did not close it itself;
+  - the close cost about $1 with the taker fee;
+  - the bot quoted again from 13:15;
+  - the 11:14 UTC cancel-all cost nothing (the bot re-quoted).
 
 ## Timeline (UTC)
 
 - 09-26 11:14:55 A test run on the Mac starts `bot guardian` (pid in the repository's `state/guardian.pid`); it
   cancels all orders a second later.
 - 09-26 13:12:49 Its drawdown check fires: cancel-all, flatten.
+- 09-26 13:13:21 Its taker close of the bot's BTC short (0.0286) fills.
 - 09-26 16:5x–17:0x The server runs the suite after pulling PR #19 and gets its own stray guardian (twice). The server
   agent reports it.
 - 09-27 The Mac one is found still running (since 09-26 16:44 IST) and stopped. It sent nothing on exit.

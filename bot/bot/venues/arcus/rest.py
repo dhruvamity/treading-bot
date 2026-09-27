@@ -25,7 +25,7 @@ log = Log("arcus.rest")
 WEIGHTS: dict[str, int] = {
     "/": 1, "/v1/time": 1, "/v1/compliance": 1, "/health": 0,
     "/v1/bbo": 2, "/v1/mids": 2, "/v1/account": 2, "/v1/positions": 2, "/v1/order": 2, "/v1/feetiers": 2,
-    "/v1/leverages": 2, "/v1/account/stats": 2, "/v1/rateLimit": 2,
+    "/v1/leverages": 2, "/v1/account/stats": 2, "/v1/rateLimit": 2, "/v1/leaderboard": 20, "/v1/affiliate/info": 20,
     "/v1/prices": 20, "/v1/markets": 20, "/v1/trade": 20, "/v1/fill": 20, "/v1/trades": 20, "/v1/candles": 20,
     "/v1/portfolio": 20, "/v1/openOrders": 20, "/v1/orders": 20, "/v1/fills": 20, "/v1/funding": 20,
     "/v1/fundingRates": 20, "/v1/accountTransferUpdates": 20, "/v1/apiKeys": 20, "/v1/createApiKey": 20,
@@ -155,6 +155,32 @@ class ArcusRest:
     # ---------------------------------------------------------------- account reads (public by address)
     async def account(self, address: str, account_index: int) -> dict[str, Any]:
         return dict(await self._get("/v1/account", {"address": address, "accountIndex": account_index}))
+
+    async def account_stats(self, address: str, windows: str | None = "24h,7d,30d") -> dict[str, Any]:
+        """Perps volume and fees paid, all-time and over the 30-day fee window (plus `windows`), and the fee tier.
+        Amounts in quote quantums (1e9 = $1)."""
+        return dict(await self._get("/v1/account/stats", {"address": address, "windows": windows}))
+
+    async def leaderboard_row(self, address: str, window: str = "all") -> dict[str, Any] | None:
+        """This address's row on the all-traders leaderboard (volume, fees, realized PnL, rank by volume), or None
+        when it did not trade in the window."""
+        body = await self._get("/v1/leaderboard", {"address": address, "window": window, "sortBy": "volume"})
+        rows = (body or {}).get("entries") or []
+        return dict(rows[0]) if rows else None
+
+    async def affiliate_info(self, address: str) -> dict[str, Any]:
+        """The referral commission earned (lifetime, 30 days, pending). Signed when this client has a key: Arcus is
+        making the signature mandatory (it answers unsigned reads while it switches over)."""
+        key = _weight_key("/v1/affiliate/info")
+        await self.ip.acquire(WEIGHTS.get(key, 20))
+        headers = None
+        if self.signer is not None:
+            ts = time.time_ns()
+            headers = sg.auth_headers(self.signer, ts, self.signer.sign(str(ts).encode() + b"info"))
+        status, body, _ = await self.http.request("GET", "/v1/affiliate/info", params={"address": address},
+                                                  headers=headers)
+        raise_for_error(status, body)
+        return dict(body)
 
     async def positions(self, address: str, account_index: int) -> dict[str, Any]:
         return dict(await self._get("/v1/positions", {"address": address, "accountIndex": account_index}))
