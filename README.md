@@ -96,6 +96,8 @@ flowchart LR
 ```
 treading-bot/
   README.md                   this guide
+  lighter/                    a separate bot for Lighter on Robinhood Chain (package `lbot`; its own guide:
+                              lighter/README.md). It shares no code, settings or credentials with `bot/`
   bot/                        the bot (Python 3.12 package `bot`, command `bot`)
     bot/scout/                tape (data store), record (recorder), sim (backtest), scan (menu + ranking), pilot, service
     bot/core/                 runner, engine (the stops), risk engine, order manager, state, ledger, guardian, doctor

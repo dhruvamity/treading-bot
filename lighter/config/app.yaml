@@ -1,0 +1,41 @@
+# The Lighter bot's settings. The owner's day-to-day changes go through Telegram /set (state/settings.json), not here.
+
+env: mainnet                      # mainnet | testnet (LIGHTER_ENV overrides)
+venues:
+  mainnet: {rest: "https://api.rh.lighter.xyz", ws: "wss://api.rh.lighter.xyz/stream", chain_id: 466324}
+  testnet: {rest: "https://api.rh-testnet.lighter.xyz", ws: "wss://api.rh-testnet.lighter.xyz/stream", chain_id: 300}
+
+dirs: {data: data, state: state, logs: logs}
+
+# A standard account (0% maker, 0% taker) may send 60 requests a minute in all: REST reads and transactions together.
+# The bot keeps most of them for requotes and never lets reads eat into what exits need.
+requests:
+  per_min: 60
+  quotes_per_min: 54              # requotes (one batch per requote: both sides in one request). Fresher quotes
+                                  # cost less (docs/RESEARCH.md): the budget, not the fee, is Lighter's constraint
+  reserve_per_min: 6              # exits, the dead man's switch (1 a minute), reconciles (1 every 5 minutes)
+loop_ms: 500                      # the bot decides twice a second (the budget caps how often it actually requotes)
+
+# The standard account's speed bump: post-only orders, modifies and cancels take effect 200 ms after Lighter receives
+# them, taker orders 300 ms. The network adds the trip to AWS Tokyo (measured by `lbot doctor`).
+latency:
+  maker_ms: 200
+  taker_ms: 300
+  network_ms: 80
+
+sizing:                           # every dollar figure is a share of the capital (lbot/sizing.py)
+  capital_usd: auto               # auto: the account's equity; or a fixed amount
+  paper_capital_usd: 100          # auto with no account (paper, the scout)
+  capital_frac: 1.0
+  max_capital_usd: null
+  position_stop_pct: 2.0          # an open position down 2% of the capital: close it (maker, then taker), cool down
+  daily_stop_pct: 5.0             # the UTC day down 5%: close, no new orders until 00:00 UTC
+  kill_pct: 25.0                  # equity 25% below its peak: flatten and stop until you resume (50x swings are large)
+  go_pnl_day_pct: 0.25            # lists: average day and the last 24 h not worse than -0.25% of the capital
+  go_tail_pnl_pct: 0.50           # lists: the last 6 h not worse than -0.5%
+
+scout:
+  every_min: 30                   # a scan every 30 minutes
+  full_day_hours: 18              # a recorded UTC day counts once it covers this many hours
+  min_days: 1                     # days a market needs before a list shows it (grows to 3 once the recorder has them)
+  depth_levels: 20                # levels per side the recorder keeps, once a second
