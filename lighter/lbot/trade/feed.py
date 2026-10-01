@@ -1,8 +1,8 @@
 """One market's public data for a running bot: the synced order book and the trades, from Lighter's WebSocket.
 
-The book is the order_book channel kept in sync by nonce (lbot/venue/book.py); a gap re-subscribes for a fresh
-snapshot. Trades are passed to listeners (the paper exchange fills its orders from them) and summed for the market's
-taker flow. `fresh()` says whether the book is current enough to quote on.
+The book is the order_book channel kept in sync by nonce (lbot/venue/book.py); a gap re-subscribes (one at a time)
+for a fresh snapshot. Trades are passed to listeners (the paper exchange fills its orders from them) and summed for
+the market's taker flow. `fresh()` says whether the book is current enough to quote on.
 """
 
 from __future__ import annotations
@@ -20,6 +20,7 @@ from lbot.venue.ws import WsClient
 
 log = Log("feed")
 TradeListener = Callable[[list[dict[str, Any]]], None]
+RESYNC_RETRY_S = 5.0     # a re-subscribe whose snapshot never came is sent again after this long
 
 
 class MarketFeed:
@@ -32,7 +33,9 @@ class MarketFeed:
         self.book_listeners: list[Callable[[], None]] = []
         self.flow: deque[tuple[float, float]] = deque()      # (time, taker usd) over the last 5 minutes
         self.book_at = 0.0
+        self.resync_at = 0.0          # when the running book re-subscribe was sent (0: none running)
         self._task: asyncio.Task[None] | None = None
+        self._resync_task: asyncio.Task[None] | None = None
 
     async def start(self) -> None:
         await self.ws.subscribe(f"order_book/{self.market.market_id}")
@@ -53,9 +56,9 @@ class MarketFeed:
             ts = int(msg.get("timestamp") or 0)
             if msg.get("type", "").startswith("subscribed"):
                 self.book.snapshot(ob, ts)
+                self.resync_at = 0.0
             elif self.book.update(ob, ts) == "gap":
-                log.info("book_gap", market=self.market.symbol)
-                asyncio.get_event_loop().create_task(self.ws.resubscribe(f"order_book/{mid}"))
+                self.resync(mid)
                 return
             self.book_at = time.time()
             for f in self.book_listeners:
@@ -71,6 +74,17 @@ class MarketFeed:
                 self.flow.popleft()
             for f in self.trade_listeners:
                 f(trades)
+
+    def resync(self, mid: str) -> None:
+        """Re-subscribe the book for a fresh snapshot, one at a time. Lighter sends a book update every 50 ms, and each
+        one that arrives before the snapshot also reads as a gap: a re-subscribe for each would burst unsubscribe /
+        subscribe pairs (200 client messages a minute per IP), and a late unsubscribe could drop the new snapshot."""
+        now = time.time()
+        if self.resync_at and now - self.resync_at < RESYNC_RETRY_S:
+            return
+        self.resync_at = now
+        log.info("book_gap", market=self.market.symbol, gaps=self.book.gaps)
+        self._resync_task = asyncio.get_event_loop().create_task(self.ws.resubscribe(f"order_book/{mid}"))
 
     def fresh(self, max_age_s: float = 10.0) -> bool:
         """The book is synced and the connection alive (the height channel sends a frame every 0.5 s). A quiet book may
