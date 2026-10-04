@@ -108,3 +108,9 @@ def test_signer_signs_offline():
     assert f["L2TxAttributes"] == {"4": 1}                      # SkipNonce on
     with pytest.raises(signer.SignerError):
         signer.Signer("https://example.invalid", priv, 466324, 2, 7)     # an app's slot
+    stop = s.create_order(market=1, client_index=124, size=100, price=798000, is_ask=True, order_type=C.ORDER_STOP_LOSS,
+                          tif=C.TIF_IOC, reduce_only=True, expiry=-1, nonce=int(time.time() * 1000) + 1,
+                          trigger_price=800000)
+    g = signer.tx_fields(stop)
+    assert (g["Type"], g["TriggerPrice"], g["ReduceOnly"], g["Price"]) == (C.ORDER_STOP_LOSS, 800000, 1, 798000)
+    assert f.get("TriggerPrice", 0) == 0                        # a plain order has none

@@ -26,13 +26,42 @@ def pid_path(cfg: Config, name: str) -> Path:
     return cfg.state_dir / f"{name}.pid"
 
 
+def alive(pid: int) -> bool:
+    """True if `pid` is a live process. `os.kill(pid, 0)` alone says yes for a zombie: a child that exited but was
+    never reaped. The scout and the Telegram bot start the runs and live on, so a finished run stayed "running"
+    for as long as they did (found on the Arcus bot, 2026-10-03). Reaps the pid first when it is our own child."""
+    if pid <= 0:
+        return False
+    try:
+        done, _ = os.waitpid(pid, os.WNOHANG)
+        if done == pid:
+            return False          # our child, exited: now reaped
+        if done == 0:
+            return True           # our child, still running
+    except ChildProcessError:
+        pass                      # someone else's child
+    except OSError:
+        return False
+    try:
+        os.kill(pid, 0)
+    except ProcessLookupError:
+        return False
+    except PermissionError:
+        return True               # exists, owned by another user
+    try:                          # exists: a zombie (state Z) waiting for its parent is not running
+        state = subprocess.run(["ps", "-o", "stat=", "-p", str(pid)], capture_output=True, text=True,
+                               timeout=5).stdout.strip()
+    except (OSError, subprocess.SubprocessError):
+        return True
+    return not state.startswith("Z")
+
+
 def running(cfg: Config, name: str) -> int | None:
     try:
         pid = int(pid_path(cfg, name).read_text().strip())
-        os.kill(pid, 0)
-        return pid
     except (OSError, ValueError):
         return None
+    return pid if alive(pid) else None
 
 
 def start(cfg: Config, name: str, args: list[str]) -> int:
@@ -58,9 +87,7 @@ def stop(cfg: Config, name: str, timeout_s: float = 20.0) -> bool:
     os.kill(pid, signal.SIGTERM)
     end = time.time() + timeout_s
     while time.time() < end:
-        try:
-            os.kill(pid, 0)
-        except OSError:
+        if not alive(pid):
             break
         time.sleep(0.2)
     else:

@@ -302,7 +302,52 @@ recorded day. It gets better as the recorder adds days.
 
 ## 10. The server PC
 
-Record around the clock on the server, as the Arcus scout does. No keys, no orders:
+Record around the clock on the server, as the Arcus scout does. **Recording needs no keys, no `.env` and no money,
+and places no orders**: it only reads Lighter's public market data. The code is on `main` (since pull request 23).
+
+### 10.1 On a Mac that also runs the Arcus bot (natively, next to it)
+
+From the folder that holds `treading-bot` on the server:
+
+```bash
+cd treading-bot && git pull
+```
+```bash
+cd lighter && make install
+```
+```bash
+.venv/bin/lbot up
+```
+
+`lbot up` starts the scout in the background: it records every Lighter perp (best bid and offer, trades, the top 20
+levels, the market statistics) and backtests every 30 minutes. It prints `telegram: not set up` without a token;
+that is fine for recording. It shares nothing with the Arcus bot: its own folder, its own process, its own data
+(`lighter/data/`), and Lighter's request limits are separate from Arcus's.
+
+Check it (a minute after starting, then whenever you like):
+
+```bash
+.venv/bin/lbot status
+```
+```bash
+cat data/recorder.json
+```
+
+| In `recorder.json` | Healthy |
+|---|---|
+| `markets` | about 58 |
+| `rows_total` | climbing between two looks |
+| `last_msg_age_s` | a few seconds |
+| `book_gaps`, `reconnects` | small; each one is a short hole in that market's book |
+| `paused_for_disk` | false (recording pauses under 5 GB free) |
+
+- **After a reboot** run `.venv/bin/lbot up` again, as with `bot up`: it does not come back by itself.
+- **To stop it:** `.venv/bin/lbot down`.
+- **Keep the Mac awake** (root README, 11.4 step 2): a sleeping machine records nothing and the gap cannot be
+  filled later.
+- **Disk:** about 0.1–0.3 GB a day for all markets.
+
+### 10.2 On a machine that only records (Docker)
 
 ```bash
 cd treading-bot/lighter
@@ -311,16 +356,33 @@ docker compose logs --tail 30 scout
 cat data/recorder.json
 ```
 
-The container is `lighter-scout`, separate from the Arcus `arcus-scout`: both can run on the same machine. After a
-week, bring the tape back to the machine that trades:
+The container is `lighter-scout`, separate from the Arcus `arcus-scout`: both can run on the same machine. Do not
+use it on a machine that will trade Lighter live: a container cannot see a native bot's process, so run 10.1 there.
+
+### 10.3 Bring the tape back
+
+After a week or more, on the server, from `treading-bot/lighter` (the archive goes to your home folder; the recorder
+can keep running):
 
 ```bash
-rsync -a server:treading-bot/lighter/data/tape/ data/tape/
+tar -czf ~/lighter-tape.tgz -C data tape markets.json
+```
+
+Move `lighter-tape.tgz` to the machine that trades (AirDrop, USB, or `rsync -a server:treading-bot/lighter/data/tape/
+data/tape/` with SSH), then there, from `treading-bot/lighter`:
+
+```bash
+tar -xzf ~/Downloads/lighter-tape.tgz -C data
+```
+```bash
 .venv/bin/lbot scout scan
 ```
 
-To trade live on the server itself, run it natively instead (`make install`, `.env`, `lbot up`). The pilot and the
-autopilot start runs as processes on the same machine.
+Every recorder start writes its own part files (`bbo-rec<number>-00001.npz`), and a day is joined, sorted and
+de-duplicated when it is read, so unpacking over the days already there loses nothing and doubles nothing.
+
+To trade Lighter live on the server itself, put `lighter/.env` there (section 3) and use `lbot run` or the pilot as
+on any machine. The pilot and the autopilot start runs as processes on the same machine.
 
 ## 11. Command reference
 

@@ -155,10 +155,12 @@ class Signer:
         return _take(self.lib.CheckClient(self.key_index, self.account))
 
     def create_order(self, *, market: int, client_index: int, size: int, price: int, is_ask: bool, order_type: int,
-                     tif: int, reduce_only: bool, expiry: int, nonce: int) -> SignedTx:
+                     tif: int, reduce_only: bool, expiry: int, nonce: int, trigger_price: int = 0) -> SignedTx:
+        """`trigger_price` (in price units, 0 = none) is for the stop-loss and take-profit order types, which wait
+        until the mark reaches it and then run as an IOC order limited by `price`."""
         return _signed(self.lib.SignCreateOrder(market, client_index, size, price, int(is_ask), order_type, tif,
-                                                int(reduce_only), 0, expiry, 0, 0, 0, 0, 0, 1, nonce, self.key_index,
-                                                self.account))
+                                                int(reduce_only), trigger_price, expiry, 0, 0, 0, 0, 0, 1, nonce,
+                                                self.key_index, self.account))
 
     def modify_order(self, *, market: int, index: int, size: int, price: int, nonce: int) -> SignedTx:
         """`index`: the order's client index or Lighter's order index (both are accepted)."""
