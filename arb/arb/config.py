@@ -1,7 +1,10 @@
-"""Where things are, the account ids from arb/.env, and the owner's settings from arb/settings.json (all optional).
+"""Where things are, the account ids and switches from the credentials file, and the owner's settings from
+arb/settings.json (all optional).
 
-arb/.env (gitignored): ARCUS_ADDRESS, ARCUS_ACCOUNT_INDEX, LIGHTER_ACCOUNT_INDEX, PROFUNDING_API_KEY. None of them is
-a trading key: the first three name the accounts whose balances are read, the last is a data feed's key.
+The trading bot has ONE credentials file, treading-bot/bot/.env. What this part reads from it: ARCUS_ADDRESS,
+ARCUS_ACCOUNT_INDEX, LIGHTER_ACCOUNT_INDEX (the accounts whose balances are read), PROFUNDING_API_KEY (a data
+feed's key), ARB_LIVE (the live switch) and TELEGRAM_BOT_TOKEN / TELEGRAM_CHAT_ID (where alerts go: the one
+Telegram bot). An arb/.env, if there is one, is read too and wins.
 """
 
 from __future__ import annotations
@@ -17,19 +20,34 @@ ROOT = Path(os.environ.get("ARB_ROOT") or Path(__file__).resolve().parent.parent
 STATE = ROOT / "state"
 
 
-def read_env(path: Path | None = None) -> dict[str, str]:
+KEYS = ("ARCUS_ADDRESS", "ARCUS_ACCOUNT_INDEX", "LIGHTER_ACCOUNT_INDEX", "PROFUNDING_API_KEY", "TELEGRAM_BOT_TOKEN",
+        "TELEGRAM_CHAT_ID")
+
+
+def _ours(k: str) -> bool:
+    return k in KEYS or k.startswith("ARB_")
+
+
+def _env_file(p: Path) -> dict[str, str]:
     out: dict[str, str] = {}
     try:
-        for line in (path or ROOT / ".env").read_text().splitlines():
+        for line in p.read_text().splitlines():
             line = line.strip()
             if line and not line.startswith("#") and "=" in line:
                 k, v = line.split("=", 1)
-                out[k.strip()] = v.strip()
+                if v.strip():
+                    out[k.strip()] = v.strip().strip('"').strip("'")
     except OSError:
         pass
-    return {**out, **{k: v for k, v in os.environ.items()
-                      if k in ("ARCUS_ADDRESS", "ARCUS_ACCOUNT_INDEX", "LIGHTER_ACCOUNT_INDEX", "PROFUNDING_API_KEY")
-                      or k.startswith("ARB_")}}
+    return out
+
+
+def read_env(path: Path | None = None) -> dict[str, str]:
+    """The bot's one file (treading-bot/bot/.env, our keys only), then arb/.env over it, then the process
+    environment over both. Empty values count as not set."""
+    p = path or ROOT / ".env"
+    shared = {k: v for k, v in _env_file(p.parent.parent / "bot" / ".env").items() if _ours(k)}
+    return {**shared, **_env_file(p), **{k: v for k, v in os.environ.items() if _ours(k) and v}}
 
 
 # What `arb set` accepts: name -> (lowest, highest, what it is). Everything else in Settings is a constant.

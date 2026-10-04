@@ -1,6 +1,7 @@
-"""Background processes: the scout, the Telegram bot and a run, each with a pid file in state/ and a log in logs/.
+"""Background processes: the scout and a run, each with a pid file in state/ and a log in logs/. (`bot up` in
+treading-bot/bot starts this scout with everything else; the Telegram controls are in that one bot.)
 
-    lbot up          the scout and (if set up) the Telegram bot
+    lbot up          the scout: recorder and scans
     lbot down        stop them (--all: the running bot too; its position is kept)
     lbot status      one screen: what runs, the run's state, the last scan
 """
@@ -19,7 +20,7 @@ from typing import Any
 
 from lbot.config import ROOT, Config
 
-SERVICES = ("scout", "telegram", "run-paper", "run-live")
+SERVICES = ("scout", "run-paper", "run-live")
 
 
 def pid_path(cfg: Config, name: str) -> Path:

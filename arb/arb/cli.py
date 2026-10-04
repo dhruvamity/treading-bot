@@ -8,10 +8,13 @@
     arb backtest [--capital 240] [--symbols SPY ...]             the rules replayed on all of it
     arb settings | arb set max_hold_h 72                         see or change a setting (a running bot picks it up)
     arb run [--arcus 120 --lighter 120] [--seconds N]            the executor on PAPER: real prices, simulated orders
-    arb run --live                                               real orders: ARB_LIVE=1 in arb/.env, then type LIVE
+    arb run --live                                               real orders: ARB_LIVE=1 in bot/.env, then type LIVE
+    arb start [--arcus 120 --lighter 120] | start --live | stop  the same executor in the background
     arb status [--live] | close [--now] | pause | resume         the running bot (add --live for the live one)
     arb skip CASHCAT | arb unskip CASHCAT                        markets it must not open
-    arb telegram [--live]                                        the same commands from the phone (arb/telegram.py)
+
+It is one part of the trading bot: from treading-bot/bot these are `bot arb <command>`, and in the bot's one Telegram
+bot `/arb_<command>`.
 """
 
 from __future__ import annotations
@@ -236,7 +239,7 @@ def cmd_run(a: argparse.Namespace, cfg: Config) -> int:
     mode = _mode(a)
     if mode == "live":
         if read_env().get("ARB_LIVE", "").strip() != "1":
-            print("LIVE is off: put ARB_LIVE=1 in arb/.env first (README.md, section 6). Nothing was sent.")
+            print("LIVE is off: put ARB_LIVE=1 in bot/.env first (README.md, section 6). Nothing was sent.")
             return 1
         if not a.yes:
             print("This places REAL orders on Arcus and on Lighter with the keys in bot/.env and lighter/.env.")
@@ -251,7 +254,27 @@ def cmd_run(a: argparse.Namespace, cfg: Config) -> int:
     return 0
 
 
+def cmd_service(a: argparse.Namespace, cfg: Config) -> int:
+    """`arb start`, `arb stop`: the executor in the background (arb/ops.py)."""
+    from arb import ops
+
+    mode = _mode(a)
+    if a.cmd == "stop":
+        ok, msg = ops.stop(mode)
+        print(msg)
+        return 0
+    if mode == "live" and not a.yes:
+        print("This places REAL orders on Arcus and on Lighter with the keys in bot/.env.")
+        if input("Type LIVE to go on: ").strip() != "LIVE":
+            print("not started")
+            return 1
+    ok, msg = ops.start(mode, collateral_arg(a))
+    print(msg)
+    return 0 if ok else 1
+
+
 def cmd_control(a: argparse.Namespace, cfg: Config) -> int:
+    from arb import ops
     from arb.exec.run import FileStore, skipped
 
     mode = _mode(a)
@@ -283,8 +306,10 @@ def cmd_control(a: argparse.Namespace, cfg: Config) -> int:
         print(f"{mode}: never run (no {store.position.name})")
         return 0
     age = time.time() - store.position.stat().st_mtime
+    pid = ops.running(mode)
     print(f"{mode.upper()} · {st.phase}" + (" · paused" if st.paused else "")
-          + f" · last written {age:.0f} s ago" + ("" if age < 120 else "  (the bot is not running)"))
+          + f" · last written {age:.0f} s ago"
+          + (f" · running (pid {pid})" if pid else "" if age < 120 else "  (the bot is not running)"))
     if st.phase != "flat":
         print(f"  {st.symbol}: long {NAMES[st.long_venue]}, short {NAMES[st.short_venue]}, {st.size:g} a leg at "
               f"{st.leverage:.1f}x")
@@ -419,8 +444,12 @@ def main(argv: list[str] | None = None) -> None:
     p = sub.add_parser("history", help="download both venues' funding and price history for the backtest")
     p.add_argument("--venue", choices=("lighter", "arcus", "both"), default="both")
     p.add_argument("--symbols", nargs="*")
-    p = sub.add_parser("telegram", help="take the commands from Telegram")
-    p.add_argument("--live", action="store_true", help="status, close, pause and resume act on the live bot")
+    p = sub.add_parser("start", help="the executor in the background: paper unless --live")
+    p.add_argument("--live", action="store_true")
+    p.add_argument("--yes", action="store_true", help="--live without the typed confirmation")
+    money(p)
+    p = sub.add_parser("stop", help="stop the background executor (its position and stops stay)")
+    p.add_argument("--live", action="store_true")
     sub.add_parser("settings", help="the settings and what they mean")
     p = sub.add_parser("set", help="change a setting: arb set max_hold_h 72")
     p.add_argument("name")
@@ -438,20 +467,9 @@ def main(argv: list[str] | None = None) -> None:
         history.download(ROOT / "data" / "history", venues=("lighter", "arcus") if a.venue == "both" else (a.venue,),
                          symbols=a.symbols, tape_root=tape if tape.is_dir() else None)
         sys.exit(0)
-    if a.cmd == "telegram":
-        from arb import telegram
-        from arb.config import read_env
-
-        env = read_env()
-        users = {int(x) for x in env.get("ARB_TELEGRAM_USERS", "").replace(" ", "").split(",") if x.isdigit()}
-        if not env.get("ARB_TELEGRAM_TOKEN") or not users:
-            print("set ARB_TELEGRAM_TOKEN and ARB_TELEGRAM_USERS in arb/.env first (README.md, section 7)")
-            sys.exit(1)
-        asyncio.run(telegram.serve(env["ARB_TELEGRAM_TOKEN"], users, a.live))
-        sys.exit(0)
     plain = {"settings": cmd_settings, "set": cmd_settings, "backtest": cmd_backtest, "run": cmd_run,
              "status": cmd_control, "close": cmd_control, "pause": cmd_control, "resume": cmd_control,
-             "skip": cmd_control, "unskip": cmd_control}
+             "skip": cmd_control, "unskip": cmd_control, "start": cmd_service, "stop": cmd_service}
     if a.cmd in plain:
         sys.exit(plain[a.cmd](a, cfg))
     fn = {"scan": cmd_scan, "plan": cmd_plan, "paper": cmd_paper, "feeds": cmd_feeds}[a.cmd]

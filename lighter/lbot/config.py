@@ -1,4 +1,8 @@
-"""Settings: config/app.yaml, the environment and lighter/.env (credentials). Nothing here reads the Arcus bot's files."""
+"""Settings: config/app.yaml, the environment and the credentials file.
+
+The trading bot has ONE credentials file, treading-bot/bot/.env: the Lighter keys (LIGHTER_*, LBOT_LIVE) live there
+next to the Arcus ones and the one Telegram bot's token. A lighter/.env, if there is one, is read too and wins (it is
+what this project used before it was part of the one bot)."""
 
 from __future__ import annotations
 
@@ -13,9 +17,10 @@ import yaml
 ROOT = Path(os.environ.get("LBOT_ROOT") or Path(__file__).resolve().parent.parent)
 
 
-def load_env(path: Path | None = None) -> dict[str, str]:
-    """KEY=VALUE lines from lighter/.env (comments and blanks skipped). The process environment wins."""
-    p = path or ROOT / ".env"
+OURS = ("LIGHTER_", "LBOT_", "TELEGRAM_")      # the keys this project reads from a credentials file
+
+
+def _env_file(p: Path) -> dict[str, str]:
     out: dict[str, str] = {}
     try:
         for line in p.read_text().splitlines():
@@ -23,10 +28,19 @@ def load_env(path: Path | None = None) -> dict[str, str]:
             if not s or s.startswith("#") or "=" not in s:
                 continue
             k, v = s.split("=", 1)
-            out[k.strip()] = v.strip().strip('"').strip("'")
+            if v.strip():
+                out[k.strip()] = v.strip().strip('"').strip("'")
     except OSError:
         pass
-    return {**out, **{k: v for k, v in os.environ.items() if k.startswith(("LIGHTER_", "LBOT_"))}}
+    return out
+
+
+def load_env(path: Path | None = None) -> dict[str, str]:
+    """The credentials: the bot's one file (treading-bot/bot/.env, our keys only), then lighter/.env over it, then
+    the process environment over both. Empty values count as not set."""
+    p = path or ROOT / ".env"
+    shared = {k: v for k, v in _env_file(p.parent.parent / "bot" / ".env").items() if k.startswith(OURS)}
+    return {**shared, **_env_file(p), **{k: v for k, v in os.environ.items() if k.startswith(OURS) and v}}
 
 
 @dataclass(frozen=True)
@@ -130,7 +144,8 @@ def load(root: Path | None = None, env: dict[str, str] | None = None) -> Config:
     v = raw["venues"][name]
     dirs = raw.get("dirs", {})
     acct = e.get("LIGHTER_ACCOUNT_INDEX", "").strip()
-    users = tuple(int(x) for x in e.get("LBOT_TELEGRAM_USERS", "").replace(" ", "").split(",") if x.strip().isdigit())
+    users = tuple(int(x) for x in e.get("TELEGRAM_ALLOWED_USER_IDS", "").replace(" ", "").split(",")
+                  if x.strip().isdigit())
     return Config(
         env=name,
         endpoints=Endpoints(v["rest"].rstrip("/"), v["ws"], int(v["chain_id"])),
@@ -149,8 +164,8 @@ def load(root: Path | None = None, env: dict[str, str] | None = None) -> Config:
             account_index=int(acct) if acct.isdigit() else None,
         ),
         live_allowed=e.get("LBOT_LIVE", "").strip() == "1",
-        telegram_token=e.get("LBOT_TELEGRAM_TOKEN", "").strip(),
-        telegram_chat=e.get("LBOT_TELEGRAM_CHAT_ID", "").strip(),
+        telegram_token=e.get("TELEGRAM_BOT_TOKEN", "").strip(),      # the trading bot's one Telegram bot
+        telegram_chat=e.get("TELEGRAM_CHAT_ID", "").strip(),
         telegram_users=users,
         loop_ms=int(raw.get("loop_ms", 500)),
     )

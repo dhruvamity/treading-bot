@@ -8,12 +8,16 @@ point it at a harmless command (tests/unit/test_light_scans.py) or replace ops.s
 
 from __future__ import annotations
 
+import os
 import subprocess
 from collections.abc import Iterator
 from pathlib import Path
 from typing import Any
 
 import pytest
+
+os.environ["LBOT_NO_SPAWN"] = "1"     # the Lighter part and the funding arbitrage refuse to start a process too
+os.environ["ARB_NO_SPAWN"] = "1"
 
 
 @pytest.fixture(autouse=True)
@@ -24,7 +28,7 @@ def _no_real_bot_processes(monkeypatch: pytest.MonkeyPatch) -> Iterator[None]:
     class Guarded(real):  # type: ignore[misc,valid-type]
         def __init__(self, args: Any, *a: Any, **kw: Any) -> None:
             argv = [str(x) for x in args] if isinstance(args, (list, tuple)) else [str(args)]
-            if argv and Path(argv[0]).name == "bot":
+            if argv and Path(argv[0]).name in ("bot", "lbot", "arb"):
                 refused.append(" ".join(argv))
                 raise RuntimeError(f"a test tried to start a real bot process: {' '.join(argv)}")
             super().__init__(args, *a, **kw)

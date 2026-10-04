@@ -198,10 +198,12 @@ async def test_telegram_messages_become_the_same_commands(tmp_path: Path, monkey
     from arb import config, telegram
 
     t = telegram.to_argv
-    assert t("/hold 72", False) == ["set", "max_hold_h", "72"] and t("/stop auto", False) == ["set", "stop_pct", "auto"]
+    assert t("/hold 72", False) == ["set", "max_hold_h", "72"] and t("/sl auto", False) == ["set", "stop_pct", "auto"]
     assert t("/minhold 0", True) == ["set", "min_hold_h", "0"] and t("/closenow", True) == ["close", "--now", "--live"]
-    assert t("/status@my_arb_bot", True) == ["status", "--live"] and t("/skip cashcat", False) == ["skip", "cashcat"]
+    assert t("/status@the_bot", True) == ["status", "--live"] and t("/skip cashcat", False) == ["skip", "cashcat"]
     assert t("/run --live", True) is None and t("hello", False) is None and t("/backtest", False) is None
+    assert t("/start live", True) is None and t("/stop", True) is None      # the executor itself: arb/ops.py
+    assert telegram.changes_something(["set", "max_hold_h", "72"]) and not telegram.changes_something(["status"])
     monkeypatch.setattr(config, "ROOT", tmp_path)
     monkeypatch.setattr("arb.cli.ROOT", tmp_path)
     assert "max_hold_h = 72" in await telegram.run_command(["set", "max_hold_h", "72"])
@@ -209,4 +211,54 @@ async def test_telegram_messages_become_the_same_commands(tmp_path: Path, monkey
     assert "must be between" in await telegram.run_command(["set", "max_hold_h", "-5"])
     assert "unknown setting" in await telegram.run_command(["set", "nonsense", "1"])
     assert config.set_value("stop_pct", "auto", tmp_path / "settings.json") == 0.0
+
+
+
+
+def test_the_credentials_come_from_the_bots_one_env_file(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    from arb.config import read_env
+
+    for k in ("ARCUS_ADDRESS", "ARB_LIVE", "TELEGRAM_BOT_TOKEN", "TELEGRAM_CHAT_ID", "LIGHTER_ACCOUNT_INDEX",
+              "PROFUNDING_API_KEY", "ARCUS_ACCOUNT_INDEX"):
+        monkeypatch.delenv(k, raising=False)
+    (tmp_path / "bot").mkdir()
+    (tmp_path / "arb").mkdir()
+    (tmp_path / "bot" / ".env").write_text("ARCUS_API_PRIVATE_KEY=never-read-here\nARCUS_ADDRESS=0xone\nARB_LIVE=1\n"
+                                           "TELEGRAM_BOT_TOKEN=t\nTELEGRAM_CHAT_ID=5\nLIGHTER_ACCOUNT_INDEX=7\n")
+    e = {k: v for k, v in read_env(tmp_path / "arb" / ".env").items() if k != "ARB_NO_SPAWN"}
+    assert e == {"ARCUS_ADDRESS": "0xone", "ARB_LIVE": "1", "TELEGRAM_BOT_TOKEN": "t", "TELEGRAM_CHAT_ID": "5",
+                 "LIGHTER_ACCOUNT_INDEX": "7"}
+    (tmp_path / "arb" / ".env").write_text("ARCUS_ADDRESS=0xtwo\nARB_LIVE=\n")
+    e = read_env(tmp_path / "arb" / ".env")
+    assert e["ARCUS_ADDRESS"] == "0xtwo" and e["ARB_LIVE"] == "1"          # an empty line there changes nothing
+
+
+def test_the_background_executor_is_never_started_without_its_conditions(tmp_path: Path,
+                                                                         monkeypatch: pytest.MonkeyPatch) -> None:
+    import json
+    import os
+
+    from arb import ops
+
+    monkeypatch.setenv("ARB_NO_SPAWN", "1")
+    monkeypatch.delenv("ARB_LIVE", raising=False)
+    monkeypatch.setattr(ops, "read_env", lambda: {})
+    ok, msg = ops.start("live", state=tmp_path)
+    assert not ok and "ARB_LIVE=1" in msg                                   # the owner's switch comes first
+    ok, msg = ops.start("paper", {"arcus": 120.0, "lighter": 0.0}, state=tmp_path)
+    assert not ok and "pretend" in msg
+    with pytest.raises(RuntimeError):                                       # and never under tests
+        ops.start("paper", {"arcus": 120.0, "lighter": 120.0}, state=tmp_path)
+    assert ops.command("paper", {"arcus": 120.0, "lighter": 80.0})[-5:] == ["run", "--arcus", "120", "--lighter", "80"]
+    assert ops.command("live", None)[-3:] == ["run", "--live", "--yes"]
+
+    assert ops.running("paper", tmp_path) is None and ops.stop("paper", state=tmp_path) == (False, "paper: not running")
+    ops.pid_path("paper", tmp_path).write_text(str(os.getpid()))
+    assert ops.running("paper", tmp_path) == os.getpid() and ops.start("paper", state=tmp_path)[1].startswith(
+        "paper: already running")
+    assert ops.current_mode(tmp_path) == "paper"
+    (tmp_path / "position-live.json").write_text(json.dumps({"phase": "open"}))
+    assert ops.current_mode(tmp_path) == "live" and ops.phase("live", tmp_path) == "open"
+    (tmp_path / "position-live.json").write_text(json.dumps({"phase": "flat"}))
+    assert ops.current_mode(tmp_path) == "paper" and not ops.alive(0)
 

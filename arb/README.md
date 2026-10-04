@@ -1,7 +1,12 @@
-# arb: funding arbitrage between Arcus and Lighter (Robinhood Chain)
+# The funding arbitrage part of the trading bot (`bot arb`): Arcus against Lighter (Robinhood Chain)
 
-A separate program next to `bot/` (Arcus) and `lighter/` (Lighter); it changes neither. It scans, plans, backtests,
-and runs the position: on paper by default, live only behind a switch that you set and a word that you type.
+One part of **one bot** (`treading-bot/bot`, the main [README](../README.md)): installed by the bot's `make install`,
+its switches in the bot's one `.env`, and controlled from the bot's **one Telegram bot** as `/arb_<command>`. It
+trades with the Arcus and Lighter parts' own venue clients and keys. It scans, plans, backtests, and runs the
+position: on paper by default, live only behind a switch that you set and a confirmation each time.
+
+**`arb <command>` in this guide is `bot arb <command>`**, run from `treading-bot/bot` (`.venv/bin/arb` is there too
+and is the same thing).
 
 > **Risk warning.** Experimental software that can place real orders with real money. The live adapters have never
 > sent an order (section 6 says exactly what is unproven). Backtests are estimates. Nothing here is financial advice.
@@ -45,14 +50,16 @@ live bot uses. At $240 in all, half on each venue, one position at a time (`arb 
 ## 3. Commands
 
 ```
-cd treading-bot/arb          # the program is .venv/bin/arb
+cd treading-bot/bot          # every line below is `bot arb ...` here: bot arb scan, bot arb status
 arb scan                     # rank the markets, with the accounts' own free collateral
 arb scan --arcus 120 --lighter 120 --feeds
 arb plan BABA --arcus 120 --lighter 120
 arb history                  # download both venues' funding and price history (about an hour; arb/data/history)
 arb backtest --capital 240   # the rules replayed on all of it
 
-arb run --arcus 120 --lighter 120        # the executor on PAPER: real prices and funding, simulated orders
+arb run --arcus 120 --lighter 120        # the executor on PAPER, in this terminal: real prices and funding,
+                                         # simulated orders
+arb start --arcus 120 --lighter 120      # the same in the background (arb stop stops it; the position is kept)
 arb status                               # what it is doing, the last events
 arb close            arb close --now     # close the position: as maker first, or with taker orders at once
 arb pause            arb resume          # open nothing new (an open position is kept) / look again
@@ -60,8 +67,10 @@ arb skip CASHCAT     arb unskip CASHCAT  # markets it must never open
 
 arb settings                             # every setting, its value, its range
 arb set max_hold_h 72                    # change one; the running bot uses it from its next loop
-arb telegram                             # the same commands from the phone (section 7)
 ```
+
+The same from the phone, in the bot's one Telegram bot: `/arb_scan`, `/arb_status`, `/arb_hold 72`, `/arb_close`,
+`/arb_start 120 120` ([section 7](#7-telegram)).
 
 `status`, `close`, `pause` and `resume` act on the paper bot; add `--live` for the live one.
 
@@ -103,8 +112,8 @@ keep a position the venues will not take stop orders for (it closes, pauses and 
 
 ## 5. Paper
 
-`arb run --arcus 120 --lighter 120` runs the whole executor against the real books and the real funding payments,
-with orders that exist only in memory (a resting order fills when the other side of the real book reaches it). Its
+`arb start --arcus 120 --lighter 120` (or `/arb_start 120 120` from the phone) runs the whole executor against the
+real books and the real funding payments, with orders that exist only in memory (a resting order fills when the other side of the real book reaches it). Its
 position, its money and its settings live in `state/` and survive a restart. Run it for a few days before anything
 else: `arb status` shows the entries, the stops and each funding payment.
 
@@ -115,8 +124,9 @@ Not started by anyone yet. Before the first run:
 1. **Money on both venues.** `arb scan` shows each venue's free collateral; the smaller one sets the size.
 2. **An account of its own on each venue, or the market-making bots stopped.** Two programs trading one market on
    one account each treat the other's position as theirs. On Lighter also use an API key of its own.
-3. `ARB_LIVE=1` in `arb/.env`.
-4. **Small first:** `arb set max_notional_usd 30`, then `arb run --live` and type LIVE. Watch `arb status --live`.
+3. `ARB_LIVE=1` in `bot/.env`, then `bot down` and `bot up` so the Telegram bot sees it.
+4. **Small first:** `arb set max_notional_usd 30`, then `/arb_start live` in Telegram and type back the code it
+   shows (or `arb start --live` in a terminal and type LIVE). Watch `/arb_status`.
 
 What the first live run will prove or disprove, because nothing could be sent while building it:
 
@@ -127,19 +137,34 @@ What the first live run will prove or disprove, because nothing could be sent wh
 | Arcus: the position stop and take profit (`positionTpsl`, signed as trigger orders) | from the documentation; the docs disagree with themselves on the leg's price field |
 | Lighter: everything that sends (orders, cancels, stops, leverage) | signs correctly offline; never sent, by this program or the Lighter bot |
 | Lighter and Arcus reads (book, position, balance, key check) | run against the real accounts on 2026-10-04 |
-| The executor's logic | 36 offline tests on simulated venues, and paper runs on real prices (open, stops, close by command and by the time limit) |
+| The executor's logic | 38 offline tests on simulated venues, and paper runs on real prices (open, stops, close by command and by the time limit) |
 
 If a venue refuses the stop orders the bot closes the position, pauses and says so, instead of holding it unprotected
 or opening it again.
 
 ## 7. Telegram
 
-A bot of its own (@BotFather → /newbot; the Arcus and Lighter bots' tokens cannot be shared). In `arb/.env`:
-`ARB_TELEGRAM_TOKEN`, `ARB_TELEGRAM_USERS` (your user id; `/whoami` shows it), `ARB_TELEGRAM_CHAT_ID` (where alerts
-go). Then `arb telegram` (add `--live` to control the live bot).
+There is no arbitrage Telegram bot: the trading bot's **one** Telegram bot serves it (set up once, main
+[README](../README.md) section 9). Its commands start with `arb_`; `/arb status` with a space works too, and `/arb`
+shows the menu and which bot, paper or live, the commands act on. Every reply starts with **FUNDING ARB**, and
+the running executor's own alerts (entering, open, a stop moved, closed, a venue refusing, money to move between
+the venues) arrive in the same chat.
 
-`/status` `/scan` `/plan SPY` `/settings` `/set max_hold_h 72` `/hold 72` `/minhold 24` `/stop 2` `/stop auto`
-`/close` `/closenow` `/pause` `/resume` `/skip CASHCAT` `/unskip CASHCAT`
+| Command | What |
+|---|---|
+| `/arb_status`, `/arb_scan`, `/arb_plan SPY`, `/arb_settings`, `/arb_feeds` | Read only: answered at once |
+| `/arb_hold 72`, `/arb_minhold 24` | The longest and the shortest holding time, in hours. They apply to the open position within about 10 s |
+| `/arb_sl 2`, `/arb_sl auto` | The stop and take profit: 2% from the entry on both legs, or the dynamic one |
+| `/arb_set name value` | Any setting of `/arb_settings` |
+| `/arb_pause`, `/arb_resume`, `/arb_skip CASHCAT`, `/arb_unskip CASHCAT` | Open nothing new (an open position is kept); markets it must never open |
+| `/arb_close`, `/arb_closenow` | Close both legs: as maker first, or with taker orders at once |
+| `/arb_start 120 120` | Start the PAPER executor with that much pretend money on Arcus and on Lighter (Confirm button) |
+| `/arb_start live` | Start the LIVE executor: needs `ARB_LIVE=1` and the code it shows typed back within 2 minutes |
+| `/arb_stop` | Stop the executor. The position, if any, stays with the venues' own stop orders |
+
+- With no word after it, a command acts on the live bot when one runs or holds a position, else on the paper one.
+  `/arb_status paper` or `/arb_close live` picks one.
+- Whatever changes a **live** bot or its position asks with a Confirm button first. Paper changes are done at once.
 
 ## 8. Data sources
 
@@ -164,9 +189,10 @@ go). Then `arb telegram` (add `--live` to control the live bot).
 | `arb/exec/venue.py` | what the executor needs from a venue; the simulated and the paper venue |
 | `arb/exec/arcus.py`, `arb/exec/lighter.py` | the live venues, on the two bots' own clients |
 | `arb/exec/run.py` | the loop, its files, paper funding |
-| `arb/telegram.py`, `arb/feeds.py`, `arb/paper.py`, `arb/cli.py` | phone control; ProFunding and arb.sh; the paper note-book of `arb paper`; the commands |
-| `state/`, `data/` (not committed) | `position-<mode>.json`, `events-<mode>.jsonl`, paper money; the downloaded history |
-| `.env`, `settings.json` (not committed) | account ids and keys of the feeds; your settings |
+| `arb/ops.py` | the executor as a background process (`arb start`, `arb stop`, `/arb_start`, `/arb_stop`) |
+| `arb/telegram.py`, `arb/feeds.py`, `arb/paper.py`, `arb/cli.py` | its commands for the one Telegram bot; ProFunding and arb.sh; the paper note-book of `arb paper`; the commands |
+| `state/`, `data/` (not committed) | `position-<mode>.json`, `events-<mode>.jsonl`, `run-<mode>.pid` and `.out`, paper money; the downloaded history |
+| `settings.json` (not committed) | your settings. The account ids and switches are in the bot's one `bot/.env` |
 
-Tests: `.venv/bin/python -m pytest` (offline). Install: `uv venv --python 3.12 .venv && uv pip install --python
-.venv/bin/python -e ".[dev]" -e ../bot -e ../lighter`.
+Install: `make install` in `treading-bot/bot` (the whole bot, this part included). Tests, from `treading-bot/arb`:
+`../bot/.venv/bin/python -m pytest` (offline).

@@ -7,6 +7,18 @@ seconds its fill would likely lose ([section 7](#7-strategies-explained)). It si
 stop is a fixed share of the capital, so the same setup runs on $20 or $20,000 ([4.6](#46-capital-the-least-and-the-most)).
 The examples in this guide use $100.
 
+**One bot, three parts.** One install, one `.env`, one `bot up` and one Telegram bot run all of it:
+
+| Part | What it does | On Telegram | In the terminal | Its guide |
+|---|---|---|---|---|
+| **Arcus** market making | Maker volume on Arcus perps | `/status`, `/run`, `/closeall` … | `bot …` | this file |
+| **Lighter** market making | The same setups on Lighter (Robinhood Chain), a zero-fee venue | the same commands with `l_` in front: `/l_status`, `/l_run`, `/l_closeall` (`/l` lists them) | `bot lighter …` | [lighter/README.md](lighter/README.md) |
+| **Funding arbitrage** | Short the venue that pays more funding, long the other, equal size | `/arb_status`, `/arb_scan`, `/arb_hold 72` (`/arb` lists them) | `bot arb …` | [arb/README.md](arb/README.md) |
+
+Every Lighter message starts with **LIGHTER** and every arbitrage message with **FUNDING ARB**, so a reply is never
+taken for another part's ([9.5](#95-lighter-and-the-funding-arbitrage-in-the-same-bot)). The rest of this guide is
+the Arcus part.
+
 It does three things:
 
 1. **Scout.** It records every Arcus perp around the clock and, every 30 minutes, backtests 8 setups (Mid and Smart,
@@ -31,13 +43,14 @@ From `treading-bot/bot` on the machine that runs the bot (after the one-time ins
 
 | Terminal | What it does |
 |---|---|
-| `bot up` | Starts everything in the background: the scout (records and ranks), the Telegram bot, and the guardian while a live bot runs |
-| `bot status` | One screen: what runs, what is deployed, the last scan and its top 3, the balance |
+| `bot up` | Starts everything in the background: the Arcus scout and the Lighter scout (they record and rank; no keys needed), the one Telegram bot, and the guardian while a live bot runs |
+| `bot status` | One screen: what runs, what is deployed, the last scan and its top 3, the balance, then Lighter and the funding arbitrage |
 | `bot dashboard` | Live screen, redrawn every 10 s: today's volume and PnL, your capital's profit or loss (Ctrl-C leaves) |
 | `bot pilot approve 1` | Trades the #1 setup of the Most Volume list in paper (add `--live` for real money; `--list cheapest` or `--list max` picks from those top 3, `--max-lev` runs it at the market's maximum leverage) |
 | `bot pilot close` | Closes the position and stops trading |
 | `bot auto` | The autopilot: what it runs now and in the next 24 h (`bot auto on --budget 5`, `--live`, `bot auto off`) |
-| `bot down` | Stops the scout and the Telegram bot (`bot down --all`: the trading bot too, position kept) |
+| `bot down` | Stops the scouts and the Telegram bot (`bot down --all`: every run too, positions kept) |
+| `bot lighter …`, `bot arb …` | The Lighter part's and the funding arbitrage's own commands (`bot lighter status`, `bot arb scan`) |
 
 (`bot` is `.venv/bin/bot`; activate the venv with `source .venv/bin/activate`, or type the full path.)
 
@@ -96,16 +109,16 @@ flowchart LR
 ```
 treading-bot/
   README.md                   this guide
-  lighter/                    a separate bot for Lighter on Robinhood Chain (package `lbot`; its own guide:
-                              lighter/README.md). It shares no code, settings or credentials with `bot/`
-  arb/                        funding arbitrage between Arcus and Lighter (package and command `arb`; its own guide:
-                              arb/README.md): scanner, backtest, and an executor that runs on paper unless switched
-                              to live. It uses the two bots' venue clients and changes neither
-  bot/                        the bot (Python 3.12 package `bot`, command `bot`)
+  lighter/                    the Lighter part (package `lbot`; guide: lighter/README.md). Its own engine, data and
+                              settings; installed into bot/.venv, keys in bot/.env, controls in the one Telegram bot
+  arb/                        the funding arbitrage between Arcus and Lighter (package `arb`; guide: arb/README.md):
+                              scanner, backtest, and an executor that runs on paper unless switched to live
+  bot/                        the bot: the Arcus part, and the one place everything is installed, configured,
+                              started and controlled from (Python 3.12 package `bot`, command `bot`, `.env`, `.venv`)
     bot/scout/                tape (data store), record (recorder), sim (backtest), scan (menu + ranking), pilot, service
     bot/core/                 runner, engine (the stops), risk engine, order manager, state, ledger, guardian, doctor
     bot/strategies/           setup (Mid / Grid, spread, bias), mid, grid
-    bot/telegram/             the Telegram control bot
+    bot/telegram/             the one Telegram control bot; others.py puts Lighter (/l_…) and the arbitrage (/arb_…) in it
     bot/venues/               Arcus (REST + WebSocket + signing) and the paper venue (queue-aware fill model)
     config/                   app.yaml (risk limits), venues/, sessions/, calendars/ (CPI, FOMC, NFP, earnings)
     deploy/                   systemd units and a VPS bootstrap script
@@ -145,8 +158,10 @@ make install
 .venv/bin/bot --help
 ```
 
-`make install` creates `.venv` with Python 3.12 and installs the bot plus the dev tools; `bot --help` lists every
-command.
+`make install` creates `.venv` with Python 3.12 and installs the whole bot into it: the Arcus part, the Lighter
+part (`../lighter`) and the funding arbitrage (`../arb`), plus the dev tools. `bot --help` lists every command. The
+Arcus part is installed first and by itself: if another part fails to install, the Arcus bot still works, and
+`/l` or `/arb` say what is missing.
 
 All commands below are run from `treading-bot/bot`. `bot` means `.venv/bin/bot` (or activate the venv with
 `source .venv/bin/activate`).
@@ -172,6 +187,13 @@ Fill in only what you use:
 | `TELEGRAM_BOT_TOKEN`, `TELEGRAM_CHAT_ID` | The Telegram bot and your chat ([section 9](#9-the-telegram-bot)) | Telegram |
 | `TELEGRAM_ALLOWED_USER_IDS` | Only these Telegram users may send commands | recommended |
 | `BOT_PILOT_LIVE` | `1` allows LIVE deployments from the pilot; empty = paper only | live via the pilot |
+| `LIGHTER_ADDRESS`, `LIGHTER_API_PRIVATE_KEY`, `LIGHTER_API_KEY_INDEX`, `LIGHTER_ACCOUNT_INDEX` | The Lighter part's key ([lighter/README.md](lighter/README.md), section 3). Recording and paper need none of them | Lighter live |
+| `LBOT_LIVE` | `1` allows LIVE Lighter runs; empty = paper only | Lighter live |
+| `ARB_LIVE` | `1` allows the LIVE funding arbitrage; empty = paper only | arbitrage live |
+| `ARCUS_ACCOUNT_INDEX`, `PROFUNDING_API_KEY` | The Arcus subaccount the arbitrage reads (default 0); an optional data feed's key | arbitrage |
+
+This one file is the whole bot's: the Lighter part and the funding arbitrage read their lines from it too. (A
+`lighter/.env` or `arb/.env` from before is still read, and wins where it sets something.)
 
 The bot asks Arcus for everything else (which subaccount a key trades, when it expires). Check with:
 
@@ -1010,6 +1032,40 @@ running it first closes its position and stops.
 
 ---
 
+### 9.5 Lighter and the funding arbitrage in the same bot
+
+There is one Telegram bot. It needs no second token and no second chat.
+
+**Lighter** has the Arcus commands with `l_` in front (`/l status` with a space works too; `/l` shows its menu):
+
+| Command | What |
+|---|---|
+| `/l_top3`, `/l_cheapest`, `/l_maxvolume` | Lighter's lists from its own scans, with Run buttons |
+| `/l_run`, `/l_run SPY smart +1 20x sl=10` | The Lighter run form, or a run in one line |
+| `/l_status`, `/l_dashboard`, `/l_balance`, `/l_account` | What runs on Lighter, the live screen, the account |
+| `/l_pause`, `/l_unpause`, `/l_stop`, `/l_closeall`, `/l_resumeaftersl` | Control (each asks with a Confirm button) |
+| `/l_settings`, `/l_set daily_stop 6`, `/l_auto`, `/l_scannow` | Lighter's own settings, autopilot and scan |
+
+A LIVE Lighter run needs `LBOT_LIVE=1`, a passing doctor and a code typed back, as an Arcus one does.
+
+**The funding arbitrage** (`/arb` shows its menu and which of its bots, paper or live, the commands act on):
+
+| Command | What |
+|---|---|
+| `/arb_status`, `/arb_scan`, `/arb_plan SPY`, `/arb_settings`, `/arb_feeds` | Read only: answered at once |
+| `/arb_hold 72`, `/arb_minhold 24`, `/arb_sl 2`, `/arb_sl auto`, `/arb_set name value` | The holding time, the stop, any setting. They apply to the open position |
+| `/arb_pause`, `/arb_resume`, `/arb_skip CASHCAT`, `/arb_unskip CASHCAT` | Open nothing new; markets it must never open |
+| `/arb_close`, `/arb_closenow` | Close both legs: as maker first, or with taker orders at once |
+| `/arb_start 120 120`, `/arb_start live`, `/arb_stop` | The executor in the background: paper with that much pretend money on Arcus and on Lighter, or live |
+
+- Anything that changes a **live** arbitrage bot or its position asks with a Confirm button; `/arb_start live`
+  needs `ARB_LIVE=1` in `.env` and a code typed back.
+- Add `paper` or `live` to pick one: `/arb_status live`.
+- **How replies are told apart:** Lighter's start with **LIGHTER**, the arbitrage's with **FUNDING ARB**; an
+  unlabelled message is Arcus. A command a Lighter message mentions is written `/l_…`, so tapping it stays on
+  Lighter: `/closeall` closes Arcus, `/l_closeall` closes Lighter.
+- A read-only bot (`bot telegram --read-only`) refuses the controls of all three parts.
+
 ## 10. Command reference
 
 **Scout and pilot**
@@ -1182,8 +1238,10 @@ run `make install`, put `.env` in `treading-bot/bot`, then start everything with
 ```bash
 .venv/bin/bot up
 ```
-It starts the scout, the Telegram bot and, while a live bot runs, the guardian, all in the background; `bot status`
-checks them and `bot down` stops them. They do not come back by themselves after a reboot: run `bot up` again.
+It starts the Arcus scout, the Lighter scout, the Telegram bot and, while a live bot runs, the guardian, all in the
+background; `bot status` checks them and `bot down` stops them. They do not come back by themselves after a reboot:
+run `bot up` again. The Lighter scout records every Lighter market with no keys and no orders
+([lighter/README.md](lighter/README.md), section 10); its tape is `lighter/data/tape`.
 
 ### 11.5 Check on it
 

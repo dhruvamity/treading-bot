@@ -1,13 +1,19 @@
-# The Lighter bot (`lbot`)
+# The Lighter part of the trading bot (`bot lighter`)
 
-A maker (limit-order) trading bot for **Lighter perps on Robinhood Chain**, built from the Arcus bot's ideas and
-written again for Lighter:
+Maker (limit-order) trading on **Lighter perps on Robinhood Chain**, built from the Arcus part's ideas and written
+again for Lighter:
 - the same setups: **Mid**, **Grid**, **Smart**, a directional **bias**, run limits `sl=` `tp=` `vol=`, plus
   **Touch**, a Lighter-only mode;
-- the same scout (record, backtest, rank into three lists), pilot, autopilot and Telegram control.
+- the same scout (record, backtest, rank into three lists), pilot and autopilot.
 
-The Arcus bot (`treading-bot/bot/`) is untouched. Nothing is shared between the two: separate code, config,
-credentials (`lighter/.env`), data, state, logs and Telegram bot.
+It is one part of **one bot** (`treading-bot/bot`, the main [README](../README.md)): installed by the bot's
+`make install`, started by `bot up`, its keys in the bot's one `.env`, and controlled from the bot's **one Telegram
+bot**, where a Lighter command is the Arcus command with `l_` in front (`/l_status`, `/l_run`, `/l_closeall`).
+What stays its own is what must: its engine (Lighter's orders, fees and limits are not Arcus's), its data
+(`lighter/data`), its settings and its state.
+
+**`lbot <command>` in this guide is `bot lighter <command>`**, run from `treading-bot/bot` (`bot` is
+`.venv/bin/bot`; `.venv/bin/lbot` is there too and is the same thing).
 
 A standard Lighter account pays **0% maker and 0% taker**. The backtests on Lighter's recorded books put the best
 setups at **−0.1 to 0.3 bp per dollar traded**, against 0.8–1.7 bp for the best Arcus ones. Why, and how sure that is
@@ -19,19 +25,20 @@ setups at **−0.1 to 0.3 bp per dollar traded**, against 0.8–1.7 bp for the b
 
 ## Quick start
 
-From `treading-bot/lighter`:
+From `treading-bot/bot`:
 
 | Command | What it does |
 |---|---|
-| `make install` | One time: `.venv` with Python 3.12 and the bot |
-| `lbot up` | The scout (records every Lighter perp, scans every 30 min, runs the autopilot) and the Telegram bot, in the background |
-| `lbot status` | What runs, the run's state, the last scan's lists |
-| `lbot run SPY "smart +1"` | Paper run in this terminal (Ctrl-C stops it; `--bg` in the background) |
-| `lbot pilot approve 1` | Run the Most Volume list's #1 in paper (`--list cheapest`/`max`, `--live`) |
-| `lbot close` / `lbot stop` | Close the position and stop / stop with the position kept |
-| `lbot down` | Stop the scout and Telegram (`--all`: the run too) |
+| `make install` | One time: the whole bot, this part included, into `bot/.venv` |
+| `bot up` | Everything in the background: with the Arcus services, the Lighter scout (records every Lighter perp, scans every 30 min, runs the Lighter autopilot) and the one Telegram bot |
+| `bot status` | One screen; its LIGHTER lines show the scout, the recorder and the run. `bot lighter status` has the lists too |
+| `bot lighter run SPY "smart +1"` | Paper run in this terminal (Ctrl-C stops it; `--bg` in the background) |
+| `bot lighter pilot approve 1` | Run the Most Volume list's #1 in paper (`--list cheapest`/`max`, `--live`) |
+| `bot lighter close` / `bot lighter stop` | Close the position and stop / stop with the position kept |
+| `bot down` | Stop the scouts and Telegram (`--all`: the runs too, positions kept) |
 
-`lbot` is `.venv/bin/lbot`. From the phone: `/top3`, `/run`, `/status`, `/dashboard`, `/auto`, `/closeall`.
+From the phone, in the bot's one Telegram bot: `/l` (the Lighter menu), `/l_top3`, `/l_run`, `/l_status`,
+`/l_dashboard`, `/l_auto`, `/l_closeall`.
 
 ## Contents
 
@@ -46,7 +53,7 @@ From `treading-bot/lighter`:
 9. [Telegram](#9-telegram)
 10. [The server PC](#10-the-server-pc)
 11. [Command reference](#11-command-reference)
-12. [How it differs from the Arcus bot](#12-how-it-differs-from-the-arcus-bot)
+12. [How it differs from the Arcus part](#12-how-it-differs-from-the-arcus-part)
 13. [Layout and development](#13-layout-and-development)
 14. [Troubleshooting](#14-troubleshooting)
 
@@ -71,25 +78,22 @@ Lighter WebSocket (books, trades, stats)  ──►  recorder  ──►  data/t
 
 ## 2. Install
 
-macOS or Linux, Python 3.12 and [uv](https://docs.astral.sh/uv/).
+macOS or Linux, Python 3.12 and [uv](https://docs.astral.sh/uv/). There is one install for the whole bot:
 
 ```bash
-cd treading-bot/lighter
+cd treading-bot/bot
 make install
-.venv/bin/lbot --help
+.venv/bin/bot lighter --help
 ```
 
 The Lighter signing library comes inside the `lighter-sdk` package, for macOS (Apple and Intel), Linux (x86 and
-ARM) and Windows. Nothing needs compiling.
+ARM) and Windows. Nothing needs compiling. (`make install` inside `lighter/` still builds this part alone into
+`lighter/.venv`, for working on it by itself; the bot does not use that environment.)
 
 ## 3. Credentials
 
-Recording, backtests and paper runs need none. For live:
-
-```bash
-cp .env.example .env
-chmod 600 .env
-```
+Recording, backtests and paper runs need none. For live, the keys go into the bot's one file, `treading-bot/bot/.env`
+(the "Lighter" lines of `bot/.env.example`), next to the Arcus ones:
 
 | Variable | What |
 |---|---|
@@ -98,20 +102,23 @@ chmod 600 .env
 | `LIGHTER_API_KEY_INDEX` | Its slot, 4–254 (0–3 and 157 are the Lighter apps'); default 4 |
 | `LIGHTER_ACCOUNT_INDEX` | Only to trade a sub-account; the main account is found from the address |
 | `LBOT_LIVE` | `1` allows live runs (each still needs the doctor and your typed confirmation) |
-| `LBOT_TELEGRAM_TOKEN`, `LBOT_TELEGRAM_CHAT_ID`, `LBOT_TELEGRAM_USERS` | Its **own** Telegram bot ([section 9](#9-telegram)) |
+
+Telegram needs nothing here: the bot's one Telegram bot (`TELEGRAM_BOT_TOKEN`, `TELEGRAM_CHAT_ID` in the same file)
+serves Lighter too ([section 9](#9-telegram)). A `lighter/.env` from before is still read and wins where it sets
+something.
 
 **Getting an API key** (once, on your own machine). Registering a key needs a signature from your wallet, so it is
 your step:
 
 ```bash
-.venv/bin/python scripts/register_key.py --slot 4
+.venv/bin/python ../lighter/scripts/register_key.py --slot 4
 ```
 
 It asks for the wallet's private key (hidden, used once, never stored), makes a key pair, registers it and prints the
 three lines for `.env`. Then check everything:
 
 ```bash
-.venv/bin/lbot doctor SPY
+.venv/bin/bot lighter doctor SPY
 ```
 
 `doctor` is read-only. It checks:
@@ -180,7 +187,7 @@ rounded down to a fixed series. `/set capital 250` fixes it.
 
 ## 6. The scout: record, backtest, lists
 
-`lbot scout run` (started by `lbot up`):
+`lbot scout run` (started by `bot up`):
 
 **Records** every active perp over two WebSockets into `data/tape/<MARKET>/<UTC day>/`:
 - the best bid and offer on every change;
@@ -276,24 +283,25 @@ recorded day. It gets better as the recorder adds days.
 
 ## 9. Telegram
 
-1. @BotFather → `/newbot`. This must be a **new bot**, not the Arcus one: two programs cannot read one bot's
-   messages. Put the token in `LBOT_TELEGRAM_TOKEN`.
-2. Send the new bot a message, then send `/whoami` to it with `lbot telegram` running. Put the chat id in
-   `LBOT_TELEGRAM_CHAT_ID` and your user id in `LBOT_TELEGRAM_USERS`.
-3. `lbot up` starts it with the scout.
+There is no Lighter Telegram bot: the trading bot's **one** Telegram bot serves Lighter too (set up once, main
+[README](../README.md) section 9). A Lighter command is the Arcus command with `l_` in front; `/l status` with a
+space works too, and `/l` shows the Lighter menu. Every Lighter message starts with **LIGHTER**, and a command it
+mentions is written `/l_…`, so tapping it stays on Lighter: `/closeall` closes Arcus, `/l_closeall` closes Lighter.
 
 | Command | What |
 |---|---|
-| `/top3`, `/cheapest`, `/maxvolume` | The lists, with ▶️ buttons that open the run form with that setup |
-| `/run` | The run form: market, then one tap per field (Mid/Smart/Grid/Touch, spread, bias, leverage, run stop), 📝 Paper or 🔴 LIVE. In one line: `/run SPY smart +1 50x paper sl=10 vol=1m` |
-| `/status`, `/dashboard` | What runs (the dashboard updates every 10 s) |
-| `/balance`, `/account` | Equity, positions, 30-day volume and PnL, live points |
-| `/auto`, `/auto budget 5`, `/auto cost 0.05` | The autopilot |
-| `/pause`, `/unpause`, `/stop`, `/closeall`, `/resumeaftersl` | Control (Confirm button) |
-| `/settings`, `/set NAME VALUE` | capital, trade_share, max_capital, position_stop, daily_stop, kill, volume_cost, scan_every, max_lev |
-| `/scannow`, `/whoami`, `/help` | |
+| `/l_top3`, `/l_cheapest`, `/l_maxvolume` | The lists, with ▶️ buttons that open the run form with that setup |
+| `/l_run` | The run form: market, then one tap per field (Mid/Smart/Grid/Touch, spread, bias, leverage, run stop), 📝 Paper or 🔴 LIVE. In one line: `/l_run SPY smart +1 50x paper sl=10 vol=1m` |
+| `/l_status`, `/l_dashboard` | What runs (the dashboard updates every 10 s) |
+| `/l_balance`, `/l_account` | Equity, positions, 30-day volume and PnL, live points |
+| `/l_auto`, `/l_auto budget 5`, `/l_auto cost 0.05` | The autopilot |
+| `/l_pause`, `/l_unpause`, `/l_stop`, `/l_closeall`, `/l_resumeaftersl` | Control (Confirm button) |
+| `/l_settings`, `/l_set NAME VALUE` | capital, trade_share, max_capital, position_stop, daily_stop, kill, volume_cost, scan_every, max_lev |
+| `/l_scannow`, `/l_help` | |
 
-**It posts by itself:**
+A LIVE run needs `LBOT_LIVE=1`, a passing doctor and the code the bot shows typed back within 2 minutes.
+
+**It posts by itself** (each starting with LIGHTER):
 - a new #1 in Most Volume;
 - a list's pick paused or resumed;
 - a run's stop, kill or end;
@@ -305,33 +313,39 @@ recorded day. It gets better as the recorder adds days.
 Record around the clock on the server, as the Arcus scout does. **Recording needs no keys, no `.env` and no money,
 and places no orders**: it only reads Lighter's public market data. The code is on `main` (since pull request 23).
 
-### 10.1 On a Mac that also runs the Arcus bot (natively, next to it)
+### 10.1 On the machine that runs the bot
 
-From the folder that holds `treading-bot` on the server:
+Nothing separate to start: it is part of `bot up`. From the folder that holds `treading-bot` on the server:
 
 ```bash
 cd treading-bot && git pull
 ```
 ```bash
-cd lighter && make install
+cd bot && make install
 ```
 ```bash
-.venv/bin/lbot up
+.venv/bin/bot down
+```
+```bash
+.venv/bin/bot up
 ```
 
-`lbot up` starts the scout in the background: it records every Lighter perp (best bid and offer, trades, the top 20
-levels, the market statistics) and backtests every 30 minutes. It prints `telegram: not set up` without a token;
-that is fine for recording. It shares nothing with the Arcus bot: its own folder, its own process, its own data
-(`lighter/data/`), and Lighter's request limits are separate from Arcus's.
+`make install` adds this part to the bot's environment (once, and after an update). `bot down` and `bot up` restart
+the services on the new code; a running Arcus trading bot is not touched by either (`bot down --all` would stop it).
+`bot up` then starts the Lighter scout next to the Arcus one: it records every Lighter perp (best bid and offer,
+trades, the top 20 levels, the market statistics) and backtests every 30 minutes. Its data is `lighter/data/`, and
+Lighter's request limits are separate from Arcus's.
 
 Check it (a minute after starting, then whenever you like):
 
 ```bash
-.venv/bin/lbot status
+.venv/bin/bot status
 ```
 ```bash
-cat data/recorder.json
+cat ../lighter/data/recorder.json
 ```
+
+`bot status` has a LIGHTER block: the scout, the recorder's markets and rows, the run. From the phone: `/l_status`.
 
 | In `recorder.json` | Healthy |
 |---|---|
@@ -341,9 +355,9 @@ cat data/recorder.json
 | `book_gaps`, `reconnects` | small; each one is a short hole in that market's book |
 | `paused_for_disk` | false (recording pauses under 5 GB free) |
 
-- **After a reboot** run `.venv/bin/lbot up` again, as with `bot up`: it does not come back by itself.
-- **To stop it:** `.venv/bin/lbot down`.
-- **Keep the Mac awake** (root README, 11.4 step 2): a sleeping machine records nothing and the gap cannot be
+- **After a reboot** run `.venv/bin/bot up` again: it does not come back by itself.
+- **To stop it:** `.venv/bin/bot down`.
+- **Keep the Mac awake** (main README, 11.4 step 2): a sleeping machine records nothing and the gap cannot be
   filled later.
 - **Disk:** about 0.1–0.3 GB a day for all markets.
 
@@ -357,7 +371,8 @@ cat data/recorder.json
 ```
 
 The container is `lighter-scout`, separate from the Arcus `arcus-scout`: both can run on the same machine. Do not
-use it on a machine that will trade Lighter live: a container cannot see a native bot's process, so run 10.1 there.
+use it on a machine that runs the bot natively (`bot up` already records there), nor on one that will trade Lighter
+live: a container cannot see a native bot's process.
 
 ### 10.3 Bring the tape back
 
@@ -375,20 +390,24 @@ data/tape/` with SSH), then there, from `treading-bot/lighter`:
 tar -xzf ~/Downloads/lighter-tape.tgz -C data
 ```
 ```bash
-.venv/bin/lbot scout scan
+../bot/.venv/bin/lbot scout scan
 ```
 
 Every recorder start writes its own part files (`bbo-rec<number>-00001.npz`), and a day is joined, sorted and
 de-duplicated when it is read, so unpacking over the days already there loses nothing and doubles nothing.
 
-To trade Lighter live on the server itself, put `lighter/.env` there (section 3) and use `lbot run` or the pilot as
-on any machine. The pilot and the autopilot start runs as processes on the same machine.
+To trade Lighter live on the server itself, put the Lighter lines into `bot/.env` there (section 3) and use `/l_run`,
+`bot lighter run` or the pilot as on any machine. The pilot and the autopilot start runs as processes on the same
+machine.
 
 ## 11. Command reference
 
+Each is `bot lighter <command>` from `treading-bot/bot` (`bot lighter markets`, `bot lighter doctor SPY`).
+
 | Command | What |
 |---|---|
-| `lbot up` / `down [--all]` / `status [--json]` | Background services; one status screen |
+| `bot up` / `bot down [--all]` / `bot status` | The whole bot's services, this part's scout among them; one status screen |
+| `lbot up` / `down [--all]` / `status [--json]` | This part's scout alone; its own status screen with the lists |
 | `lbot markets` | Every Lighter perp: max leverage, tick, minimum order, 24 h volume |
 | `lbot record [--seconds N] [--markets A,B] [--no-depth]` | Record by hand (the scout does it) |
 | `lbot scout run` / `scout scan [--capital 250] [--markets A,B] [--full]` | The scout daemon / one scan now |
@@ -402,11 +421,10 @@ on any machine. The pilot and the autopilot start runs as processes on the same 
 | `lbot set [NAME VALUE]` | See or change a setting (`default` undoes it) |
 | `lbot account` | The account as Lighter keeps it |
 | `lbot keys` | A new API key pair (local only; register it with `scripts/register_key.py`) |
-| `lbot telegram` | The Telegram bot (in the foreground) |
 
-## 12. How it differs from the Arcus bot
+## 12. How it differs from the Arcus part
 
-| | Arcus bot | Lighter bot |
+| | Arcus part | Lighter part |
 |---|---|---|
 | Fees | 0 maker / 2.25 bp taker | 0 / 0 (standard account) |
 | Loop | 1 s, requote by cancel + place | 0.5 s, requote by modify in one batch; at most 54 a minute (60 requests in all) |
@@ -414,7 +432,7 @@ on any machine. The pilot and the autopilot start runs as processes on the same 
 | Fill model | queue at the touch (best bid/offer only) | queue at any price, from the recorded depth |
 | Modes | Mid, Grid, Smart | Mid, Grid, Smart, **Touch** |
 | Best setups | BTC Mid 0 (volume, ~1 bp live), SPY Smart 0 | SPY/ETH/NVDA/QQQ Smart +0.5 to +1, Mid +0.5 to +1 (−0.1 to 0.3 bp, backtest) |
-| Stops | 1% / 2% / 10% | 2% / 5% / 25% |
+| Stops | position 1–5% (follows the market) / 2% / 10% | 2% / 5% / 25% |
 | Dead man's switch | `scheduleCancel` 60 s, every 20 s | scheduled cancel-all 5.5 min ahead, every 60 s |
 | Off-hours rules | RWA session margins, trading bounds | none: Lighter's perps trade 24/7 at one margin |
 | History | 8 weeks of trades, 8 days of books | 1 day of books (recording from now on) |
@@ -427,7 +445,8 @@ lighter/
                    WebSocket, order book
   lbot/trade/      strategy (the setups), guard (the stops), sizing, feed, paper and live exchanges, engine, runner
   lbot/scout/      tape, recorder, importer, sim (the backtest), scan (lists), pilot, autopilot, calendar, service
-  lbot/telegram/   the Telegram bot
+  lbot/telegram/   the Lighter panel of the bot's one Telegram bot: bot.py (cards, form, buttons, alerts),
+                   embed.py (how it sits inside that bot: /l_ commands, the LIGHTER label)
   lbot/cli.py      `lbot`;  ops.py (processes), doctor.py, settings.py, account.py, config.py, log.py
   config/          app.yaml, calendars/events.csv
   scripts/         research.py (the sweeps behind docs/RESEARCH.md), register_key.py

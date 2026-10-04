@@ -1,5 +1,5 @@
-"""A small Telegram Bot API client (long polling), and the message layout: one emoji and a bold title, a blank line,
-then short monospace lines in groups (Telegram HTML)."""
+"""A small Telegram Bot API client that only SENDS (the trading bot's one Telegram bot does the receiving), and the
+message layout: one emoji and a bold title, a blank line, then short monospace lines in groups (Telegram HTML)."""
 
 from __future__ import annotations
 
@@ -78,13 +78,6 @@ class Api:
     async def edit(self, chat: str | int, msg_id: int, text: str, markup: dict[str, Any] | None = None) -> Any:
         return await self.call("editMessageText", chat_id=chat, message_id=msg_id, text=text[:4000], parse_mode="HTML",
                                disable_web_page_preview=True, reply_markup=markup)
-
-    async def answer(self, cb_id: str, text: str = "") -> Any:
-        return await self.call("answerCallbackQuery", callback_query_id=cb_id, text=text[:190] or None)
-
-    async def updates(self, offset: int) -> list[dict[str, Any]]:
-        r = await self.call("getUpdates", offset=offset, timeout=25, allowed_updates=["message", "callback_query"])
-        return r or []
 
     async def close(self) -> None:
         if self._s is not None:

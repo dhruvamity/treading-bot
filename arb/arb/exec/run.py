@@ -121,8 +121,9 @@ def skipped(root: Path = ROOT) -> set[str]:
 
 
 def telegram_alert(env: dict[str, str]) -> Callable[[str], None] | None:
-    """Send-only alerts through a Telegram bot of its own (ARB_TELEGRAM_TOKEN, ARB_TELEGRAM_CHAT_ID in arb/.env)."""
-    tok, chat = env.get("ARB_TELEGRAM_TOKEN", ""), env.get("ARB_TELEGRAM_CHAT_ID", "")
+    """Send-only alerts through the trading bot's one Telegram bot (TELEGRAM_BOT_TOKEN, TELEGRAM_CHAT_ID in
+    bot/.env). Sending needs no listener, so it does not disturb the process that reads the commands."""
+    tok, chat = env.get("TELEGRAM_BOT_TOKEN", ""), env.get("TELEGRAM_CHAT_ID", "")
     if not tok or not chat:
         return None
 
@@ -130,7 +131,7 @@ def telegram_alert(env: dict[str, str]) -> Callable[[str], None] | None:
         try:
             async with aiohttp.ClientSession(timeout=aiohttp.ClientTimeout(total=15)) as s:
                 await s.post(f"https://api.telegram.org/bot{tok}/sendMessage",
-                             json={"chat_id": chat, "text": f"⚖️ ARB\n{text}"})
+                             json={"chat_id": chat, "text": f"⚖️ FUNDING ARB\n{text}"})
         except (aiohttp.ClientError, TimeoutError, OSError):
             pass
 

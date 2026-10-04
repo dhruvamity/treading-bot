@@ -179,6 +179,7 @@ def cmd_up(a: argparse.Namespace) -> None:
         print(f"{ops.start(app, name)[1]}  [{why}]")
     for name, why in ops.skipped(dict(os.environ), live).items():
         print(f"{name}: not started ({why})")
+    print(ops.lighter_up() + "  [always: it records, with no keys and no orders]")
     print("\n" + ops.dashboard(app, dict(os.environ), Path.cwd()))
 
 
@@ -203,6 +204,29 @@ def cmd_down(a: argparse.Namespace) -> None:
         print(ops.stop(app, name)[1])
     if "guardian" not in names:
         print("guardian: left running, it watches the live bot (bot down --all stops both)")
+    for line in ops.others_down(bool(a.all)):
+        print(line)
+
+
+def cmd_lighter(a: argparse.Namespace) -> None:
+    """`bot lighter <command>`: the Lighter part's own commands (treading-bot/lighter), from this one command."""
+    try:
+        from lbot.cli import main as part
+    except ImportError as e:
+        print(f"the Lighter part is not installed in this environment ({e}): run `make install` in treading-bot/bot")
+        sys.exit(2)
+    part(a.rest or ["--help"])
+
+
+def cmd_arb(a: argparse.Namespace) -> None:
+    """`bot arb <command>`: the funding arbitrage's own commands (treading-bot/arb), from this one command."""
+    try:
+        from arb.cli import main as part
+    except ImportError as e:
+        print(f"the funding arbitrage is not installed in this environment ({e}): run `make install` in "
+              "treading-bot/bot")
+        sys.exit(2)
+    part(a.rest or ["--help"])
 
 
 def cmd_dashboard(a: argparse.Namespace) -> None:
@@ -809,8 +833,12 @@ def build_parser() -> argparse.ArgumentParser:
     sp.add_argument("--adopt-positions", action="store_true", help="an existing position is the bot's to manage")
     sp.add_argument("--seconds", type=float, help="stop after this long")
     sp.add_argument("--state-db", help=argparse.SUPPRESS)
-    sp = add("up", cmd_up, "start everything this machine should run: scout, Telegram bot, guardian (background)")
-    sp = add("down", cmd_down, "stop the scout and the Telegram bot; --all also stops the trading bot (positions kept)")
+    sp = add("lighter", cmd_lighter, "the Lighter part: bot lighter status | run SPY 'smart +1' | doctor SPY | ...")
+    sp.add_argument("rest", nargs=argparse.REMAINDER, help="the Lighter command and its arguments")
+    sp = add("arb", cmd_arb, "the funding arbitrage: bot arb scan | status | start --arcus 120 --lighter 120 | ...")
+    sp.add_argument("rest", nargs=argparse.REMAINDER, help="the arbitrage command and its arguments")
+    sp = add("up", cmd_up, "start everything this machine should run: both scouts, the Telegram bot, guardian")
+    sp = add("down", cmd_down, "stop the scouts and the Telegram bot; --all also stops every run (positions kept)")
     sp.add_argument("--all", action="store_true")
     sp = add("status", cmd_status, "one screen: services, trading bot, what is deployed, last scan, balance")
     sp.add_argument("--mode", choices=["live", "testnet", "paper"])

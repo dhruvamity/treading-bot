@@ -1,4 +1,5 @@
-"""The Telegram control bot: status, control and live alerts for the trading bot.
+"""The Telegram control bot: status, control and live alerts for the trading bot. ONE bot for all of it: Arcus
+(the commands below), Lighter (/l_<command>) and the funding arbitrage (/arb_<command>): bot/telegram/others.py.
 
 Security:
 - Only the owner's chat (TELEGRAM_CHAT_ID) is served; with TELEGRAM_ALLOWED_USER_IDS set, only those users, in the
@@ -29,7 +30,7 @@ from bot.common.logging import Log, redact_str
 from bot.common.tgfmt import b, card, codes, plain_card, section
 from bot.common.tgfmt import code as mono
 from bot.core.balances import BalanceLog
-from bot.telegram import dashboard
+from bot.telegram import dashboard, others
 from bot.telegram.api import Keyboard, TelegramAPI, TelegramError, split_html
 from bot.telegram.control import MODES, Control, pause_where
 from bot.telegram.views import (
@@ -154,6 +155,9 @@ class TelegramBot:
         self._tasks: set[asyncio.Task[Any]] = set()
         self._dash_account: dict[str, Any] | None = None   # the dashboard's own account read (when the bot has none)
         self.scan_waiters: list[dict[str, Any]] = []        # {chat, profile, since}: post that list after the scan
+        # the other two parts of the bot, in this same Telegram bot (bot/telegram/others.py)
+        self.lighter = others.Lighter(str(getattr(api, "token", "")), owner_chat_id, allowed_user_ids)
+        self.arb = others.Arb()
 
     # ------------------------------------------------------------------ plumbing
     def authorized(self, chat_id: int, user_id: int | None) -> bool:
@@ -198,7 +202,11 @@ class TelegramBot:
         await self.api.send(self.owner_chat_id, dashboard.control_text(
             d, "Bot Online", ["Read-only: controls are off"] if self.read_only else None),
             keyboard=menu_keyboard(), silent=True)
-        await asyncio.gather(self._poll_loop(), self._watch_loop(), self._dashboard_loop())
+        loops = [self._poll_loop(), self._watch_loop(), self._dashboard_loop()]
+        panel = self.lighter.load()
+        if panel is not None:
+            loops.append(panel.run())
+        await asyncio.gather(*loops)
 
     async def _poll_loop(self) -> None:
         offset: int | None = None
@@ -255,10 +263,17 @@ class TelegramBot:
             msg = cq.get("message") or {}
             ctx = Ctx(int((msg.get("chat") or {}).get("id", 0)), (cq.get("from") or {}).get("id"),
                       _name(cq.get("from")), msg.get("message_id"))
+            data = str(cq.get("data") or "")
+            if data.startswith(others.LIGHTER + " "):     # a button of the Lighter panel: it answers with its note
+                note = ""
+                if self.authorized(ctx.chat_id, ctx.user_id):
+                    note = await self._lighter_button(ctx, data[len(others.LIGHTER) + 1:])
+                await self.api.answer(cq["id"], note)
+                return
             await self.api.answer(cq["id"])
             if not self.authorized(ctx.chat_id, ctx.user_id):
                 return
-            parts = str(cq.get("data") or "").split()
+            parts = data.split()
             if parts:
                 await self.dispatch(ctx, parts[0], parts[1:])
             return
@@ -287,6 +302,11 @@ class TelegramBot:
 
     # ------------------------------------------------------------------ commands
     async def dispatch(self, ctx: Ctx, cmd: str, args: list[str]) -> None:
+        part = others.part_of(cmd)
+        if part is not None:      # /l_status, /l status, /arb_hold 72 ...: Lighter or the funding arbitrage
+            name, rest = (part[1], args) if part[1] else ((args[0].lower(), args[1:]) if args else ("", []))
+            await (self.c_lighter if part[0] == others.LIGHTER else self.c_arb)(ctx, name, rest)
+            return
         cmd = ALIASES.get(cmd, cmd)
         read = {"start": self.c_menu, "menu": self.c_menu, "help": self.c_help, "status": self.c_status,
                 "top3": self.c_scout, "openpositions": self.c_pilot,
@@ -315,6 +335,104 @@ class TelegramBot:
             await write[cmd](ctx, args)
         else:
             await self.reply(ctx, card("❔", "UNKNOWN COMMAND", codes(f"/{cmd}"), codes("/help")))
+
+    # ------------------------------------------------------------------ Lighter and the funding arbitrage
+    async def c_lighter(self, ctx: Ctx, name: str, rest: list[str]) -> None:
+        """/l_<name> ...: the same command on Lighter (/l or /l_menu lists them). The panel sends its own replies."""
+        panel = self.lighter.load()
+        if panel is None:
+            await self.reply(ctx, self.lighter.missing())
+            return
+        text = "/" + " ".join([name or "menu", *rest])
+        await panel.text(ctx.chat_id, ctx.user_id or 0, text, read_only=self.read_only)
+
+    async def _lighter_button(self, ctx: Ctx, data: str) -> str:
+        panel = self.lighter.load()
+        if panel is None:
+            await self.api.send(ctx.chat_id, self.lighter.missing())
+            return ""
+        return str(await panel.button(ctx.chat_id, ctx.message_id or 0, data, read_only=self.read_only))
+
+    async def c_arb(self, ctx: Ctx, name: str, rest: list[str]) -> None:
+        """/arb_<name> ...: the funding arbitrage (/arb lists the commands). Reads answer at once; what changes a LIVE
+        bot or its position asks first, and a LIVE start needs the code typed back."""
+        loaded = self.arb.load()
+        if loaded is None:
+            await self.reply(ctx, self.arb.missing())
+            return
+        tg, ops = loaded
+        explicit = [x.lower() for x in rest if x.lower() in ops.MODES]
+        rest = [x for x in rest if x.lower() not in ops.MODES]
+        mode = explicit[0] if explicit else ops.current_mode()
+        if name in ("", "menu", "help"):
+            await self.reply(ctx, others.arb_menu(mode, {m: ops.running(m) for m in ops.MODES}, self.arb.live_allowed()),
+                             others.arb_keyboard())
+            return
+        if name in ("start", "stop"):
+            if self.read_only:
+                await self.reply(ctx, card("🔒", "READ-ONLY", codes("Controls are off on this bot")))
+                return
+            await self._arb_service(ctx, name, mode if explicit or name == "stop" else "paper", rest)
+            return
+        argv = tg.to_argv("/" + " ".join([name, *rest]), mode == "live")
+        if argv is None:
+            await self.reply(ctx, card("❔", "UNKNOWN FUNDING ARB COMMAND", codes(f"/arb_{name}"), codes("/arb lists them")))
+            return
+        if tg.changes_something(argv):
+            if self.read_only:
+                await self.reply(ctx, card("🔒", "READ-ONLY", codes("Controls are off on this bot")))
+                return
+            if mode == "live":      # real money: one tap never does it
+                await self._ask(ctx, "arb", {"argv": argv, "title": name}, card(
+                    "⚖️", f"FUNDING ARB · {name.upper()} (LIVE)", codes("arb " + " ".join(argv))))
+                return
+        self._spawn(self._arb_run(ctx.chat_id, name, argv))
+
+    async def _arb_run(self, chat_id: int, title: str, argv: list[str]) -> None:
+        """Run one arbitrage command and post what it printed (a scan reads both venues: it takes a while)."""
+        from arb import telegram as tg
+
+        try:
+            out = await tg.run_command(argv)
+        except Exception as e:
+            out = f"{type(e).__name__}: {redact_str(str(e))[:300]}"
+        await self.api.send(chat_id, others.arb_card(title, out), keyboard=others.arb_keyboard())
+
+    async def _arb_service(self, ctx: Ctx, name: str, mode: str, rest: list[str]) -> None:
+        """/arb_start 120 120 (paper) · /arb_start live · /arb_stop [live]: the executor in the background."""
+        from arb import ops
+
+        if name == "stop":
+            if not ops.running(mode):
+                await self.reply(ctx, card("ℹ️", f"FUNDING ARB · {mode.upper()} IS NOT RUNNING"))
+                return
+            await self._ask(ctx, "arb_stop", {"mode": mode}, card(
+                "⏹", f"FUNDING ARB · STOP {mode.upper()}",
+                codes("The position, if any, is kept", "The venues' own stop orders stay", "/arb_close closes it")))
+            return
+        if ops.running(mode):
+            await self.reply(ctx, card("ℹ️", f"FUNDING ARB · {mode.upper()} ALREADY RUNS", codes("/arb_status")))
+            return
+        if mode == "live":
+            if not self.arb.live_allowed():
+                await self.reply(ctx, card("🔒", "FUNDING ARB · LIVE IS OFF", codes(
+                    "Put ARB_LIVE=1 in bot/.env, then bot down and bot up", "Nothing was started")))
+                return
+            await self._ask(ctx, "arb_start", {"mode": "live"}, card(
+                "🔴", "FUNDING ARB · START LIVE",
+                codes("REAL orders on Arcus and on Lighter", "Size: the smaller venue's free margin",
+                      "/arb_settings shows the limits (max_notional_usd caps a first run)")), code=True)
+            return
+        try:
+            money = {"arcus": float(rest[0]), "lighter": float(rest[1])}
+        except (IndexError, ValueError):
+            await self.reply(ctx, card("❔", "FUNDING ARB · PAPER NEEDS PRETEND MONEY", codes(
+                "/arb_start 120 120", "dollars on Arcus, then on Lighter", "/arb_start live for real orders")))
+            return
+        await self._ask(ctx, "arb_start", {"mode": "paper", "money": money}, card(
+            "📝", "FUNDING ARB · START PAPER",
+            codes(f"Pretend ${money['arcus']:,.0f} on Arcus, ${money['lighter']:,.0f} on Lighter",
+                  "Real prices and funding, no real orders")))
 
     # ------------------------------------------------------------------ scout / pilot: the lists
     async def c_scout(self, ctx: Ctx, args: list[str]) -> None:
@@ -1214,6 +1332,9 @@ class TelegramBot:
                 self.pending.pop(pid, None)
                 await self._execute(Ctx(ctx.chat_id, ctx.user_id, ctx.user), p)
                 return
+        if self.lighter.waits_for_code(ctx.chat_id) and not self.read_only:   # a Lighter LIVE start's code
+            await self.lighter.panel.text(ctx.chat_id, ctx.user_id or 0, text)
+            return
         await self.api.send(ctx.chat_id, card("❔", "UNKNOWN CODE", codes("No action waits for that code")))
 
     async def _execute(self, ctx: Ctx, p: Pending) -> None:
@@ -1225,6 +1346,9 @@ class TelegramBot:
         if took and ap.turn_off(self._state_dir(), f"your {took} ({ctx.user})"):
             await self.reply(ctx, card("🤖", "AUTOPILOT OFF", codes(f"You took over with {took}", "/auto to turn it "
                                                                                                  "on again")))
+        if p.action in ("arb", "arb_start", "arb_stop"):
+            await self._execute_arb(ctx, p)
+            return
         if p.action == "auto_on":
             ap.configure(self._state_dir(), on=True, mode="live" if a["live"] else "paper", budget_day=a["budget"],
                          by=ctx.user, **({"max_cost_bp": a["cost"], "auto_cost": False} if a.get("cost") else {}))
@@ -1341,6 +1465,27 @@ class TelegramBot:
                     await self.api.send(ctx.chat_id, card("⚠️", "CANCEL FAILED" if p.action == "cancelall" else
                                                           "CLOSE FAILED", codes(redact_str(str(e))[:300])))
             self._spawn(go())
+
+    async def _execute_arb(self, ctx: Ctx, p: Pending) -> None:
+        """A confirmed funding-arbitrage action. It never turns the Arcus autopilot off: it is another part."""
+        from arb import ops
+
+        a = p.args
+        log.info("operator_action", data={"action": p.action, "args": a, "by": ctx.user})
+        if p.action == "arb":
+            await self.reply(ctx, card("⏳", f"FUNDING ARB · {str(a['title']).upper()}", codes("arb " + " ".join(a["argv"]))))
+            self._spawn(self._arb_run(ctx.chat_id, str(a["title"]), list(a["argv"])))
+            return
+        mode = str(a["mode"])
+        try:
+            ok, msg = await asyncio.to_thread(ops.start, mode, a.get("money")) if p.action == "arb_start" else \
+                await asyncio.to_thread(ops.stop, mode)
+        except Exception as e:
+            ok, msg = False, f"{type(e).__name__}: {redact_str(str(e))[:300]}"
+        head = ("STARTED" if ok else "NOT STARTED") if p.action == "arb_start" else ("STOPPED" if ok else "NOT STOPPED")
+        await self.reply(ctx, card("🟢" if ok and p.action == "arb_start" else "⏹" if ok else "❌",
+                                   f"FUNDING ARB · {mode.upper()} {head}", codes(*msg.splitlines()),
+                                   codes("/arb_status")), others.arb_keyboard())
 
     async def _ensure_stopped(self, ctx: Ctx, mode: str, wait_s: float = 25.0) -> None:
         await asyncio.sleep(wait_s)
