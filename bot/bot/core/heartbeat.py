@@ -8,6 +8,8 @@ from pathlib import Path
 
 import orjson
 
+from bot.common.proc import pid_alive
+
 
 def write_heartbeat(path: Path | str, **extra: object) -> None:
     p = Path(path)
@@ -46,10 +48,4 @@ def heartbeat_process_alive(path: Path | str) -> bool:
         return False
     if pid == os.getpid():
         return False
-    try:
-        os.kill(pid, 0)
-    except ProcessLookupError:
-        return False
-    except PermissionError:
-        return True  # exists, owned by another user
-    return True
+    return pid_alive(pid)

@@ -32,6 +32,7 @@ from bot.venues.ws_base import ReconnectingWS
 Callback = Callable[..., Any]
 log = Log("arcus.ws")
 DEGRADED_RESUB_S = 10.0
+GAP_RESUB_S = 5.0        # a gap's re-subscribe whose snapshot never came is sent again after this long
 ERROR_LOG_EVERY_S = 600.0
 PER_MARKET = {"l2OrderbookUpdates": "l2u", "bbo": "bbo", "trades": "trades", "predictedFunding": "pf"}
 GLOBAL = ("markets", "oraclePrices", "marketAttributes")
@@ -50,6 +51,7 @@ class ArcusWS:
         self._inflight = asyncio.Semaphore(40)
         self._resub_at: dict[str, float] = {}             # last degraded-driven resubscribe per stream
         self._resub_later: dict[str, asyncio.Task[None]] = {}
+        self._gap_resub_at: dict[str, float] = {}         # market -> its gap re-subscribe in flight (until the snapshot)
         self._errors_logged: dict[str, float] = {}
         self.degraded = 0
 
@@ -190,6 +192,19 @@ class ArcusWS:
 
         self._resub_later[key] = asyncio.create_task(later())
 
+    async def _resync_book(self, sid: str) -> None:
+        """A fresh book snapshot after a sequence gap, one request at a time. Every delta that arrives before the
+        snapshot also reads as a gap. A re-subscribe for each one (about 900 in the minute Arcus resets the stock
+        books, 00:00 and 08:00 UTC) used up the client-message window, and the send that waited on it held the whole
+        connection: the recorder lost a minute of every market, daily."""
+        now = time.monotonic()
+        sent = self._gap_resub_at.get(sid)
+        if sent is not None and now - sent < GAP_RESUB_S:
+            return
+        self._gap_resub_at[sid] = now
+        log.warning("book_gap", venue="arcus", market=sid, reason="mid-stream sequence gap; resubscribing")
+        await self.ws.resubscribe(f"l2u:{sid}", {"type": "unsubscribe", "channel": "l2OrderbookUpdates", "id": sid})
+
     async def _on_channel(self, m: dict[str, Any], recv_us: int, *, snapshot: bool) -> None:
         ch = m.get("channel")
         sid = m.get("id") or ""
@@ -199,12 +214,11 @@ class ArcusWS:
             self.ws.touch(f"l2u:{sid}", recv_us)
             if snapshot:
                 res = sync.on_snapshot(c, recv_us)
+                self._gap_resub_at.pop(sid, None)
             else:
                 res = sync.on_delta(c, recv_us)
                 if res is SyncResult.GAP:
-                    log.warning("book_gap", venue="arcus", market=sid, reason="mid-stream sequence gap; resubscribing")
-                    await self.ws.resubscribe(f"l2u:{sid}", {"type": "unsubscribe", "channel": "l2OrderbookUpdates",
-                                                             "id": sid})
+                    await self._resync_book(sid)
             await self._emit("book", canonical_base(Venue.ARCUS, sid), sync, res, recv_us, snapshot, c)
         elif ch == "bbo":
             self.ws.touch(f"bbo:{sid}", recv_us)

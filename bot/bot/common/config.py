@@ -173,6 +173,8 @@ class SizingCfg(_Model):
     leverage_off: float | None = None    # the same outside an RWA perp's session (higher initial margin)
     order_max_usd: float | None = None   # the market's liquidity ceiling for one order
     position_stop_pct: float = 1.0
+    position_stop_k: float = 0.0         # > 0: the position stop follows the market (sizing.dynamic_stop), from
+    position_stop_max_pct: float = 5.0   # position_stop_pct up to this
     daily_stop_pct: float = 2.0
     kill_pct: float = 10.0
     min_capital_usd: float = 0.0         # below this the venue minimum order, not the capital, would set the size
@@ -219,10 +221,13 @@ class MMSession(_Model):
     off_hours: OffHoursCfg = OffHoursCfg()
     auto_spacing: AutoSpacingCfg = AutoSpacingCfg()
     exit_taker_after_s: float = 60
+    loop_ms: int = 1000                  # how often the engine decides (bot/common/sizing.py LOOP_MS); divides 1000
     # Dollar stops for a small account. The scout's backtests apply exactly these rules (bot/scout/sim.py).
     # None falls back to the app-wide % limits (risk.daily_loss_pct, risk.drawdown_pct of capital_usd).
     daily_stop_usd: float | None = None  # day PnL at or below -X: no new orders until 00:00 UTC, close the position
     pos_stop_usd: float | None = None    # the open position is down X: close it (maker, then taker), then cool down
+    pos_stop_k: float = 0.0              # > 0: X follows the market (sizing.dynamic_stop): k 1-hour moves on the
+    pos_stop_max_usd: float | None = None   # inventory cap, from pos_stop_usd up to this
     kill_usd: float | None = None        # equity X below its peak: flatten and stop until a manual resume
     max_loss_usd: float | None = None    # this run may lose X in all (/run ... sl=X): then flatten and stop. The
                                          # daily stop, kill and session stop never stop it sooner
@@ -259,6 +264,8 @@ class MMSession(_Model):
             raise ValueError("skew_kappa must be in [0, 2]")
         if not 0 <= self.bias_frac <= 1:
             raise ValueError("bias_frac must be in [0, 1]")
+        if self.loop_ms < 100 or 1000 % self.loop_ms:
+            raise ValueError("loop_ms must divide 1000 and be at least 100")
         for k in ("take_profit_usd", "volume_target_usd"):
             v = getattr(self, k)
             if v is not None and v <= 0:
@@ -305,7 +312,9 @@ class SizingDefaults(_Model):
     paper_capital_usd: float = 100       # auto with no keys or an unfunded account (the Docker scout, paper runs)
     capital_frac: float = 1.0            # trade this share of the equity
     max_capital_usd: float | None = None
-    position_stop_pct: float = 1.0
+    position_stop_pct: float = 1.0       # the position stop, or its floor while it follows the market
+    position_stop_k: float = 2.0         # the position stop follows the market: this many 1-hour moves on a full
+    position_stop_max_pct: float = 5.0   # position, never under position_stop_pct nor over this. 0 = fixed.
     daily_stop_pct: float = 2.0
     kill_pct: float = 10.0
     go_pnl_day_pct: float = 0.25
@@ -321,7 +330,7 @@ class SizingDefaults(_Model):
 
     def pct(self) -> Pct:
         return Pct(self.position_stop_pct, self.daily_stop_pct, self.kill_pct, self.go_pnl_day_pct,
-                   self.go_tail_pnl_pct)
+                   self.go_tail_pnl_pct, self.position_stop_k, self.position_stop_max_pct)
 
 
 class AppConfig(_Model):

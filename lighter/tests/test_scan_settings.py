@@ -55,3 +55,27 @@ def test_ops_never_spawns_under_tests(cfg):
     from lbot import ops
     with pytest.raises(RuntimeError):
         ops.start(cfg, "scout", ["scout", "run"])
+
+
+def test_a_finished_run_is_not_running_even_before_it_is_reaped(cfg):
+    """The scout starts a run as its child and lives on: the exited run is a zombie until someone waits for it."""
+    import subprocess
+    import sys
+    import time
+
+    from lbot import ops
+    p = subprocess.Popen([sys.executable, "-c", "pass"])
+    end = time.time() + 10
+    while time.time() < end and subprocess.run(["ps", "-o", "stat=", "-p", str(p.pid)], capture_output=True,
+                                               text=True).stdout.strip()[:1] != "Z":
+        time.sleep(0.05)
+    ops.pid_path(cfg, "run-paper").parent.mkdir(parents=True, exist_ok=True)
+    ops.pid_path(cfg, "run-paper").write_text(str(p.pid))
+    assert ops.running(cfg, "run-paper") is None
+    assert not ops.alive(0) and not ops.alive(p.pid)
+    live = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(30)"])
+    try:
+        assert ops.alive(live.pid)
+    finally:
+        live.kill()
+        live.wait()

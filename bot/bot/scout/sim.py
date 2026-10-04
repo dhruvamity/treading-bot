@@ -45,7 +45,7 @@ from typing import Any
 
 import numpy as np
 
-from bot.common.sizing import Pct, sizes
+from bot.common.sizing import Pct, dynamic_stop, sizes
 from bot.common.time import NEW_YORK
 from bot.scout.tape import DayTape
 from bot.strategies import smart
@@ -74,6 +74,8 @@ class Risk:
     order_max_usd: float = 0.0         # the liquidity ceiling when it limits these sizes (0 = it does not)
     liq_ceiling_usd: float = 0.0       # the market's liquidity ceiling for one order, binding or not (information)
     min_capital_usd: float = 0.0       # below this the venue minimum order, not the capital, would set the size
+    pos_stop_k: float = 0.0            # > 0: the position stop follows the market (bot/common/sizing.py
+    pos_stop_max_usd: float = 0.0      # dynamic_stop): k hourly moves on the inventory cap, from pos_stop_usd up to this
 
     @classmethod
     def at_leverage(cls, lev: float, lev_off: float | None = None, **kw: Any) -> Risk:
@@ -94,6 +96,7 @@ class Risk:
         binds = s.capital < capital
         return cls(capital_usd=capital, order_usd=s.order, cap_usd=s.cap, cap_off_usd=s.cap_off,
                    daily_stop_usd=s.daily_stop, pos_stop_usd=s.pos_stop, kill_usd=s.kill, leverage=lev,
+                   pos_stop_k=s.pos_stop_k, pos_stop_max_usd=s.pos_stop_max,
                    leverage_off=lev_off, used_usd=s.capital, order_max_usd=(order_max or 0.0) if binds else 0.0,
                    liq_ceiling_usd=order_max or 0.0, min_capital_usd=min_capital, **kw)
 
@@ -110,7 +113,7 @@ class Risk:
             return self
         ps, ds, k = stops
         return replace(self, pos_stop_usd=self.used * ps / 100, daily_stop_usd=self.used * ds / 100,
-                       kill_usd=self.used * k / 100)
+                       kill_usd=self.used * k / 100, pos_stop_k=0.0, pos_stop_max_usd=0.0)
 
 
 @dataclass(frozen=True)
@@ -745,7 +748,9 @@ class Sim:
                     res.day_stops += 1
                     res.first_day_stop_us = res.first_day_stop_us or t
                 elif state == "normal" and pos and st["entry"] is not None \
-                        and pos * (mid - st["entry"]) <= -risk.pos_stop_usd:
+                        and pos * (mid - st["entry"]) <= -dynamic_stop(
+                            risk.pos_stop_usd, risk.pos_stop_k, risk.pos_stop_max_usd,
+                            math.sqrt(vol_1m * 60) if vol_1m else 0.0, policy.cap):
                     state, exit_since = "exit_pos", t
                     res.pos_stops += 1
                 if state == "cooldown" and t >= cool_until:

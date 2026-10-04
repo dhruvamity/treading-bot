@@ -107,8 +107,10 @@ def test_settings_are_checked_and_layered_over_the_config(tmp_path: Path) -> Non
         with pytest.raises(ValueError):
             settings.parse(name, bad)
     settings.save(tmp_path, "trade_share", 50, base)
-    with pytest.raises(ValueError, match="not saved"):
-        settings.save(tmp_path, "position_stop", 5, base)          # above the 2% daily stop
+    with pytest.raises(ValueError, match=r"not saved: the stops must stay .* 5% / 2% / 10%.*/set daily_stop 5"):
+        settings.save(tmp_path, "position_stop", 5, base)          # above the 2% daily stop: says so, and the way out
+    with pytest.raises(ValueError, match=r"1% \(the dynamic stop's floor\) / 2% / 1%.*/set kill 2"):
+        settings.save(tmp_path, "kill", 1, base)
     z = settings.effective_sizing(base, settings.load(tmp_path))
     assert z.capital_frac == 0.5 and z.position_stop_pct == 1.0
     assert settings.reset(tmp_path, "trade_share") == {}

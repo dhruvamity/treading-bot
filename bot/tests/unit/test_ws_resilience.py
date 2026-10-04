@@ -92,6 +92,36 @@ async def test_a_degraded_book_is_dropped_and_resubscribed_without_a_storm(monke
     await aw.stop()
 
 
+async def test_a_book_gap_resubscribes_once_until_the_snapshot(monkeypatch: Any) -> None:
+    """Every delta after a gap reads as a gap until the new snapshot: one re-subscribe, not one per delta (the daily
+    00:00 and 08:00 UTC stock-book resets sent ~900 in a minute and stalled the connection)."""
+    aw = ArcusWS("wss://unused")
+    fake = _FakeWS()
+    aw.ws = fake  # type: ignore[assignment]
+
+    def delta(seq: int) -> dict[str, Any]:
+        return {"type": "channel_data", "channel": "l2OrderbookUpdates", "id": "QQQ-USD",
+                "contents": {"bids": [["740.1", "1"]], "asks": [], "lastSequenceId": seq}}
+    snap = {"type": "subscribed", "channel": "l2OrderbookUpdates", "id": "QQQ-USD", "contents": SNAP}
+    first = int(SNAP["lastSequenceId"])
+    await aw._on_message(snap, 1)
+    await aw._on_message(delta(first + 1), 2)
+    await aw._on_message(delta(first + 2), 3)
+    for i in range(50):                                             # the reset: the sequence jumps, deltas keep coming
+        await aw._on_message(delta(first + 1000 + i), 4)
+    assert len(fake.resubs) == 1 and aw.books["QQQ-USD"].gaps == 50
+    monkeypatch.setattr(arcus_ws, "GAP_RESUB_S", 0.0)               # the snapshot never came: ask again
+    await aw._on_message(delta(first + 2000), 5)
+    assert len(fake.resubs) == 2
+    monkeypatch.setattr(arcus_ws, "GAP_RESUB_S", 5.0)
+    await aw._on_message(snap, 6)                                   # the snapshot ends it; the next gap is a new one
+    await aw._on_message(delta(first + 1), 7)
+    await aw._on_message(delta(first + 2), 8)
+    await aw._on_message(delta(first + 9), 9)
+    assert len(fake.resubs) == 3
+    await aw.stop()
+
+
 def test_degraded_frames_map_to_the_subscription_they_came_from() -> None:
     k = ArcusWS.stream_key
     assert k("bbo", "QQQ-USD") == ("bbo:QQQ-USD", {"type": "unsubscribe", "channel": "bbo", "id": "QQQ-USD"})

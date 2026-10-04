@@ -38,6 +38,42 @@ def test_book_nonce_continuity():
     assert not b.synced
 
 
+async def test_a_book_gap_resubscribes_once_until_the_snapshot():
+    """Every update after a gap reads as a gap until the new snapshot (Lighter sends one every 50 ms): one re-subscribe,
+    not one per update; a snapshot that never comes is asked for again after RESYNC_RETRY_S."""
+    import asyncio
+
+    from lbot.trade import feed as feed_mod
+    m = Market(market_id=1, symbol="BTC", price_decimals=1, size_decimals=5, min_base=0.0002, min_quote=10.0,
+               imf_min=200, imf_default=5000, mmf=120)
+    f = feed_mod.MarketFeed("wss://offline.invalid/stream", m)
+    sent: list[str] = []
+
+    async def resubscribe(channel: str) -> None:
+        sent.append(channel)
+    f.ws.resubscribe = resubscribe
+    book = lambda n, begin, sub=False: {"channel": "order_book:1", "type": "subscribed/order_book" if sub else  # noqa: E731
+                                        "update/order_book", "order_book": {"bids": [{"price": "100", "size": "1"}],
+                                                                            "asks": [{"price": "101", "size": "1"}],
+                                                                            "nonce": n, "begin_nonce": begin}}
+    f.on_msg(book(10, 0, sub=True))
+    f.on_msg(book(12, 11))                        # the gap
+    for n in range(13, 20):                       # updates in flight before the new snapshot
+        f.on_msg(book(n, n - 1))
+    await asyncio.sleep(0)
+    assert sent == ["order_book/1"]
+    assert not f.book.synced
+    f.resync_at -= feed_mod.RESYNC_RETRY_S + 1    # no snapshot came: ask again
+    f.on_msg(book(21, 20))
+    await asyncio.sleep(0)
+    assert len(sent) == 2
+    f.on_msg(book(30, 0, sub=True))               # the snapshot: in sync, and the next gap is a new one
+    assert f.book.synced and f.resync_at == 0.0
+    f.on_msg(book(33, 31))
+    await asyncio.sleep(0)
+    assert len(sent) == 3
+
+
 def test_nonces_and_client_ids_rise_and_survive_a_restart(tmp_path):
     p = tmp_path / "n.txt"
     n = Nonces(p)
@@ -72,3 +108,9 @@ def test_signer_signs_offline():
     assert f["L2TxAttributes"] == {"4": 1}                      # SkipNonce on
     with pytest.raises(signer.SignerError):
         signer.Signer("https://example.invalid", priv, 466324, 2, 7)     # an app's slot
+    stop = s.create_order(market=1, client_index=124, size=100, price=798000, is_ask=True, order_type=C.ORDER_STOP_LOSS,
+                          tif=C.TIF_IOC, reduce_only=True, expiry=-1, nonce=int(time.time() * 1000) + 1,
+                          trigger_price=800000)
+    g = signer.tx_fields(stop)
+    assert (g["Type"], g["TriggerPrice"], g["ReduceOnly"], g["Price"]) == (C.ORDER_STOP_LOSS, 800000, 1, 798000)
+    assert f.get("TriggerPrice", 0) == 0                        # a plain order has none

@@ -24,10 +24,16 @@ MODES = ("mid", "grid", "smart")
 BIASES = ("neutral", "long", "short")
 BIAS_FRAC = 0.5          # the share of the position cap a Long or Short bias holds
 GRID_RESET_PCT = 0.5     # Grid soft reset: the mid this far (%) against the position from the last fill
-MID_SPREADS = (-1.0, 0.0, 1.0, 2.0, 3.0, 5.0)    # the scout backtests these on every market ...
+MID_SPREADS = (-1.0, 0.0, 1.0, 2.0, 3.0, 5.0)    # what the run form offers for each mode ...
 GRID_SPREADS = (0.0, 1.0, 2.0, 3.0, 5.0)
 SMART_SPREADS = (0.0, 1.0, 2.0, 3.0)               # Smart: Neutral only (a bias fights the side it leaves out)
 SPREAD_RANGE = (-5.0, 50.0)                        # ... and the owner may run any spread in this range
+# What the scout backtests on every market. Until 2026-10-04 it was every Mid and Grid spread, each Neutral, Long
+# and Short, plus Smart: 37 settings. Ten recorded days on 17 markets (docs/notes/2026-10-04-two-weekends-review.md)
+# showed Grid the dearest family everywhere, Mid -1 the same quotes as Mid 0, a bias dearer than Neutral and Mid +5
+# with little volume. `/run` still takes any of them; they are just not scanned and listed.
+SCAN_MID = (0.0, 1.0, 2.0, 3.0)
+SCAN_SMART = (0.0, 1.0, 2.0, 3.0)
 
 # Names from before 2026-09-26 that mean the same thing (old buttons, old habits: "/run BTC touch 0bp 40x")
 _OLD = (
@@ -135,7 +141,5 @@ def parse(text: str) -> Setup:
 
 
 def menu() -> list[Setup]:
-    """What the scout backtests on every market: every Mid and Grid spread, each Neutral, Long and Short, and the
-    Smart spreads (Neutral)."""
-    return [Setup(mode, s, b) for mode, spreads in (("mid", MID_SPREADS), ("grid", GRID_SPREADS))
-            for s in spreads for b in BIASES] + [Setup("smart", s) for s in SMART_SPREADS]
+    """What the scout backtests on every market: Mid and Smart at 0 to +3, Neutral."""
+    return [Setup("mid", s) for s in SCAN_MID] + [Setup("smart", s) for s in SCAN_SMART]

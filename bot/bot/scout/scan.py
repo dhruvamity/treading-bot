@@ -47,12 +47,13 @@ from zoneinfo import ZoneInfo
 
 import numpy as np
 
-from bot.common.sizing import Pct, bucket, min_capital, venue_min_usd
+from bot.common.sizing import Pct, bucket, loop_ms, min_capital, venue_min_usd
 from bot.scout.sim import Config, MarketInfo, Risk, S, Sim, SimParams, Window
 from bot.scout.tape import US_DAY, TapeStore, day_start_us, day_str
 from bot.strategies import setup as su
 
-SIM_VERSION = "9"          # bump when the simulator changes, so cached day results are recomputed (9: Mid/Grid setups)
+SIM_VERSION = "10"         # bump when the simulator changes, so cached day results are recomputed (9: Mid/Grid
+                           # setups; 10: the position stop may follow the market)
 ALIVE_MARKET = "BTC-USD"   # busiest book: its rows show when the recorder was up
 LADDER = (20.0, 10.0, 5.0, 2.0)                 # tested below each market's maximum
 HOLIDAYS_CSV = Path(__file__).resolve().parents[2] / "config" / "calendars" / "nyse_holidays.csv"
@@ -266,7 +267,7 @@ def _run_window(args: tuple[Any, ...]) -> dict[str, list[dict[str, Any]]]:
     store = TapeStore(root)
     tape = store.load_range(market, start - 2 * 3600 * S, end)
     alive = store.load_range(ALIVE_MARKET, start - 2 * 3600 * S, end).bbo["ts"]
-    w = Window(tape, start, end, alive_ts=alive, rth=session_mask(rth_spec, holidays),
+    w = Window(tape, start, end, alive_ts=alive, rth=session_mask(rth_spec, holidays), step_ms=loop_ms(market),
                holidays=load_holidays(full_only=True))
     out: dict[str, list[dict[str, Any]]] = {}
     for r in risks:
@@ -801,7 +802,9 @@ def limits_table(root: Path, markets: list[str] | None = None) -> str:
 def capital_line(res: dict[str, Any]) -> str:
     cap = res.get("capital") or {}
     p = cap.get("pct") or asdict(Pct())
-    return (f"capital ${cap.get('usd', 100):,.2f} ({cap.get('source', 'fixed')}); stops: position {p['position_stop']:g}%, "
+    pos = (f"{p['position_stop']:g}% to {p.get('position_stop_max', 5):g}% (follows the market)"
+           if p.get("position_stop_k", 0) > 0 else f"{p['position_stop']:g}%")
+    return (f"capital ${cap.get('usd', 100):,.2f} ({cap.get('source', 'fixed')}); stops: position {pos}, "
             f"day {p['daily_stop']:g}%, kill {p['kill']:g}% of the capital each setup uses")
 
 

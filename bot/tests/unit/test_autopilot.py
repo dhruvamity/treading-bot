@@ -537,3 +537,18 @@ async def test_the_scout_service_runs_the_autopilot_earnings_and_playbook(tmp_pa
     await asyncio.wait_for(svc.run_service(tmp_path, pilot, rest_url="http://x", ws_url="ws://x", record=False,
                                            capital=100.0), 20)
     assert calls[:4] == ["earnings", "scan", "saved", "playbook"] and ticks
+
+
+def test_the_playbook_drops_rebuilt_book_days_once_recorded_ones_suffice() -> None:
+    """2026-10-04: with the rebuilt weeks in, weekend SPY Mid 0 read $15k an hour at 1.55 bp; live it made $60k an
+    hour at 0.36-0.39 bp. Ten recorded days with two at a weekend are enough to stand alone."""
+    from bot.scout import playbook as pbk
+
+    rebuilt = [(f"2026-08-{d:02d}", True) for d in range(22, 32)]
+    recorded = [(f"2026-09-{d:02d}", False) for d in range(21, 31)]          # 21-30 Sep: the 26th and 27th are a weekend
+    assert pbk.recorded_first(rebuilt + recorded) == recorded
+    assert pbk.recorded_first(rebuilt + recorded[:9]) == rebuilt + recorded[:9]      # nine: not yet
+    weekdays = [d for d in recorded if d[0] not in ("2026-09-26", "2026-09-27")] + [("2026-10-01", False),
+                                                                                    ("2026-10-02", False)]
+    assert pbk.recorded_first(rebuilt + weekdays) == rebuilt + weekdays              # ten, but no weekend among them
+    assert "Grid 0" not in pbk.SETUPS and "Smart +1" in pbk.SETUPS and len(pbk.FIRST_SETUPS) == 7

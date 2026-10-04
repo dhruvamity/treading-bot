@@ -181,9 +181,9 @@ def test_the_playbook_adds_smart_to_days_it_already_has(tmp_path: Path, monkeypa
 
     monkeypatch.setattr(pbk, "_gather", fake_gather)
     table = pb.build(now_us=T0 + 10 * 86_400 * S, workers=1)
-    assert asked == [("2026-09-24", ("Smart 0", "Smart +2", "Smart +3"))]
+    assert asked == [("2026-09-24", ("Smart 0", "Smart +1", "Smart +2", "Smart +3"))]
     done, rows = pbk.read_day(pb.cache_path("SPY-USD", "2026-09-24", rk))
-    assert done == set(pbk.SETUPS) and len(rows) == len(old) + 3
+    assert done == set(pbk.SETUPS) | set(pbk.FIRST_SETUPS) and len(rows) == len(old) + 4   # the old Grid rows stay
     assert pbk.read_day(pb.cache_path("SPY-USD", "2026-09-23", rk))[0] == set(pbk.FIRST_SETUPS)
     setups = table["markets"]["SPY-USD"]["setups"]
     assert setups["Smart 0"]["all"][0] == 1 and setups["Mid 0"]["all"][0] == 4

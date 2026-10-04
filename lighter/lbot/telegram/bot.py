@@ -1,7 +1,9 @@
-"""The Lighter bot's Telegram control (its own bot: LBOT_TELEGRAM_TOKEN, not the Arcus bot's).
+"""The Lighter controls of the trading bot's Telegram bot (treading-bot/bot): the cards, the run form, the buttons,
+the alerts. There is no Lighter Telegram bot of its own: lbot/telegram/embed.py puts this inside the one bot, where a
+Lighter command is /l_<name>.
 
-Everyday: /top3 (Most Volume), /cheapest, /maxvolume, /run (the run form), /status, /dashboard, /balance, /account.
-Control: /pause, /unpause, /stop, /closeall, /resumeaftersl. Settings: /settings, /set. /scannow, /whoami, /help.
+Everyday: top3 (Most Volume), cheapest, maxvolume, run (the run form), status, dashboard, balance, account.
+Control: pause, unpause, stop, closeall, resumeaftersl. Settings: settings, set. scannow, help.
 It reads the runs' status files and writes commands the runs apply within a second; it holds no trading state.
 LIVE needs LBOT_LIVE=1, a passing doctor and a one-time code typed back within 2 minutes.
 """
@@ -235,7 +237,7 @@ class Bot:
         cmd = cmd.split("@")[0].lower()
         arg = arg.strip()
         if cmd in ("start", "help", "menu"):
-            await self.api.send(chat, card("🤖", "Lighter bot", lines(
+            await self.api.send(chat, card("🤖", "Menu", lines(
                 "/top3 · /cheapest · /maxvolume: the lists", "/run: pick a market and a setup",
                 "/status · /dashboard · /balance · /account", "/pause · /unpause · /stop · /closeall",
                 "/resumeaftersl · /settings · /set · /scannow · /auto")),
@@ -533,32 +535,6 @@ class Bot:
                 elif not stale:
                     self.last_state[mode + ":stale"] = "0"
 
-    # ---------------------------------------------------------------- the loop
-    async def poll(self) -> None:
-        offset = 0
-        while True:
-            for u in await self.api.updates(offset):
-                offset = max(offset, int(u["update_id"]) + 1)
-                try:
-                    if "message" in u:
-                        m = u["message"]
-                        chat, user = int(m["chat"]["id"]), int(m["from"]["id"])
-                        if not self.allowed(user, chat):
-                            if (m.get("text") or "").startswith("/whoami"):
-                                await self.api.send(chat, card("🪪", "You", lines(f"user id {user}", f"chat id {chat}")))
-                            continue
-                        await self.on_text(chat, user, m.get("text") or "")
-                    elif "callback_query" in u:
-                        q = u["callback_query"]
-                        chat, user = int(q["message"]["chat"]["id"]), int(q["from"]["id"])
-                        if not self.allowed(user, chat):
-                            await self.api.answer(q["id"], "not allowed")
-                            continue
-                        note = await self.on_button(chat, int(q["message"]["message_id"]), q.get("data", ""))
-                        await self.api.answer(q["id"], note)
-                except Exception as e:     # one bad update must not stop the bot
-                    log.error("update_failed", err=f"{type(e).__name__}: {e}")
-
 
 def read_from(p: Any, offset: int) -> tuple[str, int]:
     with open(p) as fh:
@@ -566,22 +542,4 @@ def read_from(p: Any, offset: int) -> tuple[str, int]:
         return fh.read(), fh.tell()
 
 
-async def main(cfg: Config) -> None:
-    if not cfg.telegram_token:
-        raise SystemExit("LBOT_TELEGRAM_TOKEN is not set in lighter/.env")
-    api = Api(cfg.telegram_token)
-    await api.call("setMyCommands", commands=[
-        {"command": c, "description": d} for c, d in (
-            ("top3", "🚀 Most volume within your budget"), ("cheapest", "💎 Cheapest per dollar"),
-            ("maxvolume", "🔥 Most volume"), ("run", "🎛 Run a setup"), ("auto", "🧭 Autopilot"),
-            ("status", "📊 What runs"),
-            ("dashboard", "📺 Live screen"), ("balance", "📒 Account"), ("pause", "Stop new orders"),
-            ("closeall", "Close the position and stop"), ("settings", "⚙️ Settings"), ("help", "All commands"))])
-    bot = Bot(cfg, api)
-    try:
-        await asyncio.gather(bot.poll(), bot.refresh(), bot.alerts())
-    finally:
-        await api.close()
-
-
-__all__ = ["Bot", "Form", "main", "replace"]
+__all__ = ["Bot", "Form", "replace"]

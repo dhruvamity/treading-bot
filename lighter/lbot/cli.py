@@ -46,15 +46,12 @@ def _money(text: str | None) -> float | None:
 def cmd_up(a: argparse.Namespace) -> None:
     cfg = _cfg()
     print(f"scout: pid {ops.start(cfg, 'scout', ['scout', 'run'])}")
-    if cfg.telegram_token:
-        print(f"telegram: pid {ops.start(cfg, 'telegram', ['telegram'])}")
-    else:
-        print("telegram: not set up (LBOT_TELEGRAM_TOKEN in lighter/.env)")
+    print("telegram: the trading bot's one Telegram bot shows Lighter too (`bot up` in treading-bot/bot; /l there)")
 
 
 def cmd_down(a: argparse.Namespace) -> None:
     cfg = _cfg()
-    for n in ("scout", "telegram") + (("run-paper", "run-live") if a.all else ()):
+    for n in ("scout",) + (("run-paper", "run-live") if a.all else ()):
         if ops.stop(cfg, n):
             print(f"stopped {n}")
 
@@ -340,17 +337,10 @@ def cmd_keys(a: argparse.Namespace) -> None:
           "system_setup example, then put the private key and its slot in lighter/.env.")
 
 
-def cmd_telegram(a: argparse.Namespace) -> None:
-    from lbot.telegram.bot import main as tg_main
-    cfg = _cfg()
-    log_setup(cfg.logs_dir, "telegram", echo="warn")
-    asyncio.run(tg_main(cfg))
-
-
 def main(argv: list[str] | None = None) -> None:
     ap = argparse.ArgumentParser(prog="lbot", description="The Lighter (Robinhood Chain) market-making bot")
     sub = ap.add_subparsers(dest="cmd", required=True)
-    p = sub.add_parser("up", help="start the scout and the Telegram bot in the background")
+    p = sub.add_parser("up", help="start the scout (recorder and scans) in the background")
     p.set_defaults(fn=cmd_up)
     p = sub.add_parser("down", help="stop them (--all: the running bot too, position kept)")
     p.add_argument("--all", action="store_true")
@@ -431,8 +421,6 @@ def main(argv: list[str] | None = None) -> None:
     p.set_defaults(fn=cmd_account)
     p = sub.add_parser("keys", help="make a new API key pair locally")
     p.set_defaults(fn=cmd_keys)
-    p = sub.add_parser("telegram", help="the Telegram control bot")
-    p.set_defaults(fn=cmd_telegram)
     a = ap.parse_args(argv)
     a.fn(a)
 

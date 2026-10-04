@@ -7,6 +7,12 @@ Background services (each a normal `bot` command, detached, logging to logs/<nam
             with no live bot it would fire at once).
 The trading bot itself is started by the pilot (`bot pilot approve 1 [--live]`, or Telegram's /top3 -> Run) and is
 not a service here; `bot down --all` stops it too (quotes cancelled, positions kept).
+
+The bot's other two parts run under the same three commands:
+- Lighter (treading-bot/lighter): `bot up` starts its scout too (it records every Lighter market and ranks setups;
+  no keys, no orders). Its runs are started from Telegram (/l_run) or `bot lighter run ...`.
+- The funding arbitrage (treading-bot/arb): its executor is started on request (/arb_start, `bot arb start`).
+`bot down --all` stops their runs too; positions are kept, with the venues' own stop orders.
 """
 
 from __future__ import annotations
@@ -23,6 +29,7 @@ from pathlib import Path
 from typing import Any
 
 from bot.common.config import AppConfig
+from bot.common.proc import pid_alive
 
 
 @dataclass(frozen=True)
@@ -50,18 +57,12 @@ def pid_path(app: AppConfig, name: str) -> Path:
 
 
 def pid_of(app: AppConfig, name: str) -> int | None:
-    """The service's pid if that process is alive."""
+    """The service's pid if that process is alive (a zombie is not: bot/common/proc.py)."""
     try:
         pid = int(pid_path(app, name).read_text().strip())
     except (OSError, ValueError):
         return None
-    try:
-        os.kill(pid, 0)
-    except ProcessLookupError:
-        return None
-    except PermissionError:
-        return pid
-    return pid
+    return pid if pid_alive(pid) else None
 
 
 def uptime_s(app: AppConfig, name: str) -> float | None:
@@ -129,6 +130,89 @@ def stop(app: AppConfig, name: str) -> tuple[bool, str]:
         time.sleep(1.0)
     return False, (f"{name}: still stopping after {BY_NAME[name].stop_wait_s:.0f} s (pid {pid}); it exits when its "
                    "current work is done")
+
+
+# ------------------------------------------------------------------ the bot's other two parts
+def lighter_up() -> str:
+    """Start the Lighter scout (recorder and scans: no keys, no orders) unless it runs."""
+    try:
+        from lbot import ops as lops
+        from lbot.config import load
+
+        cfg = load()
+        was = lops.running(cfg, "scout")
+        pid = lops.start(cfg, "scout", ["scout", "run"])
+    except Exception as e:   # not installed, or its config does not load: the Arcus services are not affected
+        return f"lighter scout: not started ({type(e).__name__}: {e}). In treading-bot/bot: make install"
+    return (f"lighter scout: {'already running' if was else 'started'} (pid {pid}), "
+            f"log {cfg.logs_dir / 'scout.out'}")
+
+
+def others_down(everything: bool) -> list[str]:
+    """Stop the Lighter scout; with `everything` also the Lighter runs and the arbitrage executors (positions kept)."""
+    out: list[str] = []
+    try:
+        from lbot import ops as lops
+        from lbot.config import load
+
+        cfg = load()
+        for name in ("scout",) + (("run-paper", "run-live") if everything else ()):
+            if lops.stop(cfg, name):
+                out.append(f"lighter {name.replace('run-', '') + ' run' if name != 'scout' else 'scout'}: stopped")
+    except Exception as e:
+        out.append(f"lighter: {type(e).__name__}: {e}")
+    if everything:
+        try:
+            from arb import ops as aops
+
+            for mode in aops.MODES:
+                if aops.running(mode):
+                    out.append("funding arb " + aops.stop(mode)[1])
+        except Exception as e:
+            out.append(f"funding arb: {type(e).__name__}: {e}")
+    return out
+
+
+def others_status() -> list[str]:
+    """The Lighter and funding-arbitrage lines of `bot status`."""
+    lines = ["", "LIGHTER"]
+    try:
+        from lbot import ops as lops
+        from lbot.config import load
+
+        st = lops.status(load())
+        pid = st["services"].get("scout")
+        rec = st.get("recorder") or {}
+        age = time.time() - float(rec.get("t") or 0) if rec else None
+        lines.append(f"  scout     {'running (pid ' + str(pid) + ')' if pid else 'STOPPED (bot up starts it)':<46} "
+                     "records every Lighter market, ranks setups")
+        if rec:
+            lines.append(f"  recorder  {rec.get('markets', 0)} markets · {int(rec.get('rows_total') or 0):,} rows · last "
+                         f"written {ago(age)} ago" + (" · PAUSED: disk nearly full" if rec.get("paused_for_disk") else ""))
+        runs = [m for m in ("live", "paper") if st["services"].get(f"run-{m}")]
+        for m in runs:
+            r = st.get(m) or {}
+            lines.append(f"  {m.upper():<6} {r.get('market', '?')} {r.get('setup', '')} · {r.get('state', '?')}")
+        if not runs:
+            lines.append("  no run. Start one: /l_run in Telegram, or bot lighter run SPY 'smart +1'")
+    except Exception as e:
+        lines.append(f"  not available ({type(e).__name__}: {e}). In treading-bot/bot: make install")
+    lines += ["", "FUNDING ARB"]
+    try:
+        from arb import ops as aops
+
+        any_ = False
+        for mode in aops.MODES:
+            pid, ph = aops.running(mode), aops.phase(mode)
+            if pid or ph not in ("", "flat"):
+                any_ = True
+                lines.append(f"  {mode.upper():<6} {'running (pid ' + str(pid) + ')' if pid else 'NOT RUNNING'} · "
+                             f"{ph or 'never run'}")
+        if not any_:
+            lines.append("  not running. /arb_scan and /arb_start in Telegram, or bot arb scan")
+    except Exception as e:
+        lines.append(f"  not available ({type(e).__name__}: {e}). In treading-bot/bot: make install")
+    return lines
 
 
 def ago(seconds: float | None) -> str:
@@ -200,4 +284,4 @@ def dashboard(app: AppConfig, env: dict[str, str], root: Path) -> str:
                      + (f" · trading PnL ${p:+,.2f}" if p is not None else ""))
     else:
         lines.append("  no reading yet (the scout reads it before each scan once ARCUS_ADDRESS is in .env)")
-    return "\n".join(lines)
+    return "\n".join(lines + others_status())

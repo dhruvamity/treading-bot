@@ -182,3 +182,16 @@ def test_f3_no_look_ahead() -> None:
         d2, f2 = upto(r2)
         assert d1 and d1 == d2, sess.mode
         assert f1 == f2, sess.mode
+
+
+def test_every_setup_mode_starts_and_quotes_on_the_live_engine() -> None:
+    """Smart had a strategy and a backtest but no client-id code: every live Smart start died building the engine
+    with "unknown strategy code for 'smart'" (5 starts, 27 Sep - 2 Oct 2026), and the tests never built one."""
+    from bot.common.ids import ClientIdFactory
+    from bot.strategies import setup
+
+    e = evs(sine_path(86000, 0.002, 900, 0.0001), 600)
+    for mode in setup.MODES:
+        assert ClientIdFactory(mode, 1).arcus().startswith("al")
+        res = run([mm_session(mode=mode, spacing_bps=1, levels_per_side=1)], e)
+        assert res.fills, mode

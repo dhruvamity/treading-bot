@@ -17,7 +17,7 @@ from bot.core.book import ArcusBookSync, L2Book, SyncResult
 from bot.core.marketdata import MarketView
 from bot.scout.pilot import session_for
 from bot.scout.record import ScoutRecorder
-from bot.scout.scan import BY_NAME, Scanner, leverages, max_leverage, session_mask
+from bot.scout.scan import BY_NAME, Scanner, config_for, leverages, max_leverage, session_mask
 from bot.scout.sim import MarketInfo, Risk, Sim, Window
 from bot.scout.tape import DEPTH_N, BboBuffer, DepthBuffer, TapeStore, TradeBuffer
 from bot.strategies import make_strategy
@@ -127,11 +127,11 @@ def test_pilot_session_carries_leverage_and_sizes() -> None:
 
 
 def test_pilot_sessions_match_the_backtest_rules() -> None:
-    s = MMSession.model_validate(session_for("NVDA-USD", BY_NAME["Grid +3 Long"], Risk(), live=False))
+    s = MMSession.model_validate(session_for("NVDA-USD", config_for("Grid +3 Long"), Risk(), live=False))
     assert (s.mode, s.spacing_bps, s.reset_threshold_pct, s.bias, s.bias_frac) == ("grid", 3, 0.5, "long", 0.5)
     assert s.safety_pause.move_sigma_1s == 6 and s.safety_pause.spread_x_median == 3   # Grid keeps the safety pause
     assert make_strategy(s).name == "grid"
-    s = MMSession.model_validate(session_for("QQQ-USD", BY_NAME["Mid -1 Short"], Risk(), live=False))
+    s = MMSession.model_validate(session_for("QQQ-USD", config_for("Mid -1 Short"), Risk(), live=False))
     assert (s.mode, s.execution_style, s.spacing_bps, s.passive_k_sigma, s.skew_kappa, s.bias) == \
         ("mid", "passive", -1, 0, 0, "short")
     assert s.safety_pause.move_sigma_1s >= 1e9 and s.safety_pause.spread_x_median >= 1e9   # Mid: no pause
@@ -229,7 +229,7 @@ def test_every_setup_quotes_live_what_the_backtest_quotes(name: str, inv: D) -> 
     from bot.scout.sim import POLICIES, Book
 
     m = fixture_markets()[Venue.ARCUS]["AMD"]
-    cfg = BY_NAME[name]
+    cfg = config_for(name)   # any setup the owner may run, on the scan's menu or not
     risk = Risk.at_leverage(10)
     sess = MMSession.model_validate({**session_for("AMD-USD", cfg, risk, live=False), "account_index": 1})
     view = MarketView(Venue.ARCUS, "AMD")

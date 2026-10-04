@@ -13,6 +13,8 @@ TX_MODIFY_ORDER = 17
 # order types and time in force
 ORDER_LIMIT = 0
 ORDER_MARKET = 1
+ORDER_STOP_LOSS = 2                        # trigger orders: wait for trigger_price, then an IOC order at `price`
+ORDER_TAKE_PROFIT = 4
 TIF_IOC = 0
 TIF_GTT = 1
 TIF_POST_ONLY = 2
