@@ -213,3 +213,76 @@ def test_marketdata_hub_ticks() -> None:
     assert hub.stale_markets(S + 3700 * 1_000_000) == [(Venue.ARCUS, "BTC")]
     assert hub.get(Venue.ARCUS, "ETH") is None
 
+
+
+def test_a_zombie_is_not_a_running_process() -> None:
+    """A child that exited but was not reaped still answers os.kill(pid, 0): `bot status` showed a guardian that had
+    stood down as running for as long as the Telegram process (its parent) lived (2026-10-03)."""
+    import os
+    import subprocess
+    import sys
+    import time
+
+    from bot.common.proc import pid_alive
+
+    p = subprocess.Popen([sys.executable, "-c", "pass"])
+    time.sleep(0.5)                                  # exited, not waited for: a zombie of this process
+    os.kill(p.pid, 0)                                # the old check: still "alive"
+    assert pid_alive(p.pid) is False                 # reaped, and reported as gone
+    assert pid_alive(os.getpid()) is True
+    q = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(30)"])
+    assert pid_alive(q.pid) is True                  # our child, running
+    q.kill()
+    q.wait()
+    assert pid_alive(q.pid) is False and pid_alive(0) is False
+
+
+def test_a_run_stop_wider_than_the_guardian_is_said_at_the_start() -> None:
+    """2026-10-03: a run stop of 14% of the equity; the guardian's 10% drawdown stopped the run first."""
+    from bot.scout.pilot import guardian_line
+
+    assert guardian_line({"capital_usd": 300.12, "max_loss_usd": 42.0}, 10.0) == \
+        "The guardian stops it first, near -$30.01 (10% of $300)"
+    assert guardian_line({"capital_usd": 300.12, "max_loss_usd": 20.0}, 10.0) == ""     # the run stop fires first
+    assert guardian_line({"capital_usd": 300.12}, 10.0) == "" and guardian_line({"max_loss_usd": 42.0}, 10.0) == ""
+
+
+def test_a_failed_start_shows_the_error_not_the_shutdown_noise() -> None:
+    from bot.scout.pilot import start_failure
+
+    crash = "\n".join(["READY", "Traceback (most recent call last):", '  File "x.py", line 41, in __init__',
+                       "ValueError: unknown strategy code for 'smart'", "Unclosed client session",
+                       "client_session: <aiohttp.client.ClientSession object at 0x10ef803b0>", "Unclosed connector"])
+    assert start_failure(crash) == "ValueError: unknown strategy code for 'smart'"
+    doctor = "[ok  ] clock   fine\n[FAIL] arcus positions    an open SPY position exists\nNOT READY: 1 failing check(s)"
+    assert start_failure(doctor) == "[FAIL] arcus positions    an open SPY position exists"
+    assert start_failure("line one\nline two") == "line one\nline two"
+
+
+def test_btc_decides_twice_a_second_and_the_backtest_steps_with_it(tmp_path: Any) -> None:
+    """A 0.5 s loop made BTC 0.2 bp cheaper on 6 of 6 days and changed nothing on SPY (2026-10-01): one number per
+    market gives the backtest its step, the session file its loop and the runner its sleep."""
+    from types import SimpleNamespace
+
+    import pytest
+    import yaml
+
+    from bot.common.config import MMSession, load_session
+    from bot.common.sizing import loop_ms
+    from bot.core.runner import loop_period_s
+    from bot.scout.pilot import session_for
+    from bot.scout.scan import config_for
+    from bot.scout.sim import Risk
+
+    assert (loop_ms("BTC-USD"), loop_ms("BTC"), loop_ms("SPY-USD")) == (500, 500, 1000)
+    p = tmp_path / "s.yaml"
+    p.write_text(yaml.safe_dump(session_for("BTC-USD", config_for("Smart 0"), Risk(), live=False)))
+    assert load_session(p).loop_ms == 500
+    p.write_text(yaml.safe_dump(session_for("SPY-USD", config_for("Smart 0"), Risk(), live=False)))
+    spy = load_session(p)
+    assert spy.loop_ms == 1000
+    assert loop_period_s([spy]) == 1.0 and loop_period_s([spy, SimpleNamespace(loop_ms=500)]) == 0.5
+    assert loop_period_s([]) == 1.0
+    with pytest.raises(ValueError, match="loop_ms"):
+        MMSession.model_validate({**spy.model_dump(), "loop_ms": 300})
+

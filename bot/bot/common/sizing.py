@@ -5,7 +5,8 @@ Every dollar figure is a fixed share of the capital the bot trades with, so the 
   engine's hard cap is 1.25x it) and each order is half the cap. RWA perps outside the underlying's session use the
   off-hours leverage (their initial margin is 1.5x), which shrinks the cap and the orders;
 - the stops are percentages of that capital (config/app.yaml `sizing`): an open position down 1% is closed, a day
-  down 2% stops until 00:00 UTC, equity 10% below its peak flattens and stops.
+  down 2% stops until 00:00 UTC, equity 10% below its peak flattens and stops. By default the position stop is not
+  fixed at 1% but follows the market between 1% and 5% (dynamic_stop); `/set position_stop 3` fixes it.
 
 Two limits bound the sizes:
 - floor (min_capital): the smallest order, the off-hours one, must stay at least 1.2x the Arcus minimum order
@@ -28,6 +29,15 @@ if TYPE_CHECKING:
     from bot.common.config import MMSession, SizingCfg
 
 INV_BUFFER = 1.25    # inventory cap = capital x leverage / 1.25; order = cap / 2
+# How often the bot decides, per market, in ms (1000 where not listed). The backtest steps at the same pace and the
+# pilot writes it into the session (MMSession.loop_ms). BTC at 0.5 s was 0.2 bp cheaper on 6 of 6 days with 10-20%
+# more volume; SPY and QQQ did not change (antigravity/reports/quote_speed, 2026-10-01).
+LOOP_MS: dict[str, int] = {"BTC-USD": 500}
+
+
+def loop_ms(market: str) -> int:
+    return LOOP_MS.get(market if market.endswith("-USD") else f"{market}-USD", 1000)
+
 MIN_ORDER_X = 1.2    # every order at least 1.2x the venue minimum (bot/strategies/quoting.py)
 COVER_X = 1.25       # live sizes may exceed the last backtested capital by at most this factor
 STEPS = (1.0, 1.1, 1.25, 1.4, 1.6, 1.8, 2.0, 2.2, 2.5, 2.8, 3.2, 3.6, 4.0, 4.5, 5.0, 5.6, 6.3, 7.1, 8.0, 9.0)
@@ -42,6 +52,8 @@ class Pct:
     kill: float = 10.0           # equity this far below its peak: flatten and stop until a manual resume
     go_pnl_day: float = 0.25     # scout GO: average day (and the last 24 h) not worse than -this
     go_tail_pnl: float = 0.50    # scout GO: the last 6 h not worse than -this
+    position_stop_k: float = 0.0     # > 0: the position stop follows the market (dynamic_stop): this many 1-hour
+    position_stop_max: float = 5.0   # moves on the inventory cap, from position_stop % up to this %; 0 = fixed
 
 
 @dataclass(frozen=True)
@@ -53,6 +65,8 @@ class Sizes:
     pos_stop: float
     daily_stop: float
     kill: float
+    pos_stop_k: float = 0.0     # the position stop follows the market (dynamic_stop): pos_stop is then its floor
+    pos_stop_max: float = 0.0   # ... and this its ceiling, in dollars
 
 
 def bucket(x: float) -> float:
@@ -77,8 +91,22 @@ def sizes(capital: float, lev: float, lev_off: float | None = None, *, pct: Pct 
     if order_max and lev > 0 and capital * lev / (2 * INV_BUFFER) > order_max:
         used = order_max * 2 * INV_BUFFER / lev
     cap = used * lev / INV_BUFFER
+    dyn = pct.position_stop_k > 0
     return Sizes(used, cap / 2, cap, used * lev_off / INV_BUFFER, used * pct.position_stop / 100,
-                 used * pct.daily_stop / 100, used * pct.kill / 100)
+                 used * pct.daily_stop / 100, used * pct.kill / 100, pct.position_stop_k if dyn else 0.0,
+                 used * max(pct.position_stop_max, pct.position_stop) / 100 if dyn else 0.0)
+
+
+def dynamic_stop(floor_usd: float, k: float, max_usd: float, sigma_1h: float, cap_usd: float) -> float:
+    """The position stop in dollars, right now. With k = 0 it is the fixed `floor_usd`. With k > 0 it follows the
+    market: a full position (the inventory cap) losing k hourly moves, never under `floor_usd` nor over `max_usd`
+    (0 = no ceiling). A fixed stop is too tight when the market is busy and the leverage high (1% of the capital at
+    50x is a 2.5 bp move: noise), and each time it fires the exit pays the taker fee. The backtest and the live engine
+    both call this with their own running 1-hour sigma."""
+    if k <= 0 or sigma_1h <= 0 or cap_usd <= 0:
+        return floor_usd
+    stop = max(floor_usd, k * sigma_1h * cap_usd)
+    return min(stop, max_usd) if max_usd > 0 else stop
 
 
 def venue_min_usd(min_notional: float, min_size: float, price: float) -> float:
@@ -106,7 +134,8 @@ def apply(s: MMSession, capital: float, z: SizingCfg | None = None) -> Sizes:
     """Rewrite a session's dollar sizes and stops for `capital`, from its `sizing` recipe (or `z`)."""
     z = z or s.sizing
     assert z is not None
-    pct = Pct(z.position_stop_pct, z.daily_stop_pct, z.kill_pct)
+    pct = Pct(z.position_stop_pct, z.daily_stop_pct, z.kill_pct, position_stop_k=z.position_stop_k,
+              position_stop_max=z.position_stop_max_pct)
     out = sizes(capital, z.leverage, z.leverage_off, pct=pct, order_max=z.order_max_usd)
     s.capital_usd = round(out.capital, 2)
     s.order_size_usd = round(out.order, 2)
@@ -114,6 +143,8 @@ def apply(s: MMSession, capital: float, z: SizingCfg | None = None) -> Sizes:
     s.inventory_cap_off_usd = round(out.cap_off, 2) if z.leverage_off is not None and z.leverage_off < z.leverage \
         else None
     s.pos_stop_usd = round(out.pos_stop, 4)
+    s.pos_stop_k = out.pos_stop_k
+    s.pos_stop_max_usd = round(out.pos_stop_max, 4) if out.pos_stop_k > 0 else None
     s.daily_stop_usd = round(out.daily_stop, 4)
     s.kill_usd = round(out.kill, 4)
     s.stop_loss_pct = z.kill_pct

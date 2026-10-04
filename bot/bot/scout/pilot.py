@@ -35,6 +35,7 @@ import asyncio
 import contextlib
 import json
 import os
+import re
 import time
 from dataclasses import asdict
 from pathlib import Path
@@ -44,7 +45,7 @@ import yaml
 
 from bot.common import settings
 from bot.common.config import SizingDefaults
-from bot.common.sizing import INV_BUFFER, min_capital
+from bot.common.sizing import INV_BUFFER, loop_ms, min_capital
 from bot.scout import profiles
 from bot.scout.scan import BY_NAME, config_for, load_markets, market_meta, max_leverage, venue_min
 from bot.scout.sim import Config, Risk
@@ -80,7 +81,9 @@ def session_for(market: str, cfg: Config, risk: Risk, *, live: bool, account_ind
         "leverage_max": risk.leverage or 3,
         "order_size_usd": round(risk.order_usd, 2), "inventory_cap_usd": round(risk.cap_usd, 2),
         "daily_stop_usd": risk.daily_stop_usd, "pos_stop_usd": risk.pos_stop_usd, "kill_usd": risk.kill_usd,
+        "pos_stop_k": risk.pos_stop_k, "pos_stop_max_usd": risk.pos_stop_max_usd if risk.pos_stop_k > 0 else None,
         "exit_taker_after_s": risk.exit_taker_after_s, "cooldown_s": risk.cooldown_s,
+        "loop_ms": loop_ms(market),
         "stop_loss_pct": round(100 * risk.kill_usd / used, 4),
         "participation_cap_pct": 100,   # not in the backtest: never widen for our share of volume
         "spacing_bps": cfg.spacing_bps, "levels_per_side": cfg.levels,
@@ -93,6 +96,8 @@ def session_for(market: str, cfg: Config, risk: Risk, *, live: bool, account_ind
             "leverage_off": round((risk.cap_off_usd or risk.cap_usd) * INV_BUFFER / used, 6) if off < 1 else None,
             "order_max_usd": risk.liq_ceiling_usd or risk.order_max_usd or None,
             "position_stop_pct": round(100 * risk.pos_stop_usd / used, 6),
+            "position_stop_k": risk.pos_stop_k,
+            "position_stop_max_pct": round(100 * risk.pos_stop_max_usd / used, 6) if risk.pos_stop_k > 0 else 5.0,
             "daily_stop_pct": round(100 * risk.daily_stop_usd / used, 6),
             "kill_pct": round(100 * risk.kill_usd / used, 6), "min_capital_usd": risk.min_capital_usd,
         },
@@ -514,6 +519,7 @@ class Pilot:
                          "take_profit_usd": c.get("take_profit_usd"), "volume_target_usd": c.get("volume_target_usd"),
                          "risk": asdict(Risk(**c["risk"]).with_stops(cfg.stops)) if c.get("risk") else None}
                 lines = [f"🟢 {mode.upper()} STARTED", what_line(c), size_line(c), *limit_lines(c),
+                         guardian_line(c, self.control.app.risk.drawdown_pct) if live else "",
                          f"Cleared the pause on new orders ({pause_where(cleared)})" if cleared else "", "",
                          backtest_line(c),
                          f"{prof.title}{' · max leverage' if c['lev'] == 'max' else ''} · by {by}"]
@@ -526,8 +532,7 @@ class Pilot:
 
                         ops.start(self.control.app, "guardian")
                 return f"running in {mode}"
-        tail = self.control.log_tail(rec["log"])
-        self.event("failed", f"❌ DID NOT START\n{c['market']}\n\n" + "\n".join(tail.splitlines()[-12:]))
+        self.event("failed", f"❌ DID NOT START\n{c['market']}\n\n" + start_failure(self.control.log_tail(rec["log"], 200)))
         raise RuntimeError(f"{c['market']} did not start; see {rec['log']}")
 
     async def close(self, *, by: str, wait_s: float = 660.0) -> str:
@@ -589,6 +594,30 @@ def what_line(c: dict[str, Any]) -> str:
         label = setting_of(c)
     lev = c.get("leverage") or str(c.get("config") or "").partition(" @ ")[2].rstrip("x") or 0
     return f"{c['market'].removesuffix('-USD')} · {label} · {float(lev):g}x"
+
+
+def start_failure(log_text: str) -> str:
+    """Why a run did not start, from its log: the doctor's FAIL lines, else the error that ended it, else the last
+    lines. The last lines alone were aiohttp's "Unclosed client session" notices, which hid the real error
+    ("unknown strategy code for 'smart'") in five failed starts."""
+    lines = log_text.splitlines()
+    fails = [x for x in lines if x.startswith("[FAIL]")]
+    if fails:
+        return "\n".join(fails[:6])
+    errors = [x for x in lines if re.match(r"[A-Za-z_.]*(Error|Exception)\b", x)]
+    if errors:
+        return errors[-1][:400]
+    return "\n".join(lines[-12:])
+
+
+def guardian_line(c: dict[str, Any], drawdown_pct: float) -> str:
+    """A run stop wider than the guardian's drawdown limit never fires: the guardian cancels everything first
+    (2026-10-03: a run stop of 14% of the equity, stopped by the guardian at 10%). Says so at the start; "" otherwise."""
+    cap, sl = float(c.get("capital_usd") or 0), float(c.get("max_loss_usd") or 0)
+    lim = cap * drawdown_pct / 100
+    if cap <= 0 or sl <= lim:
+        return ""
+    return f"The guardian stops it first, near -${lim:,.2f} ({drawdown_pct:g}% of ${cap:,.0f})"
 
 
 def limit_lines(c: dict[str, Any], sep: str = "") -> list[str]:

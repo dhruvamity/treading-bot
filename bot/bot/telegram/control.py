@@ -21,6 +21,7 @@ from pathlib import Path
 from typing import Any
 
 from bot.common.config import AppConfig, load_session
+from bot.common.proc import pid_alive
 from bot.core.heartbeat import heartbeat_process_alive, read_heartbeat, read_heartbeat_age_s
 
 MODES = ("live", "testnet", "paper")
@@ -298,9 +299,8 @@ class Control:
         out = []
         for r in self._runs():
             try:
-                os.kill(int(r["pid"]), 0)
-                alive = True
-            except (OSError, ValueError, KeyError):
+                alive = pid_alive(int(r["pid"]))
+            except (ValueError, KeyError):
                 alive = False
             out.append({**r, "alive": alive})
         return out

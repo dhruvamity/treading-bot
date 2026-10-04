@@ -10,6 +10,7 @@ never trades them. Results are cached per market-day; a new day is added once it
 The table (data/scout/playbook.json) gives, per market, setup, session and regime, the volume per hour and the cost per
 dollar traded, shrunk towards the same setup's session-wide and overall numbers where a cell has few hours.
 
+Once a market has enough recorded days (RECORDED_ENOUGH, two of them at a weekend) only those are used. Until then
 BTC and SPY days recorded before the scout kept their order book (their trades go back to June) use a book rebuilt
 from trades: one tick around the last print; Smart setups are left out of those days (the rebuilt book has no real
 sizes, and Smart reads them), so theirs come from recorded days only. Checked against recorded books (2026-09-27): BTC Mid 0 within 1% of the
@@ -31,7 +32,7 @@ from typing import Any
 
 import numpy as np
 
-from bot.common.sizing import Pct, bucket
+from bot.common.sizing import Pct, bucket, loop_ms
 from bot.core.calendar import MACRO_WINDOW_S, SINGLE_STOCK_WINDOW_S, TradingCalendar
 from bot.scout import regime as rg
 from bot.scout import sessions
@@ -56,11 +57,13 @@ from bot.scout.tape import US_DAY, DayTape, TapeStore, day_start_us, day_str
 S = 1_000_000
 HOUR = 3600 * S
 VERSION = f"{SIM_VERSION}.1"
-SETUPS = ("Mid 0", "Mid +1", "Mid +2", "Mid +3", "Grid 0", "Grid +1", "Grid +3", "Smart 0", "Smart +2", "Smart +3")
-FIRST_SETUPS = SETUPS[:7]   # what a day cached before 2026-09-27 holds (a plain list of rows)
+SETUPS = ("Mid 0", "Mid +1", "Mid +2", "Mid +3", "Smart 0", "Smart +1", "Smart +2", "Smart +3")   # the scan's menu
+# what a day cached before 2026-09-27 holds (a plain list of rows)
+FIRST_SETUPS = ("Mid 0", "Mid +1", "Mid +2", "Mid +3", "Grid 0", "Grid +1", "Grid +3")
 MARKETS = ("BTC-USD", "SPY-USD", "ETH-USD", "SOL-USD", "QQQ-USD", "NVDA-USD", "GLD-USD", "HYPE-USD")
 SYNTH = ("BTC-USD", "SPY-USD")   # a book rebuilt from trades stands in for days without a recorded one
 DAYS = 42
+RECORDED_ENOUGH = 10    # with this many recorded days, at least 2 of them at a weekend, rebuilt-book days are left out
 MIN_HOURS = 20          # a day counts once its data covers this many hours
 SHRINK_H = 8.0          # pseudo-hours of the parent estimate mixed into each cell
 
@@ -92,6 +95,17 @@ def _hours_traded(ts: np.ndarray, s0: int) -> int:
     """UTC hours of the day with at least one trade (a quiet book trades minutes apart: gaps are not outages)."""
     h = (ts[(ts >= s0) & (ts < s0 + US_DAY)] - s0) // HOUR
     return len(np.unique(h))
+
+
+def recorded_first(days: list[tuple[str, bool]]) -> list[tuple[str, bool]]:
+    """Leave the rebuilt-book days out once the recorded ones can carry the table: RECORDED_ENOUGH of them, two at a
+    weekend. The rebuilt weeks come from when Arcus's weekend SPY was far thinner: with them the table gave SPY Mid 0
+    at the weekend $15k an hour at 1.55 bp, when the live runs made $60k an hour at 0.36-0.39 bp (2026-10-04)."""
+    import datetime as dt
+
+    real = [x for x in days if not x[1]]
+    weekend = sum(dt.date.fromisoformat(d).weekday() >= 5 for d, _ in real)
+    return real if len(real) >= RECORDED_ENOUGH and weekend >= 2 else days
 
 
 def setups_for(synth: bool) -> tuple[str, ...]:
@@ -137,7 +151,8 @@ def _day_job(args: tuple[Any, ...]) -> list[list[Any]]:
             continue
         k = 120 + h * 60                        # mids[k] is the mid at the start of hour h
         before = rg.of(market, mids[k - 60:k + 1], a, u.at(a - 30 * 60 * S))
-        w = Window(tape, a, a + HOUR, alive_ts=alive, rth=session_mask(rth, load_holidays()), holidays=holidays)
+        w = Window(tape, a, a + HOUR, alive_ts=alive, rth=session_mask(rth, load_holidays()), holidays=holidays,
+                   step_ms=loop_ms(market))
         if not w.ok[-3600:].any():
             continue
         sess = sessions.session_of(a / S + 1800)
@@ -188,7 +203,7 @@ class Playbook:
                 out.append((d, False))
             elif market in SYNTH and _hours_traded(tape.trades["ts"], s0) >= MIN_HOURS:
                 out.append((d, True))
-        return out[-DAYS:]
+        return recorded_first(out)[-DAYS:]
 
     def cache_path(self, market: str, day: str, rkey: str) -> Path:
         return self.root / "playbook" / f"v{VERSION}" / rkey / market / f"{day}.json"

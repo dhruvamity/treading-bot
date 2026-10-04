@@ -252,7 +252,8 @@ def replay(setup: dict[str, Any], fills: list[dict[str, Any]], dec: list[dict[st
     if mi is None or not len(tape.bbo["ts"]):
         return [f"Replay    no market data or tape for {market}"]
     hol = load_holidays(full_only=True)
-    w = Window(tape, start_us, end_us, rth=session_mask(meta.get("regularTradingHours"), hol), holidays=hol)
+    w = Window(tape, start_us, end_us, rth=session_mask(meta.get("regularTradingHours"), hol), holidays=hol,
+               step_ms=int(setup.get("loop_ms") or 1000))
     live_vol = sum(float(f["price"]) * float(f["size"]) for f in fills)
     sign = {"buy": 1.0, "sell": -1.0}
     pos = sum(sign.get(str(f["side"]), 0.0) * float(f["size"]) for f in fills)

@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import math
 import signal
 import time
 from dataclasses import asdict, replace
@@ -46,7 +47,14 @@ from bot.core.livelock import RunMode, lock_state, mainnet_writes_allowed, resol
 from bot.core.liveparams import LiveParams
 from bot.core.marketdata import MarketDataHub
 from bot.core.risk import RiskEngine
-from bot.core.state import CLOSEALL_KEY, ReconcileReport, StateStore, closeall_us, side_size
+from bot.core.state import (
+    CLOSEALL_KEY,
+    POSITION_CONFIRM_S,
+    ReconcileReport,
+    StateStore,
+    closeall_us,
+    side_size,
+)
 from bot.strategies import make_strategy
 from bot.venues.arcus.adapter import ArcusAdapter
 from bot.venues.arcus.models import parse_public_trade
@@ -84,6 +92,11 @@ def leverage_plan(sessions: list[MMSession], markets: dict[Venue, dict[str, Any]
     return [(v, b, lev) for (v, b), lev in sorted(want.items())]
 
 
+def loop_period_s(sessions: Any) -> float:
+    """How often the trading loop runs, in seconds: the fastest session's loop_ms (1 s unless one asks for less)."""
+    return min((int(getattr(s, "loop_ms", 1000)) for s in sessions), default=1000) / 1000
+
+
 class BotRunner:
     def __init__(self, sessions: list[MMSession], *, mode: RunMode, cli_live: bool, app: AppConfig,
                  arcus_cfg: ArcusVenueConfig, secrets: SecretStore,
@@ -115,6 +128,7 @@ class BotRunner:
         self.dms: list[DeadMansSwitch] = []
         self.tasks: list[asyncio.Task[Any]] = []
         self._stop = asyncio.Event()
+        self._recheck_at = 0.0      # monotonic time of an early reconcile (a position differed, not confirmed yet)
         self.arcus_ws: ArcusWS | None = None
         self.params: LiveParams | None = None
         self.started_us = now_us()
@@ -434,12 +448,17 @@ class BotRunner:
 
     async def _tick_loop(self) -> None:
         last_acct = 0.0
+        last_second = -math.inf
+        period = loop_period_s(self.sessions)
         while not self._stop.is_set():
             t0 = time.monotonic()
             now = now_us()
-            self._check_resume()
-            await self._check_operator()
-            self.hub.tick_1s(now)
+            second = t0 - last_second >= 0.999   # the once-a-second work; a faster loop only decides more often
+            if second:
+                last_second = t0
+                self._check_resume()
+                await self._check_operator()
+                self.hub.tick_1s(now)
             try:
                 for ad in self.adapters.values():
                     if isinstance(ad, PaperVenue):
@@ -470,14 +489,15 @@ class BotRunner:
                             self.governor.for_arcus(arcus_account_index(self.sessions)).update_pool(
                                 rb.order_remaining, rb.order_cap, rb.cancel_remaining, rb.cancel_cap)
                 for e in self.engines:
-                    await e.tick(now)
+                    if second or e.session.loop_ms < 1000:
+                        await e.tick(now)
             except LiveLockError:
                 raise
             except Exception as ex:  # safe mode on anything unexpected in the trading loop (B3.6)
                 log.error("tick_error", reason=type(ex).__name__, data={"err": str(ex)[:300]}, exc_info=True)
                 for v in list(self.adapters):
                     await self._safe_mode(v, f"unexpected {type(ex).__name__} in trading loop: {str(ex)[:120]}")
-            await asyncio.sleep(max(0.0, 1.0 - (time.monotonic() - t0)))
+            await asyncio.sleep(max(0.0, period - (time.monotonic() - t0)))
 
     async def _consume(self, venue: Venue) -> None:
         ad = self.adapters[venue]
@@ -524,7 +544,8 @@ class BotRunner:
     async def reconcile_once(self, *, start: bool = False) -> None:
         for v, ad in self.adapters.items():
             try:
-                rep = self.state.reconcile(v, await ad.open_orders(), await ad.positions())
+                rep = self.state.reconcile(v, await ad.open_orders(), await ad.positions(),
+                                           confirm_s=0.0 if start else POSITION_CONFIRM_S)
             except Exception as e:
                 log.warning("reconcile_failed", venue=v.value, reason=type(e).__name__)
                 continue
@@ -537,6 +558,11 @@ class BotRunner:
                     await ad.cancel_all(None)
             if rep.position_mismatch:
                 await self._position_alerts(v, rep, start)
+            if rep.deferred:
+                # the venue's snapshot may predate fills the bot already counted: look again before believing it
+                log.info("position_differs_recheck", venue=v.value,
+                         data={"positions": [(b, str(a), str(c)) for b, a, c in rep.deferred]})
+                self._recheck_at = time.monotonic() + POSITION_CONFIRM_S
 
     async def _position_alerts(self, v: Venue, rep: ReconcileReport, start: bool) -> None:
         """The venue's position is used either way; this says what differed. At a start, a market the venue holds
@@ -566,13 +592,16 @@ class BotRunner:
                 ["⚠️ POSITION MISMATCH", *other, "", f"{name}'s position is used"]))
 
     async def _reconcile_loop(self) -> None:
-        """Every 5 minutes, and within 5 s of an adapter asking (an account stream went `degraded`)."""
+        """Every 5 minutes, within 5 s of an adapter asking (an account stream went `degraded`), and again
+        POSITION_CONFIRM_S after a position differed from the venue's without being confirmed."""
         last = time.monotonic()
         while not self._stop.is_set():
             await asyncio.sleep(5)
             asked = [ad for ad in self.adapters.values() if getattr(ad, "resync_requested", False)]
-            if not asked and time.monotonic() - last < 300:
+            recheck = 0 < self._recheck_at <= time.monotonic()
+            if not asked and not recheck and time.monotonic() - last < 300:
                 continue
+            self._recheck_at = 0.0
             for ad in asked:
                 ad.resync_requested = False
             if asked:

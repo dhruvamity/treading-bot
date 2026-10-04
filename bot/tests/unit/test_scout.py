@@ -217,6 +217,22 @@ def test_live_engine_position_stop_closes_with_a_taker_order() -> None:
     assert any(f.tag == "exit_ioc" for f in res.fills)   # the unfilled maker exit was replaced by a taker order
 
 
+def test_live_engine_position_stop_follows_the_market_when_asked() -> None:
+    """The same falling market, but the stop is dynamic (pos_stop_k > 0): its floor of $0.20 does not fire, the
+    market-following value does (here its ceiling, $0.30)."""
+    mk = fixture_markets()
+    a = mk[Venue.ARCUS]["BTC"]
+    ev = list(merge([book_events(Venue.ARCUS, "BTC", trend_path(86000, -0.01), start_us=1_790_000_000_000_000,
+                                 seconds=3600, tick=a.tick_size, step=a.step_size, half_spread_ticks=5,
+                                 trades_per_s=2.0, trade_size=D("0.01"), seed=3)]))
+    sess = mm_session(mode="mid", execution_style="aggressive", spacing_bps=2, levels_per_side=1, order_size_usd=25,
+                      inventory_cap_usd=50, capital_usd=100, pos_stop_usd=0.20, pos_stop_k=1e6, pos_stop_max_usd=0.30,
+                      exit_taker_after_s=20, cooldown_s=60, daily_stop_usd=50, kill_usd=50)
+    reasons = [str(d.get("reason")) for d in Simulator([sess], mk, SimConfig()).run_sync(ev).decisions]
+    stops = [r for r in reasons if r.startswith("open position")]
+    assert stops and all("stop $0.30" in r for r in stops)
+
+
 def test_live_engine_runs_the_grid() -> None:
     mk = fixture_markets()
     a = mk[Venue.ARCUS]["BTC"]

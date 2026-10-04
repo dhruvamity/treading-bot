@@ -9,8 +9,8 @@ The examples in this guide use $100.
 
 It does three things:
 
-1. **Scout.** It records every Arcus perp around the clock and, every 30 minutes, backtests 37 setups (Mid and Grid,
-   every spread, each Neutral, Long and Short, and Smart) on every market at its maximum leverage. It ranks them by volume and by
+1. **Scout.** It records every Arcus perp around the clock and, every 30 minutes, backtests 8 setups (Mid and Smart,
+   at 0 to +3 bp) on every market at its maximum leverage. It ranks them by volume and by
    cost per $1,000 traded, among those that pass a set of safety checks.
 2. **Pilot.** It offers you the **top 3**. You approve one, and it deploys that exact setting (paper or live), then
    keeps checking it against fresh data.
@@ -72,7 +72,7 @@ interval without editing files). [Section 9](#9-the-telegram-bot) has them all.
 ```mermaid
 flowchart LR
     A[Arcus WebSocket<br/>best bid/offer + trades<br/>all perps] --> B[Scout recorder<br/>data/scout/tape]
-    B --> C[Backtest every 30 min<br/>37 setups at max leverage<br/>x every market]
+    B --> C[Backtest every 30 min<br/>8 setups at max leverage<br/>x every market]
     C --> D[GO checks + ranking<br/>data/scout/report.txt]
     D --> E[Top 3 offered<br/>CLI or Telegram]
     E -->|you approve| F[Pilot writes<br/>config/sessions/pilot.yaml]
@@ -98,6 +98,9 @@ treading-bot/
   README.md                   this guide
   lighter/                    a separate bot for Lighter on Robinhood Chain (package `lbot`; its own guide:
                               lighter/README.md). It shares no code, settings or credentials with `bot/`
+  arb/                        funding arbitrage between Arcus and Lighter (package and command `arb`; its own guide:
+                              arb/README.md): scanner, backtest, and an executor that runs on paper unless switched
+                              to live. It uses the two bots' venue clients and changes neither
   bot/                        the bot (Python 3.12 package `bot`, command `bot`)
     bot/scout/                tape (data store), record (recorder), sim (backtest), scan (menu + ranking), pilot, service
     bot/core/                 runner, engine (the stops), risk engine, order manager, state, ledger, guardian, doctor
@@ -226,7 +229,7 @@ MOST VOLUME top 3 (the most volume for at most your cost per $1,000 traded, at m
 
 | Column | Meaning |
 |---|---|
-| setting | The setup ([section 7.2](#72-the-scout-menu-37-setups)) and the leverage it was sized at |
+| setting | The setup ([section 7.2](#72-the-scout-menu-8-setups)) and the leverage it was sized at |
 | order | Dollar size of each order |
 | fills/d, volume/d | Average maker fills and maker volume (USD) per full day |
 | pnl/d, worst | Average and worst daily PnL in USD, after fees and after closing any leftover position |
@@ -312,7 +315,8 @@ of free disk. `data/scout/recorder.json` shows its health.
 ### 4.2 How the backtest works
 
 For each market, each setting and each UTC day (each day starts flat, with 2 hours of warm-up), the simulator in
-`bot/scout/sim.py` replays the tape one second at a time, the way the live bot decides once a second:
+`bot/scout/sim.py` replays the tape one second at a time, the way the live bot decides once a second (BTC: twice a
+second, live and in the backtest, since 2026-10-04; it was 0.2 bp cheaper on 6 of 6 days and changed nothing elsewhere):
 
 - **Timing.** New orders go live and cancels take effect 150 ms later. A post-only order that would cross the book on
   arrival is rejected.
@@ -352,7 +356,7 @@ leverage sets the size:
 | Inventory cap (`inventory_cap_usd`) | that ÷ 1.25, so the risk engine's hard cap (1.25 × cap) lands on the venue limit | $800 |
 | Order size (`order_size_usd`) | half the cap, per level per side | $400 |
 | Off-hours (RWA) | cap and order × (off-hours leverage ÷ leverage) | unchanged at 10x (QQQ allows 16.7x off-hours) |
-| Stops | 1% / 2% / 10% of the capital ([6.1](#61-the-stops-backtest-and-live)) | $1 / $2 / $10 |
+| Stops | position 1–5% (it follows the market), daily 2%, kill 10% of the capital ([6.1](#61-the-stops-backtest-and-live)) | $1–5 / $2 / $10 |
 
 Leverage does not create fills by itself; it lets you post bigger orders, and bigger orders capture more of each
 taker order that reaches them. The stops grow with the **capital**, not with the leverage, so at high leverage a
@@ -537,7 +541,7 @@ in the [research note](bot/docs/notes/2026-09-27-autopilot.md).
 | The session | Weekend (New York Fri 17:00 to Sun 18:00), Asia (from Tokyo 09:00), London (from 08:00 London), US open (09:30–12:00 New York), US afternoon (12:00–16:00), US evening. Each city's own clock, so daylight saving is handled |
 | Each market's state | The last hour's volatility against its usual level at that hour: **calm** (under 0.75x), **normal**, **busy** (1.25–2x), **wild** (over 2x). A one-minute move over 6x usual is a **shock**: that market is left out for 30 minutes |
 | Events | Flat from 45 minutes before CPI, the jobs report and FOMC until 30 minutes after (the dates are in `config/calendars/events.csv`). A stock is also left out from 24 h before its earnings to 24 h after; the scout fetches those dates from Nasdaq every day |
-| The playbook | Every hour of the last 42 days backtested from flat, for 10 setups (Mid 0 to +3, Grid 0, +1, +3, and Smart 0, +2, +3 on days with a recorded book) on 8 markets (BTC, SPY, ETH, SOL, QQQ, NVDA, GLD, HYPE). The result is the volume per hour and cost per dollar for each market, setup, session and state. Rebuilt daily (`bot scout playbook` prints it) |
+| The playbook | Every hour of the last 42 days backtested from flat, for 8 setups (Mid 0 to +3, and Smart 0 to +3 on days with a recorded book). Once a market has 10 days with a recorded book, 2 of them at a weekend, only those days are used (older days have a book rebuilt from trades, which made weekend SPY look four times dearer than it ran live) on 8 markets (BTC, SPY, ETH, SOL, QQQ, NVDA, GLD, HYPE). The result is the volume per hour and cost per dollar for each market, setup, session and state. Rebuilt daily (`bot scout playbook` prints it) |
 
 **What it does:**
 
@@ -593,12 +597,20 @@ re-computes the dollars from the account's equity at start and at 00:00 UTC ([4.
 
 | Rule | Default | On $100 | What happens |
 |---|---|---|---|
-| Position stop | 1% | $1 | The open position is down 1% of the capital from its average entry: cancel quotes, exit with a reduce-only maker order at the touch, cross the spread with a taker order after 20 s if it has not filled, then pause 60 s |
+| Position stop | dynamic, 1–5% | $1–5 | The open position is down by the stop from its average entry: cancel quotes, exit with a reduce-only maker order at the touch, cross the spread with a taker order after 20 s if it has not filled, then pause 60 s. The stop follows the market: 2 × the market's 1-hour move × the inventory cap, never under 1% of the capital nor over 5%. `/set position_stop 3` fixes it at 3% (the daily stop must be at least as large: `/set daily_stop 3` or more first, or the reply says so); `/set position_stop auto` gives the dynamic one back |
 | Daily stop | 2% | $2 | The day's PnL is below −2%: close the position the same way, no new orders until 00:00 UTC, then resume by itself |
 | Kill | 10% | $10 | Equity more than 10% below its peak: close everything with a taker order and stop until you resume it |
 | Safety pause | on | — | Spread over 3× its 1-hour median (and more than 1 bp above it) or a 1-second move over 6σ: no quotes for 30 s. Hand-written sessions also pause when the depth within 25 bps falls under 30% of its median; pilot sessions do not, because the backtest cannot model it |
 | Liquidation distance | 4σ | — | Distance to liquidation below 4σ of 1-hour moves: cut half the position at market; re-armed above 6σ |
 | Position caps | 1.2× / 1.25× | — | No new order that could take the position past 1.2× the cap; the risk engine rejects anything past 1.25× |
+
+- **Why the position stop follows the market** (since 2026-10-04): a fixed 1% turned ordinary swings into taker
+  exits (19,000 stops in the 10-day study against 700, 1.89 bp against 1.66 bp;
+  [note](bot/docs/notes/2026-10-04-two-weekends-review.md), section 5). The backtest, the scan and the live engine
+  compute it with the same function (`bot/common/sizing.py: dynamic_stop`).
+- **At maximum leverage the daily stop ends most days early** when the run has no `sl=`: at 50x a full position
+  reaches 2% of the capital on a 5 bp move. A run with `sl=` lifts the daily stop and the kill to that limit
+  ([7.6](#76-run-limits-stop-take-profit-volume-target)); `/set daily_stop 5` widens it for every run.
 
 ### 6.2 Other kill switches (live engine)
 
@@ -653,18 +665,21 @@ drawdown 10%.
 - **Requote tolerance.** A live order is kept (keeping its queue place) while it is within max(2 ticks,
   0.25 × half-spread) of the wanted price and within 20% of the wanted size; otherwise it is replaced.
 
-### 7.2 The scout menu (37 setups)
+### 7.2 The scout menu (8 setups)
 
 A setup is named the way Tread.fi names its runs: the mode, the spread in bps, and the bias when it is not Neutral.
-The scout backtests all 37 on every market at its maximum leverage, so the report labels look like `Mid +1 @ 50x`
-or `Grid +3 Short @ 40x` (`bot/strategies/setup.py`).
+The scout backtests these 8 on every market at its maximum leverage, so the report labels look like `Mid +1 @ 50x`
+or `Smart 0 @ 40x` (`bot/strategies/setup.py`).
 
-| Mode | Spreads backtested | Biases | What it quotes |
+| Mode | Spreads backtested | Bias | What it quotes |
 |---|---|---|---|
-| **Mid** | −1, 0, +1, +2, +3, +5 | Neutral, Long, Short | both sides `spread` bps from the book's mid, following it ([7.3](#73-mid-mode-mid)) |
-| **Grid** | 0, +1, +2, +3, +5 | Neutral, Long, Short | around the **last fill**, soft reset at 0.5% ([7.4](#74-grid-mode-grid)) |
+| **Mid** | 0, +1, +2, +3 | Neutral | both sides `spread` bps from the book's mid, following it ([7.3](#73-mid-mode-mid)) |
 | **Smart** | 0, +1, +2, +3 | Neutral | as Mid, less a side while its fill would likely lose ([7.9](#79-smart-mode-smart-and-where-the-profit-is)) |
 
+- **Grid, Mid −1, Mid +5 and the Long and Short biases left the scan on 2026-10-04** (37 setups before): on ten
+  recorded days Grid was the dearest family on all 17 markets studied, Mid −1 quoted what Mid 0 quotes, and a bias
+  cost more than Neutral at the same spread ([note](bot/docs/notes/2026-10-04-two-weekends-review.md), section 6).
+  They still run from `/run` and the run form, without a backtest; a scan is about 4.5 times shorter.
 - Any other spread or bias (e.g. Mid +0.5, Grid +4, Smart +5) runs from `/run` without a backtest.
 - The names from before 2026-09-26 still work in `/run` and old buttons: `touch 0bp` = Mid 0, `touch 1bp` = Mid +1,
   `deep 3bp` = Mid +3, `improve touch` = Mid −1, `anchor 3bp` = Grid +3.
@@ -772,7 +787,7 @@ Arcus differs from their venues in two ways that matter:
 
 | Tread | Here |
 |---|---|
-| Mid / Grid, spread, Long / Neutral / Short | The same three fields (Mid and Grid, [7.2](#72-the-scout-menu-37-setups)–[7.5](#75-directional-bias-bias-long--short)) |
+| Mid / Grid, spread, Long / Neutral / Short | The same three fields (Mid and Grid, [7.2](#72-the-scout-menu-8-setups)–[7.5](#75-directional-bias-bias-long--short)) |
 | Stop loss, take profit, volume | `sl=`, `tp=`, `vol=` ([7.6](#76-run-limits-stop-take-profit-volume-target)) |
 | DGrid (the bot picks the setup by regime) | The autopilot picks market and setup per session and market state, every minute ([5.1](#51-the-autopilot-auto)) |
 | RGrid (trend, mostly taker) | Retired: taker fills at 2.25 bp lost on every market |
@@ -816,7 +831,8 @@ position always stays. The backtest runs the same rule, so the scout ranks Smart
 | Other markets (NVDA, GLD, BTC, ETH, SOL, QQQ, HYPE) | 1.0–2.9 bp | 0–16% less | 70–87% |
 
 - **The position stop matters as much.** At 1% it fires about 20 times a day on SPY and every exit ends as a taker
-  order. `/set position_stop 3` cuts SPY Mid 0 from 1.57 to 1.06 bp in the backtest.
+  order; 3% cut SPY Mid 0 from 1.57 to 1.06 bp in the backtest. Since 2026-10-04 the default follows the market
+  between 1% and 5% ([6.1](#61-the-stops-backtest-and-live)), which costs what 3% costs.
 - **Wider quotes on the index perps are the closest thing to a profit.** SPY Smart +3 (about $35k a day) and QQQ Mid +3
   (about $19k a day) made money on 6 of 8 days (+$2 and +$3 a day, backtest), best in the US morning.
   - SPY and QQQ follow a real index, so after a large order pushes the perp it tends to come back.
@@ -824,7 +840,7 @@ position always stays. The backtest runs the same rule, so the scout ranks Smart
 
 | You want | Run | Backtest |
 |---|---|---|
-| Volume, as cheaply as possible | **SPY Smart 0** with `/set position_stop 3` | 0.82 bp, about $300k a day |
+| Volume, as cheaply as possible | **SPY Smart 0** (the default position stop) | 0.82 bp, about $300k a day |
 | A small profit, slowly (to be proven) | **SPY Smart +3** or **QQQ Mid +3**, in paper first | +$2–3 a day, $20–35k a day |
 
 ---
@@ -944,7 +960,7 @@ posted once when the scan finishes.
 | `capital` | `auto` or dollars | Money the bot sizes for: the account's balance, or a fixed amount (never more than the balance) |
 | `trade_share` | 1–100 (%) | Share of the balance to trade; the rest is left untouched |
 | `max_capital` | dollars or `none` | Never size for more than this |
-| `position_stop`, `daily_stop`, `kill` | % of the capital | The stops ([6.1](#61-the-stops-backtest-and-live)); must stay position ≤ daily ≤ kill. Changing them means a full re-backtest (slow, low priority) |
+| `position_stop`, `daily_stop`, `kill` | % of the capital; `position_stop` also takes `auto` | The stops ([6.1](#61-the-stops-backtest-and-live)); must stay position ≤ daily ≤ kill. `position_stop auto` (the default) follows the market between 1% and 5%; a number fixes it. Changing them means a full re-backtest (slow, low priority) |
 | `scan_every` | 10–240 (minutes) | Time between scans |
 | `scan_workers` | `auto` or 1–32 | CPU cores a scan may use (at most all cores but two while a bot runs on the machine) |
 | `scan_budget` | 5–240 (minutes) | Most time one scan spends backtesting full days, busiest markets first (default 30); the rest continues in the next scan, and a market not backtested at the current capital yet shows as ⏳ under the lists |
@@ -1064,11 +1080,12 @@ Files: `data/scout/tape/<MARKET>/<YYYY-MM-DD>/{bbo,trades,depth}-*.npz`. Arcus s
 Each scan (the first one 10 s after start):
 
 1. Takes every market with at least one full recorded UTC day.
-2. Backtests **all 37 setups** ([7.2](#72-the-scout-menu-37-setups)) at each market's **maximum leverage**
+2. Backtests **all 8 setups** ([7.2](#72-the-scout-menu-8-setups)) at each market's **maximum leverage**
    (`--ladder`: also 20x, 10x, 5x and 2x). It sizes them for the **capital** in
    `SCOUT_CAPITAL` (default `auto`: the Docker container has no keys, so that means the $100 paper capital; set
    `SCOUT_CAPITAL=500` to rank for a $500 account). With today's 59 markets that is 59
-   market-leverage pairs and **1,947 backtests per window** (about 2 minutes on 9 cores for all 8 recorded days).
+   market-leverage pairs and **472 backtests per window** (with the 37-setup menu used until 2026-10-04 it was
+   1,947, about 2 minutes on 9 cores for all 8 recorded days).
 3. The windows are each of the last **7 full days** (computed once per day, then cached) and the **last 24 hours**.
    The last 24 hours is re-run only for the setups that pass on their full days (about 3–6% of them, measured), and
    for whatever is deployed: a setup that already fails on its full days cannot become GO, so re-running it would

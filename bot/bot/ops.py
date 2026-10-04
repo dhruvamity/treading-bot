@@ -23,6 +23,7 @@ from pathlib import Path
 from typing import Any
 
 from bot.common.config import AppConfig
+from bot.common.proc import pid_alive
 
 
 @dataclass(frozen=True)
@@ -50,18 +51,12 @@ def pid_path(app: AppConfig, name: str) -> Path:
 
 
 def pid_of(app: AppConfig, name: str) -> int | None:
-    """The service's pid if that process is alive."""
+    """The service's pid if that process is alive (a zombie is not: bot/common/proc.py)."""
     try:
         pid = int(pid_path(app, name).read_text().strip())
     except (OSError, ValueError):
         return None
-    try:
-        os.kill(pid, 0)
-    except ProcessLookupError:
-        return None
-    except PermissionError:
-        return pid
-    return pid
+    return pid if pid_alive(pid) else None
 
 
 def uptime_s(app: AppConfig, name: str) -> float | None:

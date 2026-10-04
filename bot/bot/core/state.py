@@ -67,6 +67,12 @@ class LocalOrder:
 
 FILL_IDS_KEPT = 50_000     # recent fill ids kept to drop replays (a reconnect re-sends minutes, not days)
 PENDING_GRACE_S = 10.0   # reconcile leaves an unacknowledged order alone this long after it was sent
+# Mid-run, a position that differs from the venue's is adopted only when the venue's still differs from the bot's by
+# the same amount this long later: Arcus's REST positions can be older than the fills the bot already counted
+# (2026-09-28 07:40 UTC: flat after an exit, REST still long 1.447 SPY 7 s later; the bot took it and chased it for 5
+# minutes). A stale snapshot misses different fills each time; a fill the bot really missed keeps the same difference
+# while it goes on trading.
+POSITION_CONFIRM_S = 15.0
 CLOSEALL_KEY = "closeall"   # kv: {"at_us", "venue"} of the last /closeall or `bot flatten`, read at the next start
 
 
@@ -76,10 +82,11 @@ class ReconcileReport:
     missing_local: list[str] = field(default_factory=list)
     position_mismatch: list[tuple[str, Decimal, Decimal]] = field(default_factory=list)   # (base, bot's, venue's)
     since_us: dict[str, int] = field(default_factory=dict)   # base -> when the bot's record of it last changed
+    deferred: list[tuple[str, Decimal, Decimal]] = field(default_factory=list)   # differ, not adopted yet (confirm_s)
 
     @property
     def clean(self) -> bool:
-        return not (self.unknown_live or self.missing_local or self.position_mismatch)
+        return not (self.unknown_live or self.missing_local or self.position_mismatch or self.deferred)
 
 
 class StateStore:
@@ -96,6 +103,7 @@ class StateStore:
         # fills already counted, to drop a replay after a reconnect: the recent ones only (the fills table keeps all,
         # and INSERT OR IGNORE there). A list of every Fill and a set of every id grew for as long as the bot ran.
         self._fill_ids: dict[tuple[str, str], None] = {}
+        self._pos_gap: dict[tuple[Venue, str], tuple[Decimal, int]] = {}   # (venue's - bot's, first seen) per market
         self._load()
 
     # ---------------------------------------------------------------- persistence
@@ -252,7 +260,11 @@ class StateStore:
         return row[0] if row else None
 
     # ---------------------------------------------------------------- reconciliation
-    def reconcile(self, venue: Venue, venue_open: Sequence[OrderState], venue_positions: Sequence[Position]) -> ReconcileReport:
+    def reconcile(self, venue: Venue, venue_open: Sequence[OrderState], venue_positions: Sequence[Position], *,
+                  confirm_s: float = 0.0) -> ReconcileReport:
+        """Match the bot's orders and positions to the venue's. A position that differs is adopted from the venue at
+        once, or with confirm_s > 0 (mid-run) only once the venue's has differed by the same amount for confirm_s;
+        until then it is reported in `deferred` and the bot's own record stands."""
         rep = ReconcileReport()
         seen: set[str] = set()
         for st in venue_open:
@@ -282,14 +294,26 @@ class StateStore:
         for b in bases:
             local = self.position(venue, b)
             remote = vpos[b].size if b in vpos else Decimal(0)
-            if local != remote:
-                rep.position_mismatch.append((b, local, remote))
-                row = self._db.execute("SELECT ts_us FROM positions WHERE venue=? AND base=?", (venue.value, b)).fetchone()
-                if row and row[0]:
-                    rep.since_us[b] = int(row[0])
-                self.set_position(venue, b, remote, vpos[b].entry_price if b in vpos else None)
+            key = (venue, b)
+            if local == remote:
+                self._pos_gap.pop(key, None)
+                continue
+            if confirm_s > 0:
+                first = self._pos_gap.get(key)
+                if first is None or first[0] != remote - local:
+                    first = self._pos_gap[key] = (remote - local, now)     # new, or a different difference
+                if now - first[1] < confirm_s * 1e6:
+                    rep.deferred.append((b, local, remote))
+                    continue
+            self._pos_gap.pop(key, None)
+            rep.position_mismatch.append((b, local, remote))
+            row = self._db.execute("SELECT ts_us FROM positions WHERE venue=? AND base=?", (venue.value, b)).fetchone()
+            if row and row[0]:
+                rep.since_us[b] = int(row[0])
+            self.set_position(venue, b, remote, vpos[b].entry_price if b in vpos else None)
         self.event("reconcile", venue=venue.value, unknown=len(rep.unknown_live), missing=len(rep.missing_local),
-                   pos_mismatch=[(b, str(a), str(c)) for b, a, c in rep.position_mismatch])
+                   pos_mismatch=[(b, str(a), str(c)) for b, a, c in rep.position_mismatch],
+                   pos_deferred=[(b, str(a), str(c)) for b, a, c in rep.deferred])
         return rep
 
     def close(self) -> None:

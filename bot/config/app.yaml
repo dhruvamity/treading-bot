@@ -17,7 +17,11 @@ sizing:                          # every dollar figure is a share of the capital
   paper_capital_usd: 100         # auto with no ARCUS_ADDRESS or an unfunded account (the Docker scout, paper)
   capital_frac: 1.0              # trade this share of the equity (0.5 = half; the rest is untouched cushion)
   max_capital_usd: null          # never size above this, however large the account grows (null = no cap)
-  position_stop_pct: 1.0         # an open position down 1% of the capital: close it, then cool down
+  position_stop_pct: 1.0         # an open position down this % of the capital: close it, then cool down. While the
+                                 # stop follows the market (position_stop_k > 0) this is its floor
+  position_stop_k: 2.0           # the position stop follows the market: 2 hourly moves on a full position, between
+  position_stop_max_pct: 5.0     # position_stop_pct and this. 0 = always exactly position_stop_pct.
+                                 # (/set position_stop 3 fixes it at 3%; /set position_stop auto follows the market)
   daily_stop_pct: 2.0            # the UTC day down 2%: close, no new orders until 00:00 UTC
   kill_pct: 10.0                 # equity 10% below its peak: flatten and stop until `bot resume`
   go_pnl_day_pct: 0.25           # scout GO: average day and the last 24 h not worse than -0.25%

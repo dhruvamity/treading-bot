@@ -18,7 +18,7 @@ from pathlib import Path
 from typing import Any
 
 from bot.common import settings, sizing
-from bot.common.config import MMSession, RiskLimitsCfg
+from bot.common.config import MMSession, RiskLimitsCfg, SizingDefaults
 from bot.common.ids import ClientIdFactory
 from bot.common.logging import DecisionLog, Log
 from bot.common.time import US_PER_S
@@ -287,10 +287,16 @@ class SessionEngine:
             pick["capital_frac"] = over["trade_share"] / 100
         if "max_capital" in over:
             pick["max_capital_usd"] = over["max_capital"]
-        for name, fld in (("position_stop", "position_stop_pct"), ("daily_stop", "daily_stop_pct"),
-                          ("kill", "kill_pct")):
+        for name, fld in (("daily_stop", "daily_stop_pct"), ("kill", "kill_pct")):
             if name in over:
                 pick[fld] = over[name]
+        ps = over.get("position_stop")
+        if isinstance(ps, (int, float)):         # the owner's own fixed stop
+            pick.update(position_stop_pct=float(ps), position_stop_k=0.0)
+        elif ps == "auto" and z.position_stop_k <= 0:   # back to the market-following stop
+            d = SizingDefaults()
+            pick.update(position_stop_pct=d.position_stop_pct, position_stop_k=d.position_stop_k,
+                        position_stop_max_pct=d.position_stop_max_pct)
         z = z.model_copy(update=pick) if pick else z
         cap = over.get("capital")
         return z, float(cap) if isinstance(cap, (int, float)) else None
@@ -464,12 +470,15 @@ class SessionEngine:
         mid = ctx.view.mid()
         if s.pos_stop_usd and inv != 0 and ctx.entry_price is not None and mid is not None:
             upnl = inv * (mid - ctx.entry_price)
-            if upnl <= -Decimal(str(s.pos_stop_usd)):
+            # fixed, or following the market: k hourly moves on the inventory cap (bot/common/sizing.py)
+            stop = sizing.dynamic_stop(s.pos_stop_usd, s.pos_stop_k, s.pos_stop_max_usd or 0.0, ctx.view.sigma_1h(),
+                                self.strategy.cap_usd(ctx))
+            if upnl <= -Decimal(str(stop)):
                 self.pos_stop_active, self.exit_since_us = True, now_us
                 d = RiskDecision("position_stop", RiskAction.PAUSE_QUOTES, self.venue, self.base,
-                                 f"open position {inv} down ${-upnl:.2f} (stop ${s.pos_stop_usd:.2f})",
+                                 f"open position {inv} down ${-upnl:.2f} (stop ${stop:.2f})",
                                  f"position closed, then {s.cooldown_s:.0f} s",
-                                 (f"{self.base} · PnL -${-upnl:.2f}", f"Stop -${s.pos_stop_usd:.2f}"))
+                                 (f"{self.base} · PnL -${-upnl:.2f}", f"Stop -${stop:.2f}"))
                 self.risk._log(d, now_us)
                 self.stats.risk_events.append(d)
                 if self.alerter is not None:

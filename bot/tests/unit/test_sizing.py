@@ -338,3 +338,36 @@ def test_a_setting_can_carry_its_own_stops_into_the_backtest_and_the_session(tmp
     assert (s.pos_stop_usd, s.daily_stop_usd, s.kill_usd) == pytest.approx((3.0, 6.0, 15.0))
     p.write_text(yaml.safe_dump(session_for("QQQ-USD", BY_NAME["Mid +3"], r, live=False)))
     assert load_session(p).pos_stop_usd == pytest.approx(r.pos_stop_usd)       # no own stops: the owner's
+
+
+def test_the_position_stop_follows_the_market_unless_the_owner_fixes_it(tmp_path: Path) -> None:
+    """2026-10-04: a fixed 1% stop at 50x is a 2.5 bp move, and every time it fires the exit pays the taker fee
+    (17 markets, 10 days: 1.89 bp at 1%, 1.67 at 3%, 1.66 following the market). The default follows the market;
+    `/set position_stop 3` fixes it and `/set position_stop auto` gives it back."""
+    from bot.common import settings
+
+    assert sizing.dynamic_stop(2.4, 0, 0, 0.001, 9600) == 2.4                       # k = 0: fixed
+    assert sizing.dynamic_stop(2.4, 2, 12, 0.0003, 9600) == pytest.approx(5.76)     # 2 hourly moves of 3 bp on $9,600
+    assert sizing.dynamic_stop(2.4, 2, 12, 0.002, 9600) == 12                       # the ceiling
+    assert sizing.dynamic_stop(2.4, 2, 12, 0.00005, 9600) == 2.4                    # the floor
+    assert sizing.dynamic_stop(2.4, 2, 12, 0.0, 9600) == 2.4                        # no volatility known yet
+    z = SizingDefaults()
+    r = Risk.for_capital(240, 50, 33.33, pct=z.pct())
+    assert (r.pos_stop_usd, r.pos_stop_k, r.pos_stop_max_usd) == pytest.approx((2.4, 2.0, 12.0))
+    assert Risk.for_capital(240, 50).pos_stop_k == 0                                 # no settings given: fixed
+    assert r.with_stops((3.0, 6.0, 15.0)).pos_stop_k == 0                            # a setting's own stops are fixed
+    assert risk_key(asdict(r)) != risk_key(asdict(Risk.for_capital(240, 50, 33.33)))   # so it is its own backtest
+    p = tmp_path / "x.yaml"
+    p.write_text(yaml.safe_dump(session_for("QQQ-USD", BY_NAME["Mid 0"], r, live=False)))
+    s = load_session(p)
+    assert (s.pos_stop_usd, s.pos_stop_k, s.pos_stop_max_usd) == pytest.approx((2.4, 2.0, 12.0))
+    assert s.sizing is not None and (s.sizing.position_stop_k, s.sizing.position_stop_max_pct) == pytest.approx((2, 5))
+    sizing.apply(s, 480.0)                                                           # the account doubled
+    assert (s.pos_stop_usd, s.pos_stop_k, s.pos_stop_max_usd) == pytest.approx((4.8, 2.0, 24.0))
+    assert settings.parse("position_stop", "auto") == "auto" and settings.parse("position_stop", "1.5%") == 1.5
+    fixed = settings.effective_sizing(z, {"position_stop": 1.5})
+    assert (fixed.position_stop_pct, fixed.position_stop_k) == (1.5, 0.0)
+    auto = settings.effective_sizing(z, {"position_stop": "auto"})
+    assert (auto.position_stop_pct, auto.position_stop_k) == (1.0, 2.0)
+    assert settings.defaults(z, 30, None)["position_stop"] == "auto"
+    assert settings.show("position_stop", "auto") == "auto" and settings.show("position_stop", 1.5) == "1.5%"
