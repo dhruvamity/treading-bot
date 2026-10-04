@@ -45,3 +45,13 @@ lighter/logs/
 lighter/reports/
 lighter/config/sessions/
 lighter/OWNER_ACTIONS.md
+
+# ---- the funding arbitrage scanner (arb/): the same rules ------------------------------------------------------
+arb/state/
+arb/data/
+arb/settings.json
+arb/OWNER_ACTIONS.md
+
+# ---- data copies and archives kept on this machine only --------------------------------------------------------
+arcus-export-*/
+*.tar.zst

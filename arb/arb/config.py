@@ -1,0 +1,108 @@
+"""Where things are, the account ids from arb/.env, and the owner's settings from arb/settings.json (all optional).
+
+arb/.env (gitignored): ARCUS_ADDRESS, ARCUS_ACCOUNT_INDEX, LIGHTER_ACCOUNT_INDEX, PROFUNDING_API_KEY. None of them is
+a trading key: the first three name the accounts whose balances are read, the last is a data feed's key.
+"""
+
+from __future__ import annotations
+
+import json
+import os
+from dataclasses import dataclass, fields
+from pathlib import Path
+
+from arb.rank import Settings
+
+ROOT = Path(os.environ.get("ARB_ROOT") or Path(__file__).resolve().parent.parent)
+STATE = ROOT / "state"
+
+
+def read_env(path: Path | None = None) -> dict[str, str]:
+    out: dict[str, str] = {}
+    try:
+        for line in (path or ROOT / ".env").read_text().splitlines():
+            line = line.strip()
+            if line and not line.startswith("#") and "=" in line:
+                k, v = line.split("=", 1)
+                out[k.strip()] = v.strip()
+    except OSError:
+        pass
+    return {**out, **{k: v for k, v in os.environ.items()
+                      if k in ("ARCUS_ADDRESS", "ARCUS_ACCOUNT_INDEX", "LIGHTER_ACCOUNT_INDEX", "PROFUNDING_API_KEY")
+                      or k.startswith("ARB_")}}
+
+
+# What `arb set` accepts: name -> (lowest, highest, what it is). Everything else in Settings is a constant.
+ADJUSTABLE: dict[str, tuple[float, float, str]] = {
+    "min_hold_h": (0, 720, "hours a position is kept at least (a stop still closes it)"),
+    "max_hold_h": (0, 8760, "hours after which a position is closed whatever it pays; 0 = no limit"),
+    "exit_edge_apr": (-50, 500, "close (after min_hold_h) once the last 24 h and the next payment pay less than this "
+                                "% a year"),
+    "stop_pct": (0, 50, "stop and take profit, % from the entry on both legs; 0 = dynamic (half the way to "
+                        "liquidation, at least 3 daily moves)"),
+    "min_edge_apr": (0, 1000, "open only when the difference pays at least this % a year on the position"),
+    "max_breakeven_h": (1, 720, "open only when this many hours of funding pay for getting in and out"),
+    "max_leverage": (1, 50, "never use more leverage than this, whatever the venues allow"),
+    "max_notional_usd": (0, 1e7, "never more than this many dollars a leg; 0 = no limit (use a small number for the "
+                                 "first live run)"),
+    "margin_use": (0.1, 0.95, "share of the smaller venue's free collateral a position may use"),
+    "min_volume_24h": (0, 1e9, "skip markets that traded less than this many dollars in 24 h on either venue"),
+    "fill_cost_bp": (0, 50, "what one fill is assumed to cost, in bp"),
+    "stop_frac": (0.1, 0.8, "dynamic stop: share of the distance to liquidation"),
+    "stop_sigmas": (1, 10, "dynamic stop: at least this many daily moves from the entry"),
+    "chase_s": (1, 600, "seconds an unfilled leg follows the price as maker after the other leg has filled"),
+    "max_cross_bp": (0, 100, "then it crosses the spread if that costs no more than this many bp; dearer than that, "
+                             "it keeps following until enter_timeout_s"),
+    "requote_s": (1, 60, "an order off the best price is moved back at most this often, in seconds"),
+    "enter_timeout_s": (10, 3600, "seconds after which an unfinished entry or exit is completed by crossing or undone"),
+}
+
+
+def settings_path() -> Path:
+    return ROOT / "settings.json"
+
+
+def set_value(name: str, text: str, path: Path | None = None) -> float:
+    """Store one setting in arb/settings.json after checking its range. Raises ValueError with what to type."""
+    if name not in ADJUSTABLE:
+        raise ValueError(f"unknown setting {name!r}: one of {', '.join(sorted(ADJUSTABLE))}")
+    lo, hi, _ = ADJUSTABLE[name]
+    try:
+        v = 0.0 if text.strip().lower() in ("auto", "dynamic", "none", "off") else float(text)
+    except ValueError:
+        raise ValueError(f"{name}: {text!r} is not a number") from None
+    if not lo <= v <= hi:
+        raise ValueError(f"{name} must be between {lo:g} and {hi:g}")
+    p = path or settings_path()
+    try:
+        cur = json.loads(p.read_text())
+    except (OSError, ValueError):
+        cur = {}
+    cur[name] = v
+    p.write_text(json.dumps(cur, indent=1) + "\n")
+    return v
+
+
+@dataclass(frozen=True)
+class Config:
+    arcus_address: str
+    arcus_account: int
+    lighter_account: int | None
+    profunding_key: str
+    settings: Settings
+
+
+def load(env: dict[str, str] | None = None, settings_file: Path | None = None) -> Config:
+    e = read_env() if env is None else env
+    over: dict[str, object] = {}
+    try:
+        raw = json.loads((settings_file or ROOT / "settings.json").read_text())
+        names = {f.name: f.type for f in fields(Settings)}
+        over = {k: (bool(v) if names[k] == "bool" else float(v)) for k, v in raw.items() if k in names}
+    except (OSError, ValueError):
+        pass
+    li = e.get("LIGHTER_ACCOUNT_INDEX", "").strip()
+    return Config(arcus_address=e.get("ARCUS_ADDRESS", "").strip(),
+                  arcus_account=int(e.get("ARCUS_ACCOUNT_INDEX") or 0), lighter_account=int(li) if li else None,
+                  profunding_key=e.get("PROFUNDING_API_KEY", "").strip(),
+                  settings=Settings(**over))   # type: ignore[arg-type]
