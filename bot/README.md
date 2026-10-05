@@ -8,4 +8,5 @@ make install        # .venv with Python 3.12
 .venv/bin/bot --help
 ```
 
-Operations handbook: [docs/RUNBOOK.md](docs/RUNBOOK.md).
+The Arcus part in depth: [docs/REFERENCE.md](docs/REFERENCE.md). Operations handbook:
+[docs/RUNBOOK.md](docs/RUNBOOK.md).

@@ -8,6 +8,8 @@
     bot pilot close               close the position and stop trading
     bot down [--all]              stop the services (--all: the trading bot too, positions kept)
     bot doctor pilot              is everything ready for live? (reads only)
+    bot export                    one file with everything recorded and traded since the last export (no keys)
+    bot import [FILE]             take such a file in on another machine
 
 Commands that touch a real account (cancel-all, flatten) ask for CONFIRM.
 """
@@ -541,7 +543,7 @@ def cmd_telegram(a: argparse.Namespace) -> None:
     s = SecretStore()
     tok, chat = s.get("TELEGRAM_BOT_TOKEN"), s.get("TELEGRAM_CHAT_ID")
     if not tok or not chat:
-        print("set TELEGRAM_BOT_TOKEN and TELEGRAM_CHAT_ID in .env first (README.md, section 9.1)")
+        print("set TELEGRAM_BOT_TOKEN and TELEGRAM_CHAT_ID in .env first (README.md, section 2)")
         sys.exit(2)
     allowed = {int(x) for x in (s.get("TELEGRAM_ALLOWED_USER_IDS") or "").replace(" ", "").split(",") if x}
     api = TelegramAPI(tok)
@@ -744,6 +746,45 @@ def cmd_account(a: argparse.Namespace) -> None:
         print("\n".join(f"  {x}" for x in lines))
 
 
+def cmd_export(a: argparse.Namespace) -> None:
+    """One file with this machine's recordings, trades, state and logs (bot/export.py). Reads only; no keys in it."""
+    import getpass
+
+    from bot.export import ExportError, Roots, run_export
+
+    try:
+        res = run_export(Roots.find(Path.cwd()), Path(a.out).expanduser() if a.out else None, full=a.full,
+                         days=a.days, since=a.since, tape=not a.no_tape, keep=a.keep, tag=a.tag or "",
+                         probe=not a.no_probe, force=a.force)
+    except ExportError as e:
+        print(f"not exported: {e}")
+        sys.exit(2)
+    print(f"\n{res.path}\n{res.bytes / 1e6:,.1f} MB: {res.tape_files:,} tape files, {res.record_files:,} record files"
+          + (f"; {len(res.warnings)} files not copied whole (listed in its SUMMARY.md)" if res.warnings else ""))
+    for name in res.removed:
+        print(f"removed the older {name} (--keep {a.keep}; its data is still in the live folders)")
+    print("the next `bot export` sends what is new since this one" if res.cut.moves_mark else
+          "the next plain `bot export` still sends everything since the last full or plain one")
+    print("\nCopy it to the other machine, for example from there:\n"
+          f"  scp {getpass.getuser()}@THIS-SERVER:{res.path} ~/Downloads/\n"
+          "then, in treading-bot/bot there:\n  .venv/bin/bot import")
+
+
+def cmd_import(a: argparse.Namespace) -> None:
+    """Take in a file made by `bot export` on another machine: check it, merge the tape, unpack the rest."""
+    from bot.export import ExportError, Roots, find_export, run_import
+
+    roots = Roots.find(Path.cwd())
+    try:
+        path = find_export(roots, a.path)
+        print(path)
+        res = run_import(roots, path)
+    except ExportError as e:
+        print(f"not imported: {e}")
+        sys.exit(2)
+    sys.exit(0 if res["ok"] else 1)
+
+
 def cmd_secrets(a: argparse.Namespace) -> None:
     s = SecretStore()
     if a.action == "init":
@@ -931,6 +972,20 @@ def build_parser() -> argparse.ArgumentParser:
     sp.add_argument("--capital", type=float, default=0,
                     help="the drawdown limit is a %% of this (default 0: the account's equity when the guardian starts)")
     sp.add_argument("--testnet", action="store_true")
+    sp = add("export", cmd_export, "one file with everything new since the last export: tape, trades, state, logs "
+             "(no keys); for `bot import` on another machine")
+    sp.add_argument("--full", action="store_true", help="everything, not only what is new since the last export")
+    sp.add_argument("--days", type=int, help="a small one: all state and trades, logs and tape of the last N UTC days")
+    sp.add_argument("--since", help="the same from a UTC day on: 2026-10-01")
+    sp.add_argument("--no-tape", action="store_true", help="leave the market tape out (state, trades and logs only)")
+    sp.add_argument("--out", help="folder to write it to (default: treading-bot/exports)")
+    sp.add_argument("--keep", type=int, default=3, help="export files kept in that folder (default 3; 0 = all)")
+    sp.add_argument("--tag", help="a word for the file name, e.g. tokyo -> tb-tokyo-20261006-1612Z.tar")
+    sp.add_argument("--no-probe", action="store_true", help="skip timing the connection to the venues")
+    sp.add_argument("--force", action="store_true", help="export even if it leaves under 6 GB of free disk")
+    sp = add("import", cmd_import, "take in a file made by `bot export`: check it, merge the tape, unpack the rest")
+    sp.add_argument("path", nargs="?", help="the tb-*.tar file or its folder (default: the newest in "
+                                            "treading-bot/exports or ~/Downloads)")
     sp = add("secrets", cmd_secrets, "encrypted secrets store")
     sp.add_argument("action", choices=["init", "set", "list-redacted", "status", "import-env"])
     sp.add_argument("name", nargs="?")

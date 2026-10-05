@@ -145,7 +145,7 @@ or opening it again.
 ## 7. Telegram
 
 There is no arbitrage Telegram bot: the trading bot's **one** Telegram bot serves it (set up once, main
-[README](../README.md) section 9). Its commands start with `arb_`; `/arb status` with a space works too, and `/arb`
+[README](../README.md) section 2). Its commands start with `arb_`; `/arb status` with a space works too, and `/arb`
 shows the menu and which bot, paper or live, the commands act on. Every reply starts with **FUNDING ARB**, and
 the running executor's own alerts (entering, open, a stop moved, closed, a venue refusing, money to move between
 the venues) arrive in the same chat.
