@@ -1,4 +1,4 @@
-# 24/7 recorder + backtester for the server PC (see the repository README, section 11). Run these from bot/, the
+# 24/7 recorder + backtester for the server PC (see docs/REFERENCE.md, section 8). Run these from bot/, the
 # folder this file is in.
 #
 #   docker compose up -d --build                     the scout: record every Arcus perp, backtest every 30 min

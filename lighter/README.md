@@ -284,7 +284,7 @@ recorded day. It gets better as the recorder adds days.
 ## 9. Telegram
 
 There is no Lighter Telegram bot: the trading bot's **one** Telegram bot serves Lighter too (set up once, main
-[README](../README.md) section 9). A Lighter command is the Arcus command with `l_` in front; `/l status` with a
+[README](../README.md) section 2). A Lighter command is the Arcus command with `l_` in front; `/l status` with a
 space works too, and `/l` shows the Lighter menu. Every Lighter message starts with **LIGHTER**, and a command it
 mentions is written `/l_…`, so tapping it stays on Lighter: `/closeall` closes Arcus, `/l_closeall` closes Lighter.
 
@@ -357,7 +357,7 @@ cat ../lighter/data/recorder.json
 
 - **After a reboot** run `.venv/bin/bot up` again: it does not come back by itself.
 - **To stop it:** `.venv/bin/bot down`.
-- **Keep the Mac awake** (main README, 11.4 step 2): a sleeping machine records nothing and the gap cannot be
+- **Keep a Mac awake** ([reference](../bot/docs/REFERENCE.md), 8.4 step 2): a sleeping machine records nothing and the gap cannot be
   filled later.
 - **Disk:** about 0.1–0.3 GB a day for all markets.
 
@@ -376,25 +376,26 @@ live: a container cannot see a native bot's process.
 
 ### 10.3 Bring the tape back
 
-After a week or more, on the server, from `treading-bot/lighter` (the archive goes to your home folder; the recorder
-can keep running):
+One command packs it with everything else the bot recorded and traded, Arcus included (main
+[README](../README.md), section 9). On the server, from `treading-bot/bot` (the recorder keeps running):
 
 ```bash
-tar -czf ~/lighter-tape.tgz -C data tape markets.json
+.venv/bin/bot export
 ```
 
-Move `lighter-tape.tgz` to the machine that trades (AirDrop, USB, or `rsync -a server:treading-bot/lighter/data/tape/
-data/tape/` with SSH), then there, from `treading-bot/lighter`:
+Copy the file it names (`treading-bot/exports/tb-<date>-<time>Z.tar`) to the machine that trades, into
+`treading-bot/exports/` or `~/Downloads`, then there, from `treading-bot/bot`:
 
 ```bash
-tar -xzf ~/Downloads/lighter-tape.tgz -C data
+.venv/bin/bot import
 ```
 ```bash
-../bot/.venv/bin/lbot scout scan
+.venv/bin/bot lighter scout scan
 ```
 
-Every recorder start writes its own part files (`bbo-rec<number>-00001.npz`), and a day is joined, sorted and
-de-duplicated when it is read, so unpacking over the days already there loses nothing and doubles nothing.
+`bot import` merges the tape into `lighter/data/tape` and must end with `0 short`. Every recorder start writes its
+own part files (`bbo-rec<number>-00001.npz`), and a day is joined, sorted and de-duplicated when it is read, so
+nothing is lost or doubled. The next `bot export` sends only what is new.
 
 To trade Lighter live on the server itself, put the Lighter lines into `bot/.env` there (section 3) and use `/l_run`,
 `bot lighter run` or the pilot as on any machine. The pilot and the autopilot start runs as processes on the same

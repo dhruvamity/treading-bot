@@ -54,4 +54,6 @@ arb/OWNER_ACTIONS.md
 
 # ---- data copies and archives kept on this machine only --------------------------------------------------------
 arcus-export-*/
+exports/
+tb-*.tar
 *.tar.zst

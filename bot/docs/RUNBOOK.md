@@ -1,7 +1,12 @@
 # Runbook
 
-Operations for the VPS deployment (`/opt/bot`, systemd). Commands assume `cd /opt/bot` and
-`A=.venv/bin/bot`. Commands that touch mainnet ask you to type a confirmation.
+Operations for a machine that runs the bot. Commands assume `cd treading-bot/bot` and `A=.venv/bin/bot`. Commands
+that touch mainnet ask you to type a confirmation.
+
+**Two ways to run it.** The usual one is `bot up` (the [README](../../README.md), section 8): it starts both scouts,
+the Telegram bot and, with a live run, the guardian; runs are started from Telegram or `bot pilot`. The older one is
+the systemd units in `deploy/systemd/` (Arcus services only, the bot in `/opt/bot`). Where a step below says
+`systemctl`, the `bot up` way is `$A down`, `$A up`, and Telegram's `/stop` for a run.
 
 ## 1. Processes
 
@@ -102,8 +107,9 @@ Every automatic action goes to the decision log (JSON logs, `component=decision`
 - **Modify:** requotes go out as cancel + place. To use modifyOrder instead (one request per requote), run
   `$A selftest --allow-funded` first: it rests a tiny post-only order 3% below the market, modifies it and checks the
   book. Only if that passes, set `use_modify: true` in `config/venues/arcus.yaml` and restart.
-- **Backups:** `.env` (kept offline, never in git) and `state/live.sqlite`. The scout's recordings can be rebuilt only
-  by re-recording, so back up `data/scout/tape/` if disk allows.
+- **Backups:** `.env` (kept offline, never in git). Everything else in one file: `$A export` (the tape, the state
+  databases, the logs; the README, section 9). Run it weekly and copy the file off the server: the recordings
+  cannot be made again.
 
 ## 7. After a crash or reboot
 
@@ -200,6 +206,7 @@ Don't paste trailing `# comments` into zsh: by default it passes them to the com
   equity, but the container has no keys, so it uses the $100 paper capital (`sizing` in `config/app.yaml`).
 - Disk: about 0.2-0.5 GB/day with depth recording, about 0.1 GB/day without. Recording pauses by itself under 5 GB free;
   the container reports unhealthy when the recorder has not written for 15 minutes.
-- Bring results back with `rsync -a server:PATH/data/scout/ data/scout/` (tape, scans, reports).
+- Bring results back with `docker compose exec scout bot export --out data/exports`, then `bot import` at home
+  (docs/REFERENCE.md, 8.6).
 - Running the laptop scout at the same time is fine: each writes its own part files and the store de-duplicates.
-- What runs and why: the repository README, section 11.
+- What runs and why: docs/REFERENCE.md, section 8.
