@@ -46,7 +46,7 @@ async def main() -> None:
     await signer.close()
     await client.close()
     if err:
-        raise SystemExit(f"registered, but Lighter does not show it yet: {err}. Try `lbot doctor` in a minute.")
+        raise SystemExit(f"registered, but Lighter does not show it yet: {err}. Try `lighter doctor` in a minute.")
     print("\nDone. Put these in lighter/.env (chmod 600):\n")
     print(f"LIGHTER_ADDRESS={addr}")
     print(f"LIGHTER_API_PRIVATE_KEY={priv}")

@@ -12,7 +12,7 @@ dirs: {data: data, state: state, logs: logs}
 requests:
   per_min: 60
   quotes_per_min: 54              # requotes (one batch per requote: both sides in one request). Fresher quotes
-                                  # cost less (docs/RESEARCH.md): the budget, not the fee, is Lighter's constraint
+                                  # cost less: the budget, not the fee, is Lighter's constraint
   reserve_per_min: 6              # exits, the dead man's switch (1 a minute), reconciles (1 every 5 minutes)
 loop_ms: 500                      # the bot decides twice a second (the budget caps how often it actually requotes)
 
@@ -23,7 +23,7 @@ latency:
   taker_ms: 300
   network_ms: 80
 
-sizing:                           # every dollar figure is a share of the capital (lbot/sizing.py)
+sizing:                           # every dollar figure is a share of the capital (lighter_bot/trade/sizing.py)
   capital_usd: auto               # auto: the account's equity; or a fixed amount
   paper_capital_usd: 100          # auto with no account (paper, the scout)
   capital_frac: 1.0

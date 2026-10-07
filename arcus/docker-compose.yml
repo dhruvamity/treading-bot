@@ -1,0 +1,30 @@
+# 24/7 recorder + backtester for the server PC (see README.md, "Run it on a server"). Run these from arcus/, the
+# folder this file is in.
+#
+#   docker compose up -d --build                     the scout: record every Arcus perp, backtest every 30 min
+#   SCOUT_CAPITAL=500 docker compose up -d --build   rank for a $500 account (default auto: no keys here, so $100)
+#   docker compose ps                                running and healthy?
+#   docker compose logs -f scout                     what it is doing
+#   cat data/scout/report.txt                        the latest ranking (best per market, and each at max leverage)
+#   ls data/scout/reports/                           the last ranking of each UTC day
+#   docker compose down                              stop (a scan in progress stops at once, buffers are written out)
+#
+# Needs no keys and places no orders. Disk: about 0.2-0.5 GB/day for the scout with depth recording (the default
+# here; drop "--depth" for about 0.1 GB/day).
+# Recording pauses by itself under 5 GB free.
+services:
+  scout:
+    build: .
+    image: arcus-scout
+    container_name: arcus-scout
+    restart: unless-stopped
+    command: ["scout", "run", "--depth", "--workers", "${SCOUT_WORKERS:-auto}", "--capital", "${SCOUT_CAPITAL:-auto}"]
+    volumes:
+      - ./data:/app/data
+      - ./state:/app/state
+      - ./logs:/app/logs
+    stop_grace_period: 2m          # the recorder writes out its buffers (a scan in progress stops at once)
+    logging:
+      driver: json-file
+      options: {max-size: "20m", max-file: "5"}
+

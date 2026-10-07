@@ -1,0 +1,53 @@
+"""Mid (Tread.fi's Mid): 1-3 levels per side at r +/- (anchor + i x level step), skewed around the reservation price.
+
+The pilot's setups use the passive anchor with passive_k_sigma 0, so a quote sits exactly `spacing_bps` from the mid:
+Mid 0 joins the best bid and ask on a one-tick book, Mid +1 quotes 1 bp away, and a negative spread (Mid -1) goes
+inside the mid as far as a post-only order can (one tick from the other side). Off-hours on an Arcus RWA perp Mid only
+quotes with off_hours.allow_mid (pilot sessions set it: the backtests quote at all hours).
+"""
+
+from __future__ import annotations
+
+from arcus.strategies import quoting as qt
+from arcus.strategies.base import StrategyContext, StrategyOutput
+from arcus.strategies.mm_base import MMBase
+
+
+class MidStrategy(MMBase):
+    name = "mid"
+
+    def half_spread(self, ctx: StrategyContext, mid: float) -> float:
+        if isinstance(self.p.spacing_bps, int | float):
+            return float(self.p.spacing_bps) * qt.BP
+        return max(2 * self.tick_frac(ctx, mid), ctx.view.vol_1m.sigma())
+
+    def on_tick(self, ctx: StrategyContext) -> StrategyOutput:
+        if ctx.off_hours and not self.p.off_hours.allow_mid:
+            return self.exit_book(ctx, "Mid disabled off-hours on Arcus RWA")
+        why = self.blocked(ctx)
+        if why:
+            return self.exit_book(ctx, why)
+        mid, bbo = self.mid(ctx), self.bbo(ctx)
+        if mid is None or bbo is None:
+            return self.exit_book(ctx, "no book")
+        bb, ba = bbo
+        tick = float(ctx.market.tick_size)
+        h = self.half_spread(ctx, mid) * self.participation(ctx)
+        u = self.u(ctx, mid)
+        r = qt.reservation(mid, u, h, self.p.skew_kappa)
+        bid0, ask0 = qt.anchors(self.p.execution_style, r=r, mid=mid, h=h, best_bid=bb, best_ask=ba, tick=tick,
+                                sigma_1m=ctx.view.vol_1m.sigma(), k_passive=self.p.passive_k_sigma,
+                                offset_bps=self.p.offset_bps)
+        bid0, ask0 = qt.post_only_guard(bid0, ask0, bb, ba, tick)
+        n = 1 if self.p.levels_per_side == "auto" else max(1, min(3, int(self.p.levels_per_side)))
+        step = self.p.level_step_bps * qt.BP * mid
+        levels = [(bid0 - i * step, ask0 + i * step, str(i)) for i in range(n)]
+        q_base = qt.base_for_usd(self.q_usd(ctx, mid, n), mid, ctx.market)
+        caps = self.caps(ctx, mid, q_base)
+        orders = self.two_sided(ctx, levels=levels, q_base=q_base, u=u, cap_buys=caps[0],
+                                cap_sells=caps[1])
+        out = StrategyOutput(reason=f"mid {self.p.execution_style} h={h / qt.BP:.1f}bp u={u:+.2f} n={n}",
+                             half_spread_ticks=h * mid / tick)
+        out.set(ctx.venue, ctx.market.base, orders)
+        out.metrics = {"h_bps": h / qt.BP, "u": u, "r": r}
+        return out

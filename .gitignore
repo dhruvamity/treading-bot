@@ -1,3 +1,14 @@
+# The repository is exactly this: three bots, one README, one Makefile and the CI. Anything else at the top level
+# (your research folders, downloaded docs, archives, exports) is yours and is never committed.
+/*
+!/.gitignore
+!/.github/
+!/README.md
+!/Makefile
+!/arcus/
+!/lighter/
+!/arbitrage/
+
 # ---- credentials: never commit ---------------------------------------------------------------------------------
 .env
 .env.*
@@ -7,25 +18,36 @@
 *.key
 *.p12
 
-# ---- personal notes and account state: kept on this machine only ----------------------------------------------
-# (finances, key names, account status, region, local paths)
-bot/CONTEXT.md
-bot/OWNER_ACTIONS.md
-bot/handoffs/
-.claude/
-
-# ---- recorded market data, run state, logs: large or machine-specific ----------------------------------------
-raw/
-bot/data/
-bot/state/
-bot/logs/
-bot/reports/
-bot/config/sessions/pilot.yaml
-bot/config/*.tmp
+# ---- what a bot writes while it runs: recorded data, state, logs, your settings and notes -------------------------
+/arcus/data/
+/arcus/state/
+/arcus/logs/
+/arcus/reports/
+/arcus/handoffs/
+/arcus/CONTEXT.md
+/arcus/OWNER_ACTIONS.md
+/arcus/config/sessions/pilot.yaml
+/arcus/config/*.tmp
+/lighter/data/
+/lighter/state/
+/lighter/logs/
+/lighter/reports/
+/lighter/config/sessions/
+/lighter/OWNER_ACTIONS.md
+/arbitrage/data/
+/arbitrage/state/
+/arbitrage/settings.json
+/arbitrage/OWNER_ACTIONS.md
 *.sqlite
 *.sqlite-*
+*.npz
+*.parquet
+*.pkl
+*.pid
 *.tgz
+*.tar
 *.tar.gz
+*.tar.zst
 
 # ---- Python and tooling -------------------------------------------------------------------------------------
 .venv/
@@ -37,23 +59,4 @@ __pycache__/
 .hypothesis/
 .coverage
 .DS_Store
-
-# ---- the Lighter bot (lighter/): the same rules ----------------------------------------------------------------
-lighter/data/
-lighter/state/
-lighter/logs/
-lighter/reports/
-lighter/config/sessions/
-lighter/OWNER_ACTIONS.md
-
-# ---- the funding arbitrage scanner (arb/): the same rules ------------------------------------------------------
-arb/state/
-arb/data/
-arb/settings.json
-arb/OWNER_ACTIONS.md
-
-# ---- data copies and archives kept on this machine only --------------------------------------------------------
-arcus-export-*/
-exports/
-tb-*.tar
-*.tar.zst
+.claude/

@@ -1,7 +1,7 @@
 import pytest
 
-from lbot import settings
-from lbot.scout.scan import Scanner, checks, menu
+from lighter_bot import settings
+from lighter_bot.scout.scan import Scanner, checks, menu
 
 
 def row(market, setup, vol, cost, days=1, why=()):
@@ -46,13 +46,13 @@ def test_settings_validate(cfg):
 
 
 def test_pilot_refuses_without_a_scan(cfg):
-    from lbot.scout import pilot
+    from lighter_bot.scout import pilot
     with pytest.raises(ValueError):
         pilot.pick(cfg, "most", 1)
 
 
 def test_ops_never_spawns_under_tests(cfg):
-    from lbot import ops
+    from lighter_bot import ops
     with pytest.raises(RuntimeError):
         ops.start(cfg, "scout", ["scout", "run"])
 
@@ -63,7 +63,7 @@ def test_a_finished_run_is_not_running_even_before_it_is_reaped(cfg):
     import sys
     import time
 
-    from lbot import ops
+    from lighter_bot import ops
     p = subprocess.Popen([sys.executable, "-c", "pass"])
     end = time.time() + 10
     while time.time() < end and subprocess.run(["ps", "-o", "stat=", "-p", str(p.pid)], capture_output=True,

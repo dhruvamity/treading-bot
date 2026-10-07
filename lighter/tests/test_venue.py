@@ -2,11 +2,11 @@ import time
 
 import pytest
 
-from lbot.venue import consts as C
-from lbot.venue.book import Book
-from lbot.venue.market import Market, parse_markets
-from lbot.venue.nonce import ClientIds, Nonces
-from lbot.venue.rest import QUOTE, READ, RESERVE, Budget
+from lighter_bot.venue import consts as C
+from lighter_bot.venue.book import Book
+from lighter_bot.venue.market import Market, parse_markets
+from lighter_bot.venue.nonce import ClientIds, Nonces
+from lighter_bot.venue.rest import QUOTE, READ, RESERVE, Budget
 
 BTC = {"symbol": "BTC", "market_id": 1, "market_type": "perp", "status": "active", "taker_fee": "0.0000",
        "maker_fee": "0.0000", "min_base_amount": "0.00020", "min_quote_amount": "10.000000",
@@ -43,7 +43,7 @@ async def test_a_book_gap_resubscribes_once_until_the_snapshot():
     not one per update; a snapshot that never comes is asked for again after RESYNC_RETRY_S."""
     import asyncio
 
-    from lbot.trade import feed as feed_mod
+    from lighter_bot.trade import feed as feed_mod
     m = Market(market_id=1, symbol="BTC", price_decimals=1, size_decimals=5, min_base=0.0002, min_quote=10.0,
                imf_min=200, imf_default=5000, mmf=120)
     f = feed_mod.MarketFeed("wss://offline.invalid/stream", m)
@@ -87,7 +87,7 @@ def test_nonces_and_client_ids_rise_and_survive_a_restart(tmp_path):
 
 def test_budget_keeps_room_for_exits():
     t = [0.0]
-    from lbot.config import Requests
+    from lighter_bot.config import Requests
     b = Budget(Requests(per_min=10, quotes_per_min=6, reserve_per_min=4), clock=lambda: t[0])
     assert sum(b.take(QUOTE) for _ in range(10)) == 6
     assert b.take(READ) is False                  # reads never use the reserve
@@ -97,7 +97,7 @@ def test_budget_keeps_room_for_exits():
 
 
 def test_signer_signs_offline():
-    from lbot.venue import signer
+    from lighter_bot.venue import signer
     priv, _ = signer.generate_key()
     s = signer.Signer("https://example.invalid", priv, 466324, 4, 7)
     tx = s.create_order(market=1, client_index=123, size=100, price=840000, is_ask=True, order_type=C.ORDER_LIMIT,

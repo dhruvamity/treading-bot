@@ -3,9 +3,9 @@
 import numpy as np
 import pytest
 
-from lbot.scout.sim import MarketRules, Sim, SimCfg, Window
-from lbot.scout.tape import DayTape, Tape, empty
-from lbot.trade.sizing import Stops, sizes
+from lighter_bot.scout.sim import MarketRules, Sim, SimCfg, Window
+from lighter_bot.scout.tape import DayTape, Tape, empty
+from lighter_bot.trade.sizing import Stops, sizes
 
 US = 1_000_000
 T0 = 20_000 * 86_400 * US          # a UTC midnight
@@ -31,7 +31,7 @@ def flat_book(seconds=600, bid=100.0, ask=100.02, sz=5.0):
 
 
 def run(t, setup="mid 0", cfg=None, capital=100.0, lev=10.0):
-    from lbot.trade.strategy import parse
+    from lighter_bot.trade.strategy import parse
     s = parse(setup)
     w = Window(t, T0, T0 + 600 * US, cfg or SimCfg(warmup_s=0))
     return Sim(s.params(), sizes(capital, lev, Stops(50, 90, 99)), MR, cfg or SimCfg(warmup_s=0), s.name).run(w)

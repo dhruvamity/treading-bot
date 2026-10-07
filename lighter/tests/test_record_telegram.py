@@ -1,7 +1,7 @@
 import asyncio
 
-from lbot.scout.record import trade_row
-from lbot.telegram.bot import Bot
+from lighter_bot.scout.record import trade_row
+from lighter_bot.telegram.bot import Bot
 
 
 def test_trade_row_sides():
@@ -29,7 +29,7 @@ class FakeApi:
 def test_run_line_opens_the_form(cfg):
     import json
 
-    from lbot.venue.market import Market
+    from lighter_bot.venue.market import Market
     m = Market(1, "BTC", 1, 5, 0.0002, 10.0, 200, 5000, 120, last_price=84000.0, day_volume_usd=1e7)
     (cfg.data_dir / "markets.json").write_text(json.dumps({"BTC": m.as_dict()}))
     api = FakeApi()
@@ -47,7 +47,7 @@ class WireApi:
     """What would go to Telegram, after the panel's relabelling."""
 
     def __init__(self):
-        from lbot.telegram.embed import PanelApi
+        from lighter_bot.telegram.embed import PanelApi
         self.sent = []
         outer = self
 
@@ -62,7 +62,7 @@ class WireApi:
 
 
 def test_the_panel_says_lighter_and_its_commands_and_buttons_come_back_to_it(cfg):
-    from lbot.telegram.embed import Panel, relabel, reroute
+    from lighter_bot.telegram.embed import Panel, relabel, reroute
 
     assert relabel("📊 <b>Status</b>\n\n<code>/status · /closeall</code> bid/ask lighter/.env") == \
         "<b>LIGHTER</b> · 📊 <b>Status</b>\n\n<code>/l_status · /l_closeall</code> bid/ask lighter/.env"
@@ -88,7 +88,7 @@ def test_the_panel_says_lighter_and_its_commands_and_buttons_come_back_to_it(cfg
 
 
 def test_a_read_only_bot_answers_lighter_questions_and_refuses_its_controls(cfg):
-    from lbot.telegram.embed import Panel
+    from lighter_bot.telegram.embed import Panel
 
     w = WireApi()
     p = Panel(cfg, "token", 55, api=w.api)
@@ -103,13 +103,13 @@ def test_a_read_only_bot_answers_lighter_questions_and_refuses_its_controls(cfg)
 
 
 def test_the_credentials_come_from_the_bots_one_env_file_and_a_lighter_file_wins(tmp_path, monkeypatch):
-    from lbot.config import load_env
+    from lighter_bot.config import load_env
 
     for k in ("LIGHTER_ADDRESS", "LBOT_LIVE", "TELEGRAM_BOT_TOKEN", "TELEGRAM_CHAT_ID", "LIGHTER_ACCOUNT_INDEX"):
         monkeypatch.delenv(k, raising=False)
-    (tmp_path / "bot").mkdir()
+    (tmp_path / "arcus").mkdir()
     (tmp_path / "lighter").mkdir()
-    (tmp_path / "bot" / ".env").write_text("ARCUS_API_PRIVATE_KEY=never-read-here\nLIGHTER_ADDRESS=0xone\n"
+    (tmp_path / "arcus" / ".env").write_text("ARCUS_API_PRIVATE_KEY=never-read-here\nLIGHTER_ADDRESS=0xone\n"
                                            "LBOT_LIVE=1\nTELEGRAM_BOT_TOKEN=t\nTELEGRAM_CHAT_ID=5\n")
     e = load_env(tmp_path / "lighter" / ".env")
     e.pop("LBOT_NO_SPAWN", None)                                           # the tests' own guard, from the environment
