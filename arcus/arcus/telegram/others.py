@@ -15,6 +15,7 @@ rest of the bot is not affected.
 
 from __future__ import annotations
 
+from collections.abc import Callable
 from html import escape
 from typing import Any
 
@@ -41,8 +42,9 @@ def part_of(cmd: str) -> tuple[str, str] | None:
 class Lighter:
     """The Lighter panel (lighter_bot/telegram/embed.py), loaded the first time it is needed."""
 
-    def __init__(self, token: str, chat: int, users: set[int]) -> None:
+    def __init__(self, token: str, chat: int, users: set[int], home_if: Callable[[], bool] | None = None) -> None:
         self.token, self.chat, self.users = token, chat, users
+        self.home_if = home_if      # True while the menu layout is on: the panel's screens get a ☰ Home button
         self.panel: Any = None
         self.why = ""
 
@@ -53,6 +55,7 @@ class Lighter:
                 from lighter_bot.telegram.embed import Panel
 
                 self.panel = Panel(load(), self.token, self.chat, self.users)
+                self.panel.api.home_if = self.home_if
                 self.why = ""
             except Exception as e:   # not installed, or its config does not load: this bot keeps working
                 self.why = f"{type(e).__name__}: {e}"
@@ -115,6 +118,13 @@ def arb_menu(mode: str, running: dict[str, int | None], live_allowed: bool) -> s
                    "/arb_close · /arb_closenow",
                    "/arb_start 120 120 (paper) · /arb_start live · /arb_stop")),
         codes("Add paper or live to pick one: /arb_status live"))
+
+
+def arb_home(mode: str, running: dict[str, int | None], live_allowed: bool) -> str:
+    """The menu layout's Home card for the funding arbitrage: is it running, and which bot the buttons act on."""
+    state = [f"{m.upper()}: {'running' if running.get(m) else 'not running'}" for m in ("paper", "live")]
+    return card("⚖️", "FUNDING ARB · Home",
+                codes(*state, f"Buttons act on: {mode.upper()}", "" if live_allowed else "LIVE off (ARB_LIVE=1 allows it)"))
 
 
 def arb_keyboard() -> list[list[tuple[str, str]]]:

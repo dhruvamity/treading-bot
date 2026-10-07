@@ -119,3 +119,18 @@ def test_the_credentials_come_from_the_bots_one_env_file_and_a_lighter_file_wins
     assert e["LIGHTER_ADDRESS"] == "0xtwo" and e["LBOT_LIVE"] == "1"      # an empty line there changes nothing
     monkeypatch.setenv("LIGHTER_ADDRESS", "0xenv")
     assert load_env(tmp_path / "lighter" / ".env")["LIGHTER_ADDRESS"] == "0xenv"
+
+
+def test_the_menu_layout_adds_a_home_button_except_under_a_dashboard_or_a_confirm_card():
+    from lighter_bot.telegram.embed import reroute
+
+    def kb(*data):
+        return {"inline_keyboard": [[{"text": d, "callback_data": d} for d in data]]}
+
+    plain = reroute(kb("status"), home=True)["inline_keyboard"]
+    assert plain[-1] == [{"text": "☰ Home", "callback_data": "home"}]            # the host's button, not behind `l `
+    assert plain[0][0]["callback_data"] == "l status"
+    assert reroute(kb("status"))["inline_keyboard"] == plain[:-1]                 # off by default
+    assert len(reroute(kb("dash:stop"), home=True)["inline_keyboard"]) == 1       # a live dashboard keeps its buttons
+    assert len(reroute(kb("ok:abc", "nop"), home=True)["inline_keyboard"]) == 1   # and a confirm card its two
+    assert reroute(None, home=True) is None

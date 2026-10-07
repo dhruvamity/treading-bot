@@ -312,6 +312,15 @@ change up at its next scan, the running bot at its next re-size. Switching live 
 | `scan_workers` | `auto` or 1–32 | CPU cores a scan may use |
 | `scan_budget` | 5–240 (minutes) | Most time one scan spends backtesting full days (default 30); the rest continues in the next |
 | `volume_cost` | $0.01–$5 per $1,000 | The most the Most Volume and Cheapest lists may cost (default $0.20 = 2 bp) |
+| `telegram_ui` | `classic` or `menu` | The Telegram layout (below). Default `classic` |
+
+**The menu layout.** `/set telegram_ui menu` (Confirm button) swaps the 20-button menu for **Home**: a card with what the venue is doing
+and six buttons, `📊 Live` · `🚀 Start a run` · `🛑 Control` · `💰 Money` · `⚙️ Settings` · `🔀 Venue: Arcus`. The venue button cycles Arcus →
+Lighter → Funding arb, and the five others then act on that venue (the button names it). Stop, cancel and close buttons exist only on
+**Control**, each behind the same confirm card or typed code as before. Every screen under Home ends with `☰ Home` (and `◀️ Back` to
+its group); free text shows Home instead of "Send a Command". Typed commands do not follow the venue button: `/closeall` is still
+Arcus and `/l_closeall` Lighter. `/home` previews it without switching; `/set telegram_ui default` or `🧭 Classic menu` under Settings
+goes back. Nothing in trading changes: the buttons send the commands the classic menu sends (`arcus/telegram/menu.py`).
 
 **Alerts it sends by itself** (critical ones ignore `/mute`; `/alerts`, `/mute [min]`, `/unmute`): the bot went down or came back; safe
 mode, a drawdown stop or a daily stop appeared or cleared; day PnL at half, then all, of the daily limit; fills (each, an hourly

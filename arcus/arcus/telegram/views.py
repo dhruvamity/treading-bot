@@ -322,7 +322,7 @@ COMMANDS: list[tuple[str, str]] = [
     ("set", "/set name value"), ("scannow", "Scan now"),
     ("l", "Lighter: the same commands as /l_status, /l_run ..."),
     ("arb", "Funding arbitrage: /arb_status, /arb_scan ..."),
-    ("menu", "Buttons"), ("help", "All commands"),
+    ("menu", "Buttons"), ("home", "Home: six buttons and a venue switch"), ("help", "All commands"),
 ]
 
 

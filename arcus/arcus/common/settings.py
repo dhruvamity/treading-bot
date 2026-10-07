@@ -25,7 +25,7 @@ CRYPTO = ("BTC-USD", "ETH-USD")   # the markets /set crypto_lev caps
 @dataclass(frozen=True)
 class Setting:
     name: str
-    kind: str          # money_auto | money_none | pct | pct_auto | minutes | workers | per1k | lev
+    kind: str          # money_auto | money_none | pct | pct_auto | minutes | workers | per1k | lev | choice
     lo: float
     hi: float
     help: str
@@ -61,7 +61,11 @@ SETTINGS: dict[str, Setting] = {s.name: s for s in (
     Setting("crypto_lev", "lev", 1, 50,
             "Highest leverage the scan tests on BTC and ETH: max = what Arcus allows (BTC 40x, ETH 25x), or a number "
             "such as 20", "next scan (it backtests the new leverage on every recorded day)"),
+    Setting("telegram_ui", "choice", 0, 0,
+            "Telegram layout: classic = the long menu, menu = Home with six buttons and a venue switch",
+            "your next message"),
 )}
+UI_CHOICES = ("classic", "menu")
 
 
 def path(state_dir: Path | str) -> Path:
@@ -88,6 +92,10 @@ def parse(name: str, text: str) -> Any:
         return None
     if s.kind == "workers" and t == "auto":
         return "auto"
+    if s.kind == "choice":
+        if t not in UI_CHOICES:
+            raise ValueError(f"{name} must be one of: {', '.join(UI_CHOICES)}")
+        return t
     if s.kind == "lev":
         if t == "max":
             return "max"
@@ -199,4 +207,4 @@ def defaults(base: SizingDefaults, every_min: float, workers: int | str | None) 
             "daily_stop": base.daily_stop_pct, "kill": base.kill_pct,
             "scan_every": every_min, "scan_workers": workers or "auto", "scan_budget": DEFAULT_SCAN_BUDGET_MIN,
             "volume_cost": DEFAULT_VOLUME_COST,
-            "crypto_lev": "max"}
+            "crypto_lev": "max", "telegram_ui": "classic"}
