@@ -222,9 +222,9 @@ def lower_priority() -> None:
     even when the machine is idle (a scan job took 5x as long on an idle Mac, and hours on the server Mac)."""
     with contextlib.suppress(OSError, AttributeError):
         os.nice(19)
-    if sys.platform != "darwin" and hasattr(os, "SCHED_IDLE"):
+    if sys.platform != "darwin" and hasattr(os, "SCHED_IDLE"):     # Linux only; getattr keeps mypy quiet on both
         with contextlib.suppress(OSError, AttributeError):
-            os.sched_setscheduler(0, os.SCHED_IDLE, os.sched_param(0))  # type: ignore[attr-defined]
+            getattr(os, "sched_setscheduler")(0, getattr(os, "SCHED_IDLE"), getattr(os, "sched_param")(0))  # noqa: B009
 
 
 class ScanStopped(Exception):
