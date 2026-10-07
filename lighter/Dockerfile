@@ -3,9 +3,9 @@ FROM python:3.12-slim
 WORKDIR /app
 ENV PYTHONUNBUFFERED=1 LBOT_ROOT=/app
 COPY pyproject.toml README.md ./
-COPY lbot ./lbot
+COPY lighter_bot ./lighter_bot
 COPY config ./config
 RUN pip install --no-cache-dir .
 HEALTHCHECK --interval=5m --timeout=10s --start-period=10m \
   CMD python -c "import json,time,sys; d=json.load(open('/app/data/recorder.json')); sys.exit(0 if time.time()-d['t']<900 else 1)"
-CMD ["lbot", "scout", "run"]
+CMD ["lighter", "scout", "run"]

@@ -1,6 +1,6 @@
 import pytest
 
-from lbot.trade.strategy import BUY, SELL, Params, Quoter, Rules, Setup, View, from_sid, parse
+from lighter_bot.trade.strategy import BUY, SELL, Params, Quoter, Rules, Setup, View, from_sid, parse
 
 
 def rules(order=1000.0, cap=2000.0, tick=0.1, step=0.0001, min_usd=10.0):

@@ -5,13 +5,13 @@ import time
 
 import pytest
 
-from lbot.trade.exchange import Change
-from lbot.trade.live import LiveExchange
-from lbot.trade.strategy import BUY, SELL, Quote
-from lbot.venue import consts as C
-from lbot.venue import signer
-from lbot.venue.market import Market
-from lbot.venue.nonce import ClientIds, Nonces
+from lighter_bot.trade.exchange import Change
+from lighter_bot.trade.live import LiveExchange
+from lighter_bot.trade.strategy import BUY, SELL, Quote
+from lighter_bot.venue import consts as C
+from lighter_bot.venue import signer
+from lighter_bot.venue.market import Market
+from lighter_bot.venue.nonce import ClientIds, Nonces
 
 M = Market(market_id=1, symbol="BTC", price_decimals=1, size_decimals=5, min_base=0.0002, min_quote=10.0,
            imf_min=200, imf_default=5000, mmf=120)

@@ -1,0 +1,856 @@
+"""Backtest the setups (arcus/strategies/setup.py: Mid and Grid, every spread, each Neutral, Long and Short) on every
+recorded market and rank what to run now.
+
+Every setup runs on every market, one UTC day at a time (each day starts flat, with 2 h of warm-up), at the capital
+the bot trades with (the account's equity, bucketed; arcus/common/sizing.py) and its stops as % of that capital.
+Completed days are cached per capital bucket; the current day is re-run on each scan.
+
+Leverage: each market is tested at its maximum Arcus leverage (1 / initialMarginFraction; /set crypto_lev can cap
+BTC and ETH) only; `--ladder` adds 20x, 10x, 5x and 2x below it (5x the work: the owner runs any leverage anyway).
+The leverage sets the size (sim.Risk.for_capital): position up to capital x leverage, orders of half the inventory
+cap. RWA perps use their off-hours maximum outside the underlying's session.
+Two limits: a leverage whose off-hours order would fall under 1.2x the Arcus minimum order needs more capital and is
+skipped; and one order never exceeds the market's liquidity ceiling (the 99th percentile of taker-order notional over
+the recorded days), past which the sizes stop growing and the stops apply to the capital actually used.
+
+A candidate is GO only when all three checks pass (percentages are of the capital the sizes use):
+- long window (up to the last 7 full days): average PnL/day >= -0.25% (close to breakeven or better), at most one
+  daily stop, never the kill, at least half the days not negative, at least 5 fills a day, and at least 3 full
+  recorded days (one or two days of a market say little; it also covers new listings, whose first week trades
+  unusually); a market's first recorded day counts only if it covers 20 h;
+- short window (the last 24 h, re-run each scan): PnL >= -0.25%, and still at least 30% of its usual fills (the flow is
+  still there), with the last 6 h not worse than -0.50%;
+- market now (last 60 minutes of 1-min mids): not trending (efficiency ratio < 0.5), volatility not above 2x its
+  usual level, spread not above 2x its usual level, and data fresh (< 5 minutes old).
+GO candidates rank by maker volume per day, then PnL (the scan's own `top`). The owner's lists (arcus/scout/profiles.py)
+drop the money checks and judge each setup by its cost per $1,000 traded instead; the pilot offers their top 3.
+"""
+
+from __future__ import annotations
+
+import contextlib
+import datetime as dt
+import hashlib
+import json
+import math
+import os
+import sys
+import threading
+import time
+import warnings
+from collections.abc import Iterator
+from concurrent.futures import FIRST_COMPLETED, Future, ProcessPoolExecutor, wait
+from dataclasses import asdict, dataclass, field
+from pathlib import Path
+from typing import Any
+from zoneinfo import ZoneInfo
+
+import numpy as np
+
+from arcus.common.sizing import Pct, bucket, loop_ms, min_capital, venue_min_usd
+from arcus.scout.sim import Config, MarketInfo, Risk, S, Sim, SimParams, Window
+from arcus.scout.tape import US_DAY, TapeStore, day_start_us, day_str
+from arcus.strategies import setup as su
+
+SIM_VERSION = "10"         # bump when the simulator changes, so cached day results are recomputed (9: Mid/Grid
+                           # setups; 10: the position stop may follow the market)
+ALIVE_MARKET = "BTC-USD"   # busiest book: its rows show when the recorder was up
+LADDER = (20.0, 10.0, 5.0, 2.0)                 # tested below each market's maximum
+HOLIDAYS_CSV = Path(__file__).resolve().parents[2] / "config" / "calendars" / "nyse_holidays.csv"
+
+
+def config_of(s: su.Setup) -> Config:
+    """A setup's backtest config, with the defaults the research picked:
+    Mid (and Smart) runs without the safety pause (the same cost per dollar with 13-66% more volume) and, for a positive
+    spread, skews its reservation price with the position; Grid keeps the safety pause (cheaper on 6 of 10 markets) and a
+    0.5% soft reset. One order per side."""
+    if s.mode in ("mid", "smart"):   # Smart: Mid's config; the mode picks the rule that leaves sides out
+        return Config(s.name, s.mode, style="passive", spacing_bps=s.spread, kappa=1.0 if s.spread > 0 else 0.0,
+                      bias=s.sign, bias_frac=su.BIAS_FRAC, safety=False)
+    return Config(s.name, "grid", spacing_bps=s.spread, reset_pct=su.GRID_RESET_PCT, bias=s.sign,
+                  bias_frac=su.BIAS_FRAC, safety=True)
+
+
+MENU: list[Config] = [config_of(s) for s in su.menu()]
+BY_NAME = {c.name: c for c in MENU}
+
+
+def config_for(name: str) -> Config:
+    """A menu setting by name, or any other setup the owner types (a spread the scout does not backtest, an old name
+    such as "touch 0bp"). Raises ValueError for anything else."""
+    c = BY_NAME.get(name)
+    return c if c is not None else config_of(su.parse(name))
+
+# GO thresholds (see module docstring; the PnL ones are % of capital, in sizing.Pct)
+MIN_FULL_DAYS = 3
+MAX_DAY_STOPS = 1
+MIN_FILLS_DAY = 5
+MIN_FLOW_FRAC = 0.30
+MAX_ER = 0.5
+MAX_VOL_X = 2.0
+MAX_SPREAD_X = 2.0
+MAX_AGE_S = 300
+
+
+def load_markets(path: Path) -> dict[str, MarketInfo]:
+    """The ONLINE markets' trading parameters. A listing with a field missing or not yet set is skipped (and so not
+    scanned) rather than failing the whole scan."""
+    data = json.loads(path.read_text())
+    out = {}
+    for m in data.get("markets", data):
+        if m.get("status") != "ONLINE":
+            continue
+        try:
+            out[m["marketDisplayName"]] = MarketInfo(float(m["tickSize"]), float(m["stepSize"]),
+                                                     float(m.get("minOrderNotional") or 5),
+                                                     float(m.get("minOrderSize") or m["stepSize"]),
+                                                     mmf=float(m.get("maintenanceMarginFraction") or 0))
+        except (KeyError, TypeError, ValueError):
+            continue
+    return out
+
+
+def max_leverage(m: dict[str, Any], caps: dict[str, float] | None = None) -> tuple[float, float]:
+    """(in-session, off-hours) maximum leverage for one market, after the owner's caps (/set crypto_lev)."""
+    imf = float(m.get("initialMarginFraction") or 0.2)
+    off = float(m.get("offHoursInitialMarginFraction") or imf)
+    lev = min(1 / imf, (caps or {}).get(m["marketDisplayName"], math.inf))
+    return round(lev, 2), round(min(1 / off, lev), 2)
+
+
+def leverages(m: dict[str, Any], caps: dict[str, float] | None = None) -> list[tuple[float, float]]:
+    """The maximum first, then the ladder below it."""
+    lev, off = max_leverage(m, caps)
+    return [(lev, off)] + [(x, min(x, off)) for x in LADDER if x < lev - 1e-9]
+
+
+def load_holidays(path: Path | None = None, *, full_only: bool = False) -> list[str]:
+    """NYSE holidays (no session that day). The project's config/ from the working directory, else the package's.
+    full_only: leave out the early-close days (they still have a session: the skip windows apply)."""
+    for p in ([path] if path else [Path("config/calendars/nyse_holidays.csv"), HOLIDAYS_CSV]):
+        try:
+            rows = [ln.split(",") for ln in p.read_text().splitlines()[1:] if ln.strip()]
+        except OSError:
+            continue
+        return [r[0] for r in rows if not (full_only and len(r) > 2 and r[2].strip())]
+    return []
+
+
+def session_mask(spec: dict[str, Any] | None, holidays: list[str]) -> Any:
+    """For an Arcus `regularTradingHours` spec: a function (µs timestamps) -> True while the underlying's session is
+    open (weekdays, not a holiday). None for 24/7 markets."""
+    if not spec:
+        return None
+    tz = ZoneInfo(spec.get("timezone") or "America/New_York")
+    a, b = int(spec["startSecondsOfDay"]), int(spec["endSecondsOfDay"])
+    overnight = bool(spec.get("isOvernight")) or b <= a
+    hol = set(holidays)
+
+    def at(d: dt.date, sec: int) -> int:
+        d = d + dt.timedelta(days=sec // 86400)
+        sec %= 86400
+        return int(dt.datetime(d.year, d.month, d.day, sec // 3600, sec % 3600 // 60, sec % 60, tzinfo=tz)
+                   .timestamp()) * 1_000_000
+
+    def mask(t: np.ndarray) -> np.ndarray:
+        out = np.zeros(len(t), bool)
+        if not len(t):
+            return out
+        d = dt.datetime.fromtimestamp(int(t[0]) / 1e6, tz).date() - dt.timedelta(days=1)
+        last = dt.datetime.fromtimestamp(int(t[-1]) / 1e6, tz).date()
+        while d <= last:
+            if d.weekday() < 5 and d.isoformat() not in hol:
+                out |= (t >= at(d, a)) & (t < at(d, b + (86400 if overnight else 0)))
+            d += dt.timedelta(days=1)
+        return out
+    return mask
+
+
+INFO_KEYS = ("min_capital_usd", "liq_ceiling_usd")   # risk fields the simulation does not read
+
+
+def risk_key(r: dict[str, Any]) -> str:
+    """Cache key of a sizing: only the fields that change a backtest (a price-dependent minimum must not force the
+    cached days to be recomputed every hour)."""
+    sim = {k: float(v) if isinstance(v, int) and not isinstance(v, bool) else v for k, v in r.items()
+           if k not in INFO_KEYS}   # 100 and 100.0 are the same capital
+    return hashlib.sha1(json.dumps(sim, sort_keys=True).encode()).hexdigest()[:10]
+
+
+def label(setting: str, lev: float) -> str:
+    return f"{setting} @ {lev:g}x"
+
+
+def market_meta(path: Path) -> dict[str, dict[str, Any]]:
+    data = json.loads(path.read_text())
+    return {m["marketDisplayName"]: m for m in data.get("markets", data)}
+
+
+def venue_min(mi: MarketInfo, meta: dict[str, Any]) -> float:
+    """The Arcus minimum order in USD at the last known price."""
+    px = float(meta.get("markPrice") or meta.get("oraclePrice") or meta.get("lastTradePrice") or 0)
+    return venue_min_usd(mi.min_notional, mi.min_size, px)
+
+
+def taker_orders(trades: dict[str, np.ndarray]) -> np.ndarray:
+    """Notional of each taker order (the prints sharing one sequenceNumber); prints without one count alone."""
+    if not len(trades["ts"]):
+        return np.zeros(0)
+    n = trades["px"] * trades["sz"]
+    seq = trades["seq"]
+    order = np.argsort(seq, kind="stable")
+    s2, n2 = seq[order], n[order]
+    u, idx = np.unique(s2, return_index=True)
+    sums = np.add.reduceat(n2, idx)
+    if u[0] == 0:
+        sums = np.concatenate([sums[1:], n2[s2 == 0]])
+    return np.asarray(sums, float)
+
+
+def liquidity(trades: dict[str, np.ndarray]) -> dict[str, float]:
+    """One day's taker flow: the 99th percentile taker order (the liquidity ceiling for one of our orders), the
+    number of taker orders and the traded notional."""
+    a = taker_orders(trades)
+    return {"p99": float(np.percentile(a, 99)) if len(a) else 0.0, "takers": len(a),
+            "volume": float(a.sum()) if len(a) else 0.0}
+
+
+# ------------------------------------------------------------------------------------------------ backtests
+def lower_priority() -> None:
+    """Run this process (a scan worker) at the lowest CPU priority, so a trading bot on the same machine always gets
+    the CPU first: nice 19 everywhere, and SCHED_IDLE on Linux. Not macOS's background band: it throttles CPU and disk
+    even when the machine is idle (a scan job took 5x as long on an idle Mac, and hours on the server Mac)."""
+    with contextlib.suppress(OSError, AttributeError):
+        os.nice(19)
+    if sys.platform != "darwin" and hasattr(os, "SCHED_IDLE"):
+        with contextlib.suppress(OSError, AttributeError):
+            os.sched_setscheduler(0, os.SCHED_IDLE, os.sched_param(0))  # type: ignore[attr-defined]
+
+
+class ScanStopped(Exception):
+    """The scan was asked to stop (the scout is shutting down); every day finished so far is cached."""
+
+
+def _gather(ex: ProcessPoolExecutor, jobs: list[Any], stop: threading.Event | None, fn: Any = None,
+            deadline: float | None = None) -> Iterator[tuple[int, Any]]:
+    """(job index, result) as jobs finish, in the order given; raises ScanStopped within a second of `stop` being
+    set. Past `deadline` (time.monotonic()), jobs not started yet are dropped: they run in a later scan."""
+    futs: dict[Future[Any], int] = {ex.submit(fn or _run_window, j): i for i, j in enumerate(jobs)}
+    pending = set(futs)
+    while pending:
+        done, pending = wait(pending, timeout=1.0, return_when=FIRST_COMPLETED)
+        for f in done:
+            if not f.cancelled():
+                yield futs[f], f.result()
+        if stop is not None and stop.is_set():
+            raise ScanStopped
+        if deadline is not None and time.monotonic() > deadline:
+            pending = {f for f in pending if not f.cancel()}   # the ones already running finish
+            deadline = None
+
+
+def _halt(ex: ProcessPoolExecutor) -> None:
+    """Drop queued jobs and end the running workers now (their results are not needed any more)."""
+    procs = list((getattr(ex, "_processes", None) or {}).values())   # shutdown() clears this
+    ex.shutdown(wait=False, cancel_futures=True)
+    for proc in procs:
+        with contextlib.suppress(Exception):
+            proc.terminate()
+
+
+def _run_window(args: tuple[Any, ...]) -> dict[str, list[dict[str, Any]]]:
+    """Every (risk, config) on one market-window; the window is prepared once. {risk_key: [results]}.
+    args: root, market, start, end, market info, setting names, risks, sim params, session hours, holidays, and
+    optionally {risk_key: setting names} to run only those settings for that risk."""
+    root, market, start, end, mi, names, risks, sp, rth_spec, holidays = args[:10]
+    only: dict[str, list[str]] | None = args[10] if len(args) > 10 else None
+    store = TapeStore(root)
+    tape = store.load_range(market, start - 2 * 3600 * S, end)
+    alive = store.load_range(ALIVE_MARKET, start - 2 * 3600 * S, end).bbo["ts"]
+    w = Window(tape, start, end, alive_ts=alive, rth=session_mask(rth_spec, holidays), step_ms=loop_ms(market),
+               holidays=load_holidays(full_only=True))
+    out: dict[str, list[dict[str, Any]]] = {}
+    for r in risks:
+        res = []
+        for n in (only.get(risk_key(r), []) if only is not None else names):
+            cfg = BY_NAME[n]
+            d = Sim(cfg, Risk(**r).with_stops(cfg.stops), MarketInfo(**mi), SimParams(**sp)).run(w).as_dict()
+            d["leverage"] = r["leverage"]
+            res.append(d)
+        out[risk_key(r)] = res
+    return out
+
+
+@dataclass
+class Scanner:
+    root: Path                        # data/scout
+    capital: float = 100.0            # what the sizes and stops are taken on (bucketed; sizing.bucket)
+    pct: Pct = field(default_factory=Pct)
+    risk: Risk = field(default_factory=Risk)   # exit timing (exit_taker_after_s, cooldown_s)
+    sp: SimParams = field(default_factory=lambda: SimParams(queue=True))   # fills: see arcus/scout/sim.py
+    workers: int = 6
+    htf_days: int = 7
+    ladder: bool = False              # True: also 20x, 10x, 5x and 2x below the maximum (5x the work); the owner
+                                      # runs any leverage from Telegram without a backtest at it
+    shortlist: bool = True            # re-run the last 24 h only for settings that pass the multi-day checks
+    volume_cost: float | None = None  # ... or that cost at most this per $1,000 of volume (the volume lists)
+    lev_caps: dict[str, float] = field(default_factory=dict)   # the owner's leverage cap per market (/set crypto_lev)
+    budget_s: float = 1800.0          # full-day backtests per scan stop starting after this long (0: no limit)
+    day_jobs: int = 0                 # market-days backtested by the last backtest() (0: every day was cached)
+    left_jobs: int = 0                # ... and the ones left for a later scan (over the time budget)
+    pending: list[str] = field(default_factory=list)   # markets with no finished day at this capital yet
+    _alive_h: dict[str, float] = field(default_factory=dict)
+
+    @property
+    def store(self) -> TapeStore:
+        return TapeStore(self.root / "tape")
+
+    def cache_path(self, market: str, day: str, rkey: str) -> Path:
+        return self.root / "cache" / f"v{SIM_VERSION}" / rkey / market / f"{day}.json"
+
+    def risks_for(self, meta: dict[str, Any], mi: MarketInfo, order_max: float | None = None
+                  ) -> list[dict[str, Any]]:
+        timing = {"exit_taker_after_s": self.risk.exit_taker_after_s, "cooldown_s": self.risk.cooldown_s}
+        levs = leverages(meta, self.lev_caps) if self.ladder else leverages(meta, self.lev_caps)[:1]
+        vmin = venue_min(mi, meta)
+        if order_max:   # a ceiling below two minimum orders would only distort the sizes
+            order_max = max(order_max, bucket(2 * 1.2 * vmin) or order_max)
+        return [asdict(Risk.for_capital(self.capital, lev, off, pct=self.pct, order_max=order_max,
+                                        min_capital=round(min_capital(vmin, off), 2), **timing)) for lev, off in levs]
+
+    def order_max(self, market: str, days: list[str]) -> float | None:
+        """The liquidity ceiling for one order: the median of the daily 99th-percentile taker orders over the full
+        days, bucketed so it stays put from scan to scan. Cached per completed day."""
+        p99 = []
+        for d in days:
+            cp = self.root / "cache" / "liq" / market / f"{d}.json"
+            try:
+                p99.append(json.loads(cp.read_text())["p99"])
+                continue
+            except (OSError, ValueError, KeyError):
+                pass
+            liq = liquidity(self.store.load_day(market, d).trades)
+            cp.parent.mkdir(parents=True, exist_ok=True)
+            cp.write_text(json.dumps(liq))
+            p99.append(liq["p99"])
+        p99 = [x for x in p99 if x > 0]
+        return bucket(float(np.median(p99))) if p99 else None
+
+    def flow(self, market: str, days: list[str]) -> float:
+        """The market's median daily taker volume over `days` (from the cache order_max fills): the scan order."""
+        vols = []
+        for d in days:
+            with contextlib.suppress(OSError, ValueError, KeyError):
+                vols.append(float(json.loads((self.root / "cache" / "liq" / market / f"{d}.json").read_text())["volume"]))
+        return float(np.median(vols)) if vols else 0.0
+
+    def full_days(self, market: str, now_us: int) -> list[str]:
+        """Completed UTC days on which the recorder was up for at least 20 h and this market has data. The market's
+        first recorded day counts only if its own data covers 20 h of it: a listing that went live at 15:00 UTC (or
+        was first recorded then) has a partial day, and averaging it as a full one would skew every per-day number."""
+        today = day_str(now_us)
+        days = self.store.days(market)
+        out = []
+        for d in days:
+            if d >= today:
+                continue
+            if d not in self._alive_h:
+                self._alive_h[d] = self.store.load_day(ALIVE_MARKET, d).bbo_hours()
+            if self._alive_h[d] < 20:
+                continue
+            if d == days[0]:
+                ts = self.store.load_day(market, d).bbo["ts"]
+                if not len(ts) or day_start_us(d) + US_DAY - int(ts.min()) < 20 * 3600 * S:
+                    continue
+            out.append(d)
+        return out[-self.htf_days:]
+
+    def backtest(self, markets: list[str], now_us: int, mis: dict[str, MarketInfo], meta: dict[str, dict[str, Any]],
+                 *, always: set[tuple[str, str]] | None = None,
+                 stop: threading.Event | None = None) -> dict[str, dict[str, Any]]:
+        """{market: {risk_key: {"risk", "days": {day: [results]}, "recent": [results], "checked": [names]}}}.
+
+        1. Full days: from the cache; a day not cached yet (a new UTC day, a new capital) is backtested for every
+           setting, and a cached day missing a setting (one added to the menu since) for that setting only. This is
+           the once-a-day search over everything.
+        2. The last 24 h: re-run only for the settings that pass the multi-day checks (long_reasons), plus `always`
+           ((market, "setting @ Nx") pairs: the deployed setup). A setting that already fails on its full days is
+           NO-GO whatever its last 24 h did, so re-running it would change nothing. shortlist=False re-runs all.
+        Full days run the busiest markets first, most recent day first, for at most `budget_s`; the rest carry over
+        to the next scan (finished days are cached), and a market with no finished day at this capital is `pending`:
+        left out of the ranking until it has one. So a scan takes about the budget at most, whatever the capital.
+        Workers run at the lowest CPU priority (lower_priority). Setting `stop` ends the scan within a second
+        (ScanStopped); the full days finished by then stay cached."""
+        out: dict[str, dict[str, Any]] = {}
+        names = [c.name for c in MENU]
+        sp = asdict(self.sp)
+        holidays = load_holidays()
+        base: dict[str, tuple[Any, ...]] = {}
+        day_jobs, day_where = [], []
+        flow: dict[str, float] = {}
+        for m in markets:
+            days = self.full_days(m, now_us)
+            flow[m] = self.flow(m, days)
+            every = self.risks_for(meta[m], mis[m], self.order_max(m, days))
+            out[m] = {risk_key(r): {"risk": r, "days": {}, "recent": [], "checked": [],
+                                    "skip": f"needs ${r['min_capital_usd']:,.2f} of capital at {r['leverage']:g}x (Arcus "
+                                            "minimum order)" if r["used_usd"] < r["min_capital_usd"] else ""}
+                      for r in every}
+            risks = [r for r in every if not out[m][risk_key(r)]["skip"]]
+            if not risks:
+                continue
+            base[m] = (str(self.store.root), m, asdict(mis[m]), risks, meta[m].get("regularTradingHours"))
+            for d in days:
+                todo: list[dict[str, Any]] = []
+                fill: dict[str, list[str]] = {}
+                for r in risks:
+                    rk = risk_key(r)
+                    cp = self.cache_path(m, d, rk)
+                    cached = json.loads(cp.read_text()) if cp.exists() else []
+                    if cached:
+                        out[m][rk]["days"][d] = cached
+                    done = {x["config"] for x in cached}
+                    missing = [n for n in names if n not in done]
+                    if missing:
+                        todo.append(r)
+                        fill[rk] = missing
+                if todo:
+                    s0 = day_start_us(d)
+                    day_jobs.append((str(self.store.root), m, s0, s0 + US_DAY, asdict(mis[m]), names, todo, sp,
+                                     meta[m].get("regularTradingHours"), holidays, fill))
+                    day_where.append((m, d))
+        order = sorted(range(len(day_jobs)), key=lambda i: day_where[i][1], reverse=True)   # most recent day first
+        order.sort(key=lambda i: -flow[day_where[i][0]])                                   # busiest market first
+        day_jobs, day_where = [day_jobs[i] for i in order], [day_where[i] for i in order]
+        ex = ProcessPoolExecutor(max_workers=self.workers, initializer=lower_priority)
+        done_jobs = 0
+        deadline = time.monotonic() + self.budget_s if self.budget_s > 0 else None
+        try:
+            for i, res in _gather(ex, day_jobs, stop, deadline=deadline):
+                done_jobs += 1
+                m, d = day_where[i]
+                for rk, rs in res.items():
+                    rs = out[m][rk]["days"].get(d, []) + rs   # a cached day gets its missing settings added
+                    out[m][rk]["days"][d] = rs
+                    cp = self.cache_path(m, d, rk)
+                    cp.parent.mkdir(parents=True, exist_ok=True)
+                    cp.write_text(json.dumps(rs))
+            self.day_jobs, self.left_jobs = done_jobs, len(day_jobs) - done_jobs
+            self.pending = sorted(m for m in base if not any(out[m][risk_key(r)]["days"] for r in base[m][3]))
+            end = now_us - now_us % S
+            rec_jobs, rec_where = [], []
+            for m, (root, _m, mi, risks, rth) in base.items():
+                if m in self.pending:
+                    continue
+                only: dict[str, list[str]] = {}
+                for r in risks:
+                    e = out[m][risk_key(r)]
+                    e["checked"] = [n for n in names if not self.shortlist
+                                    or (m, label(n, r["leverage"])) in (always or set())
+                                    or passes_long(e, n, self.pct, volume_cost=self.volume_cost)]
+                    if e["checked"]:
+                        only[risk_key(r)] = e["checked"]
+                if only:
+                    rec_jobs.append((root, m, end - 24 * 3600 * S, end, mi, names, [r for r in risks
+                                     if risk_key(r) in only], sp, rth, holidays, only))
+                    rec_where.append(m)
+            for i, res in _gather(ex, rec_jobs, stop):
+                for rk, rs in res.items():
+                    out[rec_where[i]][rk]["recent"] = rs
+        except ScanStopped:
+            _halt(ex)
+            raise
+        ex.shutdown(wait=True)
+        return out
+
+
+# ------------------------------------------------------------------------------------------------ market now
+def market_now(store: TapeStore, market: str, now_us: int, days: int = 7) -> dict[str, float]:
+    """Regime of the last hour against the market's usual level (median of the same measures over `days`)."""
+    tape = store.load_range(market, now_us - days * US_DAY, now_us)
+    b = tape.bbo
+    if len(b["ts"]) < 100:
+        return {"age_s": math.inf}
+    t = np.arange(now_us - days * US_DAY, now_us, 60 * S, dtype=np.int64)
+    idx = np.searchsorted(b["ts"], t, side="right") - 1
+    have = idx >= 0
+    idx = np.clip(idx, 0, None)
+    mid = np.where(have, (b["bid"][idx] + b["ask"][idx]) / 2, np.nan)
+    spread = np.where(have, (b["ask"][idx] - b["bid"][idx]) / mid * 1e4, np.nan)
+    last = mid[-61:]
+    er = math.nan
+    if not np.isnan(last).any() and len(last) == 61:
+        path = np.abs(np.diff(last)).sum()
+        er = float(abs(last[-1] - last[0]) / path) if path > 0 else 0.0
+    ret = np.diff(np.log(mid))
+    with np.errstate(all="ignore"), warnings.catch_warnings():
+        warnings.simplefilter("ignore", RuntimeWarning)   # all-NaN windows for markets that just started recording
+        hourly = [np.nanstd(ret[i:i + 60]) for i in range(0, len(ret) - 59, 60)]
+        spread_now = float(np.nanmedian(spread[-60:]))
+        spread_usual = float(np.nanmedian(spread[:-60])) if len(spread) > 60 else math.nan
+    hourly = [h for h in hourly if not math.isnan(h) and h > 0]
+    vol_now = hourly[-1] if hourly else math.nan
+    vol_usual = float(np.median(hourly[:-1])) if len(hourly) > 1 else math.nan
+    alive = store.load_range(ALIVE_MARKET, now_us - 3600 * S, now_us).bbo["ts"]
+    last_seen = max(int(b["ts"][-1]), int(alive[-1]) if len(alive) else 0)
+    return {"age_s": (now_us - last_seen) / S, "er": er, "vol_x": vol_now / vol_usual if vol_usual else math.nan,
+            "spread_x": spread_now / spread_usual if spread_usual else math.nan, "spread_bps": spread_now,
+            "move_1h_bps": float((last[-1] / last[0] - 1) * 1e4) if len(last) == 61 else math.nan}
+
+
+# ------------------------------------------------------------------------------------------------ scoring
+@dataclass
+class Candidate:
+    market: str
+    config: str                 # "<setting> @ <leverage>x": what the owner approves
+    go: bool
+    reasons: list[str]
+    days: int
+    fills_day: float
+    volume_day: float
+    pnl_day: float
+    worst_day: float
+    day_stops: int
+    positive_days: int
+    recent_pnl: float
+    recent_fills: int
+    recent_volume: float
+    tail_pnl: float
+    taker_day: float
+    actions_per_usd: float
+    now: dict[str, float]
+    setting: str = ""           # the menu entry (scan.BY_NAME)
+    leverage: float = 0.0
+    leverage_off: float = 0.0
+    at_max: bool = False        # this is the market's maximum leverage
+    order_usd: float = 0.0
+    cap_usd: float = 0.0
+    cap_off_usd: float = 0.0
+    max_pos_usd: float = 0.0    # largest position the backtest reached
+    liq_reduces: int = 0
+    capital_usd: float = 0.0    # the capital scanned at
+    used_usd: float = 0.0       # the capital the sizes use (less when the market's liquidity ceiling binds)
+    min_capital_usd: float = 0.0
+    too_small: bool = False     # the capital is under min_capital_usd at this leverage: not backtested
+    recent_checked: bool = True  # False: fails on its full days, so its last 24 h was not re-run (Scanner.shortlist)
+    risk: dict[str, Any] = field(default_factory=dict)
+    money_reasons: list[str] = field(default_factory=list)   # the reasons that are only about losing money
+    cost_1k: float | None = None   # dollars lost per $1,000 of maker volume on the full days (0: it made money)
+
+    def as_dict(self) -> dict[str, Any]:
+        return asdict(self)
+
+
+def score_market(market: str, bt: dict[str, Any], now: dict[str, float], pct: Pct | None = None) -> list[Candidate]:
+    """bt: {risk_key: {"risk", "days", "recent"}} from Scanner.backtest (or one such entry for a single sizing)."""
+    if "days" in bt:
+        bt = {"": bt}
+    out = []
+    lev_max = max((e.get("risk", {}).get("leverage", 0.0) for e in bt.values()), default=0.0)
+    for entry in bt.values():
+        r = entry.get("risk") or {}
+        out += _score(market, entry, now, r, at_max=r.get("leverage", 0.0) >= lev_max, pct=pct or Pct())
+    return out
+
+
+def long_checks(days: list[dict[str, Any]], used: float, pct: Pct) -> list[tuple[bool, str]]:
+    """Why a setting fails on its full days, as (about money?, reason). "About money" reasons (it loses, it hits the
+    daily stop, too few days are positive) are what a volume budget may accept (arcus/scout/profiles.py); the others
+    (liquidation, the kill, too few fills, too few days of data) always count."""
+    if not days:
+        return [(False, "no full day of data yet")]
+    out: list[tuple[bool, str]] = []
+    pnl = [d["pnl"] for d in days]
+    pnl_day = sum(pnl) / len(days)
+    fills_day = sum(d["maker_fills"] for d in days) / len(days)
+    day_stops = sum(d["day_stops"] for d in days)
+    pos_days = sum(1 for p in pnl if p >= 0)
+    lost = -pnl_day
+    if pnl_day < -used * pct.go_pnl_day / 100:
+        out.append((True, f"loses ${lost:.2f} ({100 * lost / used:.2f}% of ${used:,.0f})/day over {len(days)} days"))
+    if day_stops > MAX_DAY_STOPS:
+        out.append((True, f"hit the daily stop {day_stops} times"))
+    if any(d.get("liquidated") for d in days):
+        out.append((False, "liquidated"))
+    elif any(d["killed"] for d in days):
+        out.append((False, f"hit the {pct.kill:g}% kill"))
+    if pos_days < len(days) / 2:
+        out.append((True, f"only {pos_days}/{len(days)} days not negative"))
+    if fills_day < MIN_FILLS_DAY:
+        out.append((False, f"too few fills ({fills_day:.1f}/day)"))
+    if len(days) < MIN_FULL_DAYS:
+        out.append((False, f"{days_text(len(days))} of data (needs {MIN_FULL_DAYS})"))
+    return out
+
+
+def days_text(n: int) -> str:
+    return f"{n} full day{'' if n == 1 else 's'}"
+
+
+def long_reasons(days: list[dict[str, Any]], used: float, pct: Pct) -> list[str]:
+    """Why a setting fails on its full days (empty: it passes). The one definition both the scoring and the
+    shortlist of settings whose last 24 h is re-run use."""
+    return [r for _money, r in long_checks(days, used, pct)]
+
+
+def cost_per_1k(pnl: float, volume: float) -> float | None:
+    """Dollars lost per $1,000 of maker volume (0 when it made money; None with no volume)."""
+    return max(0.0, -pnl) / volume * 1000 if volume > 0 else None
+
+
+def passes_long(entry: dict[str, Any], name: str, pct: Pct, volume_cost: float | None = None) -> bool:
+    """Does setting `name` pass the multi-day checks in this backtest entry (Scanner.backtest)? With volume_cost
+    (dollars per $1,000 of volume), a setting that loses money also passes when it costs at most that and every
+    other check passes: the lists (arcus/scout/profiles.py) need its last 24 h too."""
+    if entry.get("skip"):
+        return False
+    days = [r for _d, rs in sorted(entry["days"].items()) for r in rs if r["config"] == name]
+    used = float(entry["risk"].get("used_usd") or entry["risk"].get("capital_usd") or 100.0)
+    checks = long_checks(days, used, pct)
+    if not checks:
+        return True
+    if volume_cost is None or any(not money for money, _r in checks):
+        return False
+    cost = cost_per_1k(sum(d["pnl"] for d in days), sum(d["maker_usd"] for d in days))
+    return cost is not None and cost <= volume_cost
+
+
+def _score(market: str, bt: dict[str, Any], now: dict[str, float], risk: dict[str, Any], at_max: bool,
+           pct: Pct) -> list[Candidate]:
+    out = []
+    by_cfg: dict[str, list[dict[str, Any]]] = {}
+    for _d, rs in sorted(bt["days"].items()):
+        for r in rs:
+            by_cfg.setdefault(r["config"], []).append(r)
+    recent = {r["config"]: r for r in bt["recent"]}
+    checked = set(bt["checked"]) if "checked" in bt else None   # None: every setting's last 24 h was run
+    lev = float(risk.get("leverage", 0.0))
+    used = float(risk.get("used_usd") or risk.get("capital_usd") or 100.0)
+    min_day, min_tail = -used * pct.go_pnl_day / 100, -used * pct.go_tail_pnl / 100
+
+    def of_cap(x: float) -> str:
+        return f"${x:.2f} ({100 * x / used:.2f}% of ${used:,.0f})"
+
+    for name in [c.name for c in MENU]:
+        days = by_cfg.get(name, [])
+        rec = recent.get(name)
+        checks = [(False, bt["skip"])] if bt.get("skip") else long_checks(days, used, pct)
+        reasons = [r for _m, r in checks]
+        money = [r for m, r in checks if m]
+        pnl = [d["pnl"] for d in days]
+        n = max(1, len(days))
+        fills_day = sum(d["maker_fills"] for d in days) / n
+        vol_day = sum(d["maker_usd"] for d in days) / n
+        pnl_day = sum(pnl) / n
+        day_stops = sum(d["day_stops"] for d in days)
+        pos_days = sum(1 for p in pnl if p >= 0)
+        was_checked = checked is None or name in checked
+        if rec is None or rec["hours"] < 12:
+            if not bt.get("skip") and was_checked:
+                reasons.append("under 12 h of recent data")
+        else:
+            if rec["pnl"] < min_day:
+                reasons.append(f"last 24 h lost {of_cap(-rec['pnl'])}")
+                money.append(reasons[-1])
+            if rec["tail_pnl"] < min_tail:
+                reasons.append(f"last 6 h lost {of_cap(-rec['tail_pnl'])}")
+                money.append(reasons[-1])
+            if rec.get("liquidated") or rec.get("killed"):
+                reasons.append("last 24 h hit the kill")
+            if days and rec["maker_fills"] < MIN_FLOW_FRAC * fills_day:
+                reasons.append(f"flow dried up: {rec['maker_fills']} fills in 24 h vs {fills_day:.0f}/day usual")
+        if now.get("age_s", math.inf) > MAX_AGE_S:
+            reasons.append("no fresh data")
+        else:
+            if now.get("er", 0) > MAX_ER:
+                reasons.append(f"trending now (efficiency {now['er']:.2f}, {now.get('move_1h_bps', 0):+.0f} bps in 1 h)")
+            if now.get("vol_x", 1) > MAX_VOL_X:
+                reasons.append(f"volatility {now['vol_x']:.1f}x usual")
+            if now.get("spread_x", 1) > MAX_SPREAD_X:
+                reasons.append(f"spread {now['spread_x']:.1f}x usual")
+        acts = sum(d["actions"] for d in days)
+        filled = sum(d["maker_usd"] + d["taker_usd"] for d in days)
+        out.append(Candidate(
+            market=market, config=label(name, lev) if lev else name, go=not reasons, reasons=reasons, days=len(days),
+            fills_day=fills_day, volume_day=vol_day, pnl_day=pnl_day, worst_day=min(pnl) if pnl else 0.0,
+            day_stops=day_stops, positive_days=pos_days, recent_pnl=rec["pnl"] if rec else 0.0,
+            recent_fills=rec["maker_fills"] if rec else 0, recent_volume=rec["maker_usd"] if rec else 0.0,
+            tail_pnl=rec["tail_pnl"] if rec else 0.0, taker_day=sum(d["taker_usd"] for d in days) / n,
+            actions_per_usd=acts / filled if filled else math.inf, now=now, setting=name, leverage=lev,
+            leverage_off=float(risk.get("leverage_off", 0.0)), at_max=at_max,
+            order_usd=float(risk.get("order_usd", 0.0)), cap_usd=float(risk.get("cap_usd", 0.0)),
+            cap_off_usd=float(risk.get("cap_off_usd") or risk.get("cap_usd", 0.0)),
+            max_pos_usd=max((d.get("max_pos_usd", 0.0) for d in days), default=0.0),
+            liq_reduces=sum(d.get("liq_reduces", 0) for d in days), capital_usd=float(risk.get("capital_usd", 0.0)),
+            used_usd=used, min_capital_usd=float(risk.get("min_capital_usd", 0.0)), too_small=bool(bt.get("skip")),
+            recent_checked=was_checked and rec is not None, risk=risk, money_reasons=money,
+            cost_1k=cost_per_1k(pnl_day, vol_day)))
+    return out
+
+
+def _order(c: Candidate) -> tuple[bool, bool, float, float]:
+    """GO first; then candidates that were backtested; by maker volume (GO) or PnL (not GO)."""
+    return (not c.go, not c.days, -c.volume_day if c.go else -c.pnl_day, -c.pnl_day)
+
+
+def rank(cands: list[Candidate]) -> list[Candidate]:
+    """GO first, by maker volume/day then PnL; one entry per market."""
+    best: dict[str, Candidate] = {}
+    for c in sorted(cands, key=_order):
+        best.setdefault(c.market, c)
+    return sorted(best.values(), key=_order)
+
+
+def best_at_max(cands: list[Candidate]) -> list[Candidate]:
+    """Per market, the best setting at its maximum leverage (GO or not): what max leverage does, as asked."""
+    best: dict[str, Candidate] = {}
+    for c in sorted((c for c in cands if c.at_max and (c.days or c.too_small)), key=_order):
+        best.setdefault(c.market, c)
+    return sorted(best.values(), key=_order)
+
+
+def scan(root: Path, *, now_us: int | None = None, markets: list[str] | None = None, workers: int = 6,
+         capital: float = 100.0, pct: Pct | None = None, capital_source: str = "fixed", risk: Risk | None = None,
+         ladder: bool = False, shortlist: bool = True, always: set[tuple[str, str]] | None = None,
+         stop: threading.Event | None = None, volume_cost: float | None = None,
+         lev_caps: dict[str, float] | None = None, budget_s: float = 1800.0) -> dict[str, Any]:
+    """capital: what the sizes and stops are taken on (bucketed here, as the live bot does).
+    shortlist: re-run the last 24 h only for settings that pass on their full days (and `always`: the deployed
+    (market, "setting @ Nx")); False re-runs every setting, as before.
+    volume_cost: the owner's budget for the volume lists (dollars per $1,000 of volume): settings within it are
+    shortlisted too, so arcus/scout/profiles.py can judge their last 24 h.
+    lev_caps: the owner's leverage cap per market (/set crypto_lev); every other market goes to the Arcus maximum.
+    budget_s: how long full-day backtests may run in this scan (Scanner.backtest); markets still without a finished
+    day are listed under "pending" and ranked once a later scan has backtested them."""
+    now_us = now_us or time.time_ns() // 1000
+    mis = load_markets(root / "markets.json")
+    meta = market_meta(root / "markets.json")
+    pct = pct or Pct()
+    sc = Scanner(root, capital=bucket(capital), pct=pct, risk=risk or Risk(), workers=workers, ladder=ladder,
+                 shortlist=shortlist, volume_cost=volume_cost, lev_caps=lev_caps or {}, budget_s=budget_s)
+    have = [m for m in sc.store.markets() if m in mis and (not markets or m in markets) and sc.store.days(m)]
+    t0 = time.time()
+    bt = sc.backtest(have, now_us, mis, meta, always=always, stop=stop)
+    cands: list[Candidate] = []
+    for m in have:
+        if m not in sc.pending:
+            cands += score_market(m, bt[m], market_now(sc.store, m, now_us), pct)
+    ranked = rank(cands)
+    return {"ts_us": now_us, "took_s": round(time.time() - t0, 1), "workers": workers, "day_jobs": sc.day_jobs,
+            "left_jobs": sc.left_jobs, "pending": sc.pending,
+            "risk": asdict(sc.risk), "volume_cost": volume_cost,
+            "capital": {"usd": sc.capital, "source": capital_source, "pct": asdict(pct)},
+            "leverage": {"policy": "max, then " + ", ".join(f"{x:g}x" for x in LADDER) if ladder else "max",
+                         "caps": lev_caps or {}},
+            "markets": len(have), "configs": len(MENU),
+            "rechecked_24h": sum(len(e["checked"]) for per in bt.values() for e in per.values()),
+            "setups": sum(len(MENU) for per in bt.values() for _e in per.values()),
+            "offline": sorted(m for m in sc.store.markets() if m in meta and meta[m].get("status") != "ONLINE"),
+            "top": [c.as_dict() for c in ranked if c.go][:3],
+            "ranked": [c.as_dict() for c in ranked],
+            "at_max": [c.as_dict() for c in best_at_max(cands)],
+            "all": [c.as_dict() for c in cands]}
+
+
+def limits(root: Path, markets: list[str] | None = None, now_us: int | None = None) -> list[dict[str, Any]]:
+    """Per market, the least capital the bot can trade it with (its smallest order still 1.2x the Arcus minimum) and
+    the most one order can use (the liquidity ceiling), from markets.json and the recorded taker flow."""
+    now_us = now_us or time.time_ns() // 1000
+    mis, meta = load_markets(root / "markets.json"), market_meta(root / "markets.json")
+    sc = Scanner(root)
+    out = []
+    for m in sorted(mis):
+        if markets and m not in markets:
+            continue
+        lev, off = max_leverage(meta[m])
+        vmin = venue_min(mis[m], meta[m])
+        days = sc.full_days(m, now_us) if sc.store.days(m) else []
+        om = sc.order_max(m, days)
+        vols = []
+        for d in days:
+            with contextlib.suppress(OSError, ValueError, KeyError):
+                vols.append(json.loads((root / "cache" / "liq" / m / f"{d}.json").read_text())["volume"])
+        two = min(2.0, off)
+        out.append({"market": m, "venue_min_usd": vmin, "leverage": lev, "leverage_off": off,
+                    "min_capital_max_lev": min_capital(vmin, off), "min_capital_2x": min_capital(vmin, two),
+                    "order_max_usd": om, "days": len(days), "taker_volume_day": float(np.median(vols)) if vols else 0.0,
+                    "full_use_to_max_lev": om * 2 * 1.25 / lev if om else None,
+                    "full_use_to_2x": om * 2 * 1.25 / 2 if om else None})
+    return out
+
+
+def limits_table(root: Path, markets: list[str] | None = None) -> str:
+    def usd(x: float | None) -> str:
+        return f"{x:,.0f}" if x else "-"
+
+    lines = ["least capital: the smallest order (off-hours on RWA perps) stays >= 1.2x the Arcus minimum order.",
+             "order ceiling: the 99th percentile taker order (median over the recorded full days). Past it orders "
+             "stop growing,",
+             "so capital beyond 'fully used up to' only adds margin cushion (a lower effective leverage).", "",
+             f"{'market':<13}{'min order':>10}{'max lev':>10}{'least $':>10}{'least $':>10}{'ceiling':>10}"
+             f"{'fully used up to':>20}{'takers $':>12}{'days':>5}",
+             f"{'':<13}{'':>10}{'in/off':>10}{'@max lev':>10}{'@2x':>10}{'1 order':>10}{'@max lev':>10}{'@2x':>10}"
+             f"{'per day':>12}{'':>5}"]
+    for r in sorted(limits(root, markets), key=lambda r: r["min_capital_max_lev"]):
+        lev = f"{r['leverage']:g}/{r['leverage_off']:g}"
+        lines.append(f"{r['market']:<13}{r['venue_min_usd']:>10,.2f}{lev:>10}{r['min_capital_max_lev']:>10,.2f}"
+                     f"{r['min_capital_2x']:>10,.2f}{usd(r['order_max_usd']):>10}{usd(r['full_use_to_max_lev']):>10}"
+                     f"{usd(r['full_use_to_2x']):>10}{r['taker_volume_day']:>12,.0f}{r['days']:>5}")
+    return "\n".join(lines)
+
+
+def capital_line(res: dict[str, Any]) -> str:
+    cap = res.get("capital") or {}
+    p = cap.get("pct") or asdict(Pct())
+    pos = (f"{p['position_stop']:g}% to {p.get('position_stop_max', 5):g}% (follows the market)"
+           if p.get("position_stop_k", 0) > 0 else f"{p['position_stop']:g}%")
+    return (f"capital ${cap.get('usd', 100):,.2f} ({cap.get('source', 'fixed')}); stops: position {pos}, "
+            f"day {p['daily_stop']:g}%, kill {p['kill']:g}% of the capital each setup uses")
+
+
+def table(res: dict[str, Any], limit: int = 25) -> str:
+    """Plain-text ranking for the terminal: the best setting per market, then each market at its max leverage."""
+    lines = [f"scan of {res['markets']} markets x {res['configs']} settings in {res['took_s']} s; "
+             f"{len(res['top'])} pass all checks", capital_line(res)]
+    if "rechecked_24h" in res:
+        lines.append(f"last 24 h re-run for the {res['rechecked_24h']} of {res.get('setups', '?')} setups that pass "
+                     "on their full days (24h shows - for the rest)")
+    lines.append("")
+    head = (f"{'':3}{'market':<12} {'setting':<42} {'uses':>7} {'order':>6} {'fills/d':>7} {'volume/d':>9} "
+            f"{'pnl/d':>7} {'worst':>7} {'24h':>6}  why not")
+
+    from arcus.scout import profiles
+
+    def rows(cs: list[dict[str, Any]], cost: bool = False) -> list[str]:
+        """cost: the list sections, where the last column is the cost per $1,000 (the lists' measure)."""
+        def last(c: dict[str, Any]) -> str:
+            if cost:
+                x = profiles.cost_1k(c)
+                return "profitable" if x == 0 else f"${x:.2f} per $1,000" if x is not None else "-"
+            return "GO" if c["go"] else "; ".join(c["reasons"])[:80]
+        return [f"{i:>2} {c['market']:<12} {c['config']:<42} {c.get('used_usd', 0):>7,.0f} "
+                f"{c.get('order_usd', 0):>6,.0f} {c['fills_day']:>7.0f} {c['volume_day']:>9,.0f} "
+                f"{c['pnl_day']:>+7.2f} {c['worst_day']:>+7.2f} "
+                f"{(format(c['recent_pnl'], '+6.2f') if c.get('recent_checked', True) else '-'):>6}  "
+                f"{last(c)}" for i, c in enumerate(cs, 1)]
+    lines += ["best per market (any leverage up to the max):", head]
+    lines += rows([r for r in res["ranked"] if r["days"]][:limit])
+    if res.get("at_max"):
+        lines += ["", "each market at its MAXIMUM leverage:", head]
+        lines += rows(res["at_max"][:limit])
+
+    budget = float(res.get("volume_cost") or 0.20)
+    for p in profiles.LISTS:
+        top = profiles.top(res, p, budget)
+        why = "whatever it costs" if p.any_cost else f"at most ${budget:.2f} lost per $1,000; /set volume_cost"
+        lines += ["", f"{p.title.upper()} top 3 ({p.blurb.split(';')[0]}, {why}):",
+                  head.replace("why not", "cost")]
+        lines += rows(top, cost=True) if top else ["   nothing fits right now"]
+    small = [f"{r['market']} (${r.get('min_capital_usd', 0):,.2f})" for r in res["ranked"]
+             if r.get("too_small") and not r["days"]]
+    if small:
+        lines += ["", f"capital too small for (minimum at the best leverage): {', '.join(small)}"]
+    waiting = [r["market"] for r in res["ranked"] if not r["days"] and not r.get("too_small")]
+    if waiting:
+        lines += ["", f"still recording (under a full day of data): {', '.join(waiting)}"]
+    return "\n".join(lines)

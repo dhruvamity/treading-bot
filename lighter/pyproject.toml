@@ -1,5 +1,5 @@
 [project]
-name = "lbot"
+name = "lighter-bot"
 version = "0.1.0"
 description = "Market-making bot for Lighter perps on Robinhood Chain: recorder, backtest, lists, paper and live runs, Telegram"
 readme = "README.md"
@@ -10,7 +10,7 @@ dependencies = [
     "orjson>=3.10",
     "pyyaml>=6.0",
     "tzdata>=2024.1",
-    # only for the official transaction signer library it ships (lbot/venue/signer.py loads it with ctypes)
+    # only for the official transaction signer library it ships (lighter_bot/venue/signer.py loads it with ctypes)
     "lighter-sdk>=1.1.4",
 ]
 
@@ -20,19 +20,16 @@ dev = [
     "pytest-asyncio>=0.23",
     "ruff>=0.5",
 ]
-research = [
-    "pyarrow>=15",   # lbot tape import: the old recorder's Parquet files
-]
 
 [project.scripts]
-lbot = "lbot.cli:main"
+lighter = "lighter_bot.cli:main"
 
 [build-system]
 requires = ["hatchling"]
 build-backend = "hatchling.build"
 
 [tool.hatch.build.targets.wheel]
-packages = ["lbot"]
+packages = ["lighter_bot"]
 
 [tool.ruff]
 line-length = 120

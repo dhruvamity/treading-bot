@@ -1,5 +1,5 @@
-from lbot.trade import guard as G
-from lbot.trade.sizing import Stops, bucket, min_capital, sizes
+from lighter_bot.trade import guard as G
+from lighter_bot.trade.sizing import Stops, bucket, min_capital, sizes
 
 US = 1_000_000
 

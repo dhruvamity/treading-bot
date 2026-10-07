@@ -5,13 +5,13 @@ import time
 
 import pytest
 
-from lbot.config import Latency, Requests
-from lbot.trade.engine import Engine, RunSpec, RunState, send_control
-from lbot.trade.exchange import Change, Order, PaperExchange
-from lbot.trade.strategy import BUY, SELL, Quote
-from lbot.venue.book import Book
-from lbot.venue.market import Market
-from lbot.venue.nonce import ClientIds
+from lighter_bot.config import Latency, Requests
+from lighter_bot.trade.engine import Engine, RunSpec, RunState, send_control
+from lighter_bot.trade.exchange import Change, Order, PaperExchange
+from lighter_bot.trade.strategy import BUY, SELL, Quote
+from lighter_bot.venue.book import Book
+from lighter_bot.venue.market import Market
+from lighter_bot.venue.nonce import ClientIds
 
 M = Market(market_id=1, symbol="X", price_decimals=2, size_decimals=2, min_base=0.01, min_quote=10.0, imf_min=200,
            imf_default=5000, mmf=120)

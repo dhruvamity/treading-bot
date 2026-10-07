@@ -5,7 +5,7 @@ import time
 
 import pytest
 
-from lbot.scout import autopilot, pilot
+from lighter_bot.scout import autopilot, pilot
 
 
 def scan_with(rows, table=None):

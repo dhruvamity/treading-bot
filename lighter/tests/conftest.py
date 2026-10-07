@@ -8,7 +8,7 @@ from pathlib import Path
 
 import pytest
 
-from lbot import log
+from lighter_bot import log
 
 ROOT = Path(__file__).resolve().parent.parent
 os.environ["LBOT_NO_SPAWN"] = "1"
@@ -26,7 +26,7 @@ def root(tmp_path: Path) -> Path:
 
 @pytest.fixture
 def cfg(root: Path):
-    from lbot.config import load
+    from lighter_bot.config import load
     c = load(root, env={})
     c.ensure_dirs()
     return c
