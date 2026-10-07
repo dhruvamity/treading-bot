@@ -15,6 +15,7 @@ from __future__ import annotations
 
 import asyncio
 import re
+from collections.abc import Callable
 from dataclasses import replace
 from typing import Any
 
@@ -42,20 +43,31 @@ def relabel(text: str) -> str:
     return LABEL + _CMD.sub(lambda m: f"/{PREFIX}_{m.group(1)}", text)
 
 
-def reroute(markup: dict[str, Any] | None) -> dict[str, Any] | None:
-    """The same keyboard with every button's data behind `l `, so the one bot hands the press back to this panel."""
+def reroute(markup: dict[str, Any] | None, home: bool = False) -> dict[str, Any] | None:
+    """The same keyboard with every button's data behind `l `, so the one bot hands the press back to this panel.
+    home: add a ☰ Home button (the host's `home`, not behind `l `), except under a live dashboard (any other button
+    would turn that message into its own reply) and a confirm card (its buttons must only confirm or cancel)."""
     if not markup:
         return markup
-    return {"inline_keyboard": [[{**btn, "callback_data": f"{PREFIX} {btn['callback_data']}"[:64]} for btn in row]
-                                for row in markup.get("inline_keyboard", [])]}
+    rows = [[{**btn, "callback_data": f"{PREFIX} {btn['callback_data']}"[:64]} for btn in row]
+            for row in markup.get("inline_keyboard", [])]
+    data = [str(btn["callback_data"]) for row in markup.get("inline_keyboard", []) for btn in row]
+    if home and not any(d == "nop" or d.startswith("dash") for d in data):
+        rows.append([{"text": "☰ Home", "callback_data": "home"}])
+    return {"inline_keyboard": rows}
 
 
 class PanelApi(Api):
+    home_if: Callable[[], bool] | None = None     # set by the host: True while its menu layout is on
+
+    def _home(self) -> bool:
+        return bool(self.home_if and self.home_if())
+
     async def send(self, chat: str | int, text: str, markup: dict[str, Any] | None = None) -> Any:
-        return await super().send(chat, relabel(text), reroute(markup))
+        return await super().send(chat, relabel(text), reroute(markup, self._home()))
 
     async def edit(self, chat: str | int, msg_id: int, text: str, markup: dict[str, Any] | None = None) -> Any:
-        return await super().edit(chat, msg_id, relabel(text), reroute(markup))
+        return await super().edit(chat, msg_id, relabel(text), reroute(markup, self._home()))
 
 
 class Panel:

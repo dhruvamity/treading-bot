@@ -30,7 +30,7 @@ from arcus.common.logging import Log, redact_str
 from arcus.common.tgfmt import b, card, codes, plain_card, section
 from arcus.common.tgfmt import code as mono
 from arcus.core.balances import BalanceLog
-from arcus.telegram import dashboard, others
+from arcus.telegram import dashboard, menu, others
 from arcus.telegram.api import Keyboard, TelegramAPI, TelegramError, split_html
 from arcus.telegram.control import MODES, Control, pause_where
 from arcus.telegram.views import (
@@ -133,6 +133,7 @@ class Ctx:
     user_id: int | None
     user: str
     message_id: int | None = None  # set when the command came from a button (edit that message in place)
+    back: str = ""                 # menu layout: where ◀️ Back goes from the screen this command shows
 
 
 class TelegramBot:
@@ -156,8 +157,10 @@ class TelegramBot:
         self._dash_account: dict[str, Any] | None = None   # the dashboard's own account read (when the bot has none)
         self.scan_waiters: list[dict[str, Any]] = []        # {chat, profile, since}: post that list after the scan
         # the other two parts of the bot, in this same Telegram bot (arcus/telegram/others.py)
-        self.lighter = others.Lighter(str(getattr(api, "token", "")), owner_chat_id, allowed_user_ids)
+        self.lighter = others.Lighter(str(getattr(api, "token", "")), owner_chat_id, allowed_user_ids,
+                                      home_if=lambda: self.ui() == "menu")
         self.arb = others.Arb()
+        self.venues: dict[int, str] = {}     # menu layout: which part the Home buttons act on, per chat (default Arcus)
 
     # ------------------------------------------------------------------ plumbing
     def authorized(self, chat_id: int, user_id: int | None) -> bool:
@@ -165,10 +168,19 @@ class TelegramBot:
             return user_id in self.allowed_user_ids and chat_id in (self.owner_chat_id, user_id)
         return chat_id == self.owner_chat_id
 
+    def ui(self) -> str:
+        """"menu" when the owner chose the Home layout (/set telegram_ui menu), else "classic"."""
+        try:
+            return "menu" if settings.load(self._state_dir()).get("telegram_ui") == "menu" else "classic"
+        except Exception:      # an unreadable settings file must not take the bot's menu with it
+            return "classic"
+
     async def _alert(self, text: str, critical: bool) -> None:
         await self.api.send(self.owner_chat_id, text, silent=not critical)
 
     async def reply(self, ctx: Ctx, text: str, keyboard: Keyboard | None = None) -> None:
+        if keyboard is not None and self.ui() == "menu":
+            keyboard = menu.with_nav(keyboard, ctx.back)
         if ctx.message_id is not None and len(split_html(text)) == 1:
             try:
                 await self.api.edit(ctx.chat_id, ctx.message_id, text, keyboard=keyboard)
@@ -199,9 +211,10 @@ class TelegramBot:
         self.username = str((me or {}).get("username") or "")
         await self.api.set_commands(COMMANDS)
         d = dashboard.collect(self.control)
-        await self.api.send(self.owner_chat_id, dashboard.control_text(
-            d, "Bot Online", ["Read-only: controls are off"] if self.read_only else None),
-            keyboard=menu_keyboard(), silent=True)
+        text = dashboard.control_text(d, "Bot Online", ["Read-only: controls are off"] if self.read_only else None)
+        await self.api.send(self.owner_chat_id, text,
+                            keyboard=menu.home_keyboard(self._venue(self.owner_chat_id)) if self.ui() == "menu"
+                            else menu_keyboard(), silent=True)
         loops = [self._poll_loop(), self._watch_loop(), self._dashboard_loop()]
         panel = self.lighter.load()
         if panel is not None:
@@ -292,7 +305,11 @@ class TelegramBot:
             await self._code(ctx, text)
             return
         if not text.startswith("/"):
-            await self.api.send(ctx.chat_id, card("❔", "Send a Command", codes("/menu or /help")))
+            if self.ui() == "menu":      # not a dead end: Home, with its buttons
+                home, kb = await self._home_card(ctx.chat_id)
+                await self.api.send(ctx.chat_id, home, keyboard=kb)
+            else:
+                await self.api.send(ctx.chat_id, card("❔", "Send a Command", codes("/menu or /help")))
             return
         head, *args = text.split()
         cmd = head[1:].split("@")[0].lower()
@@ -301,13 +318,8 @@ class TelegramBot:
         await self.dispatch(ctx, cmd, args)
 
     # ------------------------------------------------------------------ commands
-    async def dispatch(self, ctx: Ctx, cmd: str, args: list[str]) -> None:
-        part = others.part_of(cmd)
-        if part is not None:      # /l_status, /l status, /arb_hold 72 ...: Lighter or the funding arbitrage
-            name, rest = (part[1], args) if part[1] else ((args[0].lower(), args[1:]) if args else ("", []))
-            await (self.c_lighter if part[0] == others.LIGHTER else self.c_arb)(ctx, name, rest)
-            return
-        cmd = ALIASES.get(cmd, cmd)
+    def _tables(self) -> tuple[dict[str, Any], dict[str, Any]]:
+        """(read commands, write commands): name -> handler. Write commands are refused when the bot is read-only."""
         read = {"start": self.c_menu, "menu": self.c_menu, "help": self.c_help, "status": self.c_status,
                 "top3": self.c_scout, "openpositions": self.c_pilot,
                 "pnl": self.c_pnl, "positions": self.c_positions, "orders": self.c_orders,
@@ -319,13 +331,27 @@ class TelegramBot:
                 "volume": self.c_volume, "cheapest": self.c_cheapest, "maxvolume": self.c_maxvolume,
                 "pick": self.c_pick, "rm": self.c_rm, "f": self.c_f, "auto": self.c_auto,
                 "rs": self.c_old_button, "rl": self.c_old_button, "lev": self.c_old_button,
-                "deploy": self.c_old_button}
+                "deploy": self.c_old_button,
+                "home": self.c_home, "venue": self.c_venue,
+                **{f"m_{g}": self._screen(g) for g in menu.GROUPS}}
         write = {"pauseneworders": self.c_pause, "unpause": self.c_unpause, "stop": self.c_stop,
                  "resumeaftersl": self.c_resume, "run": self.c_run, "doctor": self.c_doctor,
                  "cancelall": self.c_cancelall, "closeall": self.c_flatten, "fd": self.c_fd,
                  "rd": self.c_old_button, "golive": self.c_golive,
                  "pilotclose": self.c_pilotclose, "set": self.c_set, "scannow": self.c_scannow,
                  "rescan": self.c_rescan}
+        return read, write
+
+    async def dispatch(self, ctx: Ctx, cmd: str, args: list[str]) -> None:
+        part = others.part_of(cmd)
+        if part is not None:      # /l_status, /l status, /arb_hold 72 ...: Lighter or the funding arbitrage
+            name, rest = (part[1], args) if part[1] else ((args[0].lower(), args[1:]) if args else ("", []))
+            await (self.c_lighter if part[0] == others.LIGHTER else self.c_arb)(ctx, name, rest)
+            return
+        cmd = ALIASES.get(cmd, cmd)
+        if self.ui() == "menu":
+            ctx.back = menu.BACK.get(cmd, "")
+        read, write = self._tables()
         if cmd in read:
             await read[cmd](ctx, args)
         elif cmd in write:
@@ -1081,12 +1107,73 @@ class TelegramBot:
                 self._dash_save(None)
 
     async def c_menu(self, ctx: Ctx, args: list[str]) -> None:
-        """/start and /menu (the owner's "Bot Control" template) with every button."""
+        """/start and /menu (the owner's "Bot Control" template) with every button; in the menu layout, Home."""
+        if self.ui() == "menu":
+            await self.c_home(ctx, args)
+            return
         idx = self.pilot.account_index if self.pilot is not None else 0
         await self.reply(ctx, dashboard.control_text(dashboard.collect(self.control, account=idx)), menu_keyboard())
 
     async def c_help(self, ctx: Ctx, args: list[str]) -> None:
-        await self.reply(ctx, HELP, menu_keyboard())
+        await self.reply(ctx, HELP, [[("☰ Home", "home")]] if self.ui() == "menu" else menu_keyboard())
+
+    # ------------------------------------------------------------------ the menu layout (arcus/telegram/menu.py)
+    def _venue(self, chat: int) -> str:
+        return self.venues.get(chat, "arcus")
+
+    async def _home_card(self, chat: int) -> tuple[str, Keyboard]:
+        """The Home card of the venue the buttons act on, and its six buttons."""
+        v = self._venue(chat)
+        if v == "lighter":
+            text = self._lighter_home()
+        elif v == "arb":
+            text = self._arb_home()
+        else:
+            idx = self.pilot.account_index if self.pilot is not None else 0
+            text = dashboard.control_text(dashboard.collect(self.control, account=idx), "Arcus · Home",
+                                          ["Read-only: controls are off"] if self.read_only else None)
+        return text, menu.home_keyboard(v)
+
+    def _lighter_home(self) -> str:
+        panel = self.lighter.load()
+        if panel is None:
+            return self.lighter.missing()
+        try:
+            from lighter_bot.telegram.embed import relabel
+
+            return str(relabel(str(panel.bot.status_card())))
+        except Exception as e:
+            log.warning("lighter_home_failed", reason=type(e).__name__)
+            return card("⚡", "LIGHTER · Home", codes("Its status could not be read", "/l_status"))
+
+    def _arb_home(self) -> str:
+        loaded = self.arb.load()
+        if loaded is None:
+            return self.arb.missing()
+        _tg, ops = loaded
+        return others.arb_home(ops.current_mode(), {m: ops.running(m) for m in ops.MODES}, self._arb_live_allowed())
+
+    def _arb_live_allowed(self) -> bool:
+        try:
+            return self.arb.live_allowed()
+        except Exception:
+            return False
+
+    async def c_home(self, ctx: Ctx, args: list[str]) -> None:
+        text, kb = await self._home_card(ctx.chat_id)
+        await self.reply(ctx, text, kb)
+
+    async def c_venue(self, ctx: Ctx, args: list[str]) -> None:
+        """🔀 Venue: Arcus → Lighter → Funding arb → Arcus. Only the Home buttons follow it; typed commands do not."""
+        self.venues[ctx.chat_id] = menu.next_venue(self._venue(ctx.chat_id))
+        await self.c_home(ctx, args)
+
+    def _screen(self, group: str) -> Any:
+        async def show(ctx: Ctx, args: list[str]) -> None:
+            v = self._venue(ctx.chat_id)
+            await self.reply(ctx, menu.screen_text(v, group, read_only=self.read_only),
+                             menu.screen_keyboard(v, group, live_allowed=self._arb_live_allowed()))
+        return show
 
     async def c_status(self, ctx: Ctx, args: list[str]) -> None:
         modes = [a.lower() for a in args if a.lower() in MODES] or self.control.known_modes()
