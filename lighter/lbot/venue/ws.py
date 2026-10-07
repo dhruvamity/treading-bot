@@ -25,11 +25,6 @@ Handler = Callable[[dict[str, Any]], Awaitable[None] | None]
 log = Log("ws")
 
 
-def channel_key(channel: str) -> str:
-    """'order_book:1' and 'order_book/1' -> 'order_book/1'; 'account_orders:1' (the server drops the account) stays."""
-    return channel.replace(":", "/")
-
-
 class WsClient:
     def __init__(self, url: str, *, name: str = "ws", ping_s: float = 30.0) -> None:
         self.url = url
@@ -62,9 +57,6 @@ class WsClient:
         await self._send({"type": "unsubscribe", "channel": channel})
         await asyncio.sleep(0.05)
         await self.subscribe(channel, auth)
-
-    async def send_json(self, msg: dict[str, Any]) -> None:
-        await self._send(msg)
 
     async def _send(self, msg: dict[str, Any]) -> None:
         ws = self._ws

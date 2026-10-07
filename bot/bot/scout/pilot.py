@@ -576,16 +576,6 @@ def _in_menu(c: dict[str, Any]) -> None:
         raise ValueError(f"{setting_of(c)!r} is no longer in the scout's menu; wait for the next scan and pick again")
 
 
-def setting_id(name: str) -> str:
-    """A short id of a setup for Telegram buttons (64 bytes of data at most): m0n, m+1l, g+3s."""
-    return su.parse(name).sid
-
-
-def setting_by_id(sid: str) -> str | None:
-    s = su.from_sid(sid)
-    return s.name if s is not None else None
-
-
 def what_line(c: dict[str, Any]) -> str:
     """"BTC · Mid 0 · Neutral · 40x": market, mode, spread, bias and leverage, as the owner reads a setup."""
     try:

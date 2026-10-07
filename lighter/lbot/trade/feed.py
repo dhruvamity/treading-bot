@@ -9,7 +9,6 @@ from __future__ import annotations
 
 import asyncio
 import time
-from collections import deque
 from collections.abc import Callable
 from typing import Any
 
@@ -31,7 +30,6 @@ class MarketFeed:
         self.ws.add_handler(self.on_msg)
         self.trade_listeners: list[TradeListener] = []
         self.book_listeners: list[Callable[[], None]] = []
-        self.flow: deque[tuple[float, float]] = deque()      # (time, taker usd) over the last 5 minutes
         self.book_at = 0.0
         self.resync_at = 0.0          # when the running book re-subscribe was sent (0: none running)
         self._task: asyncio.Task[None] | None = None
@@ -67,11 +65,6 @@ class MarketFeed:
             trades = list(msg.get("trades") or []) + list(msg.get("liquidation_trades") or [])
             if not trades or msg.get("type", "").startswith("subscribed"):
                 return     # the subscribe reply repeats recent trades: history, not new flow
-            now = time.time()
-            for t in trades:
-                self.flow.append((now, float(t.get("usd_amount") or 0)))
-            while self.flow and self.flow[0][0] < now - 300:
-                self.flow.popleft()
             for f in self.trade_listeners:
                 f(trades)
 
@@ -96,6 +89,3 @@ class MarketFeed:
         if b is None or a is None or b[0] >= a[0]:
             return None
         return b[0], a[0], b[1], a[1]
-
-    def flow_usd_5m(self) -> float:
-        return sum(u for _, u in self.flow)

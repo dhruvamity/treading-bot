@@ -13,11 +13,10 @@ than live could.
 
 from __future__ import annotations
 
-import asyncio
 import math
 import time
 from collections.abc import Callable
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from typing import Any
 
 from lbot.config import Latency, Requests
@@ -282,26 +281,3 @@ class PaperExchange(Exchange):
             if o.state != "done":
                 o.state, o.why_done = "done", "stopped"
         await self.feed.stop()
-
-
-@dataclass
-class Snapshot:
-    """What the engine reads each second (both exchanges fill it the same way)."""
-
-    bid: float
-    ask: float
-    bid_sz: float
-    ask_sz: float
-    pos: float
-    entry: float | None
-    equity: float | None
-    orders: list[Order] = field(default_factory=list)
-
-
-async def wait_until(pred: Callable[[], bool], timeout_s: float, every_s: float = 0.1) -> bool:
-    end = time.time() + timeout_s
-    while time.time() < end:
-        if pred():
-            return True
-        await asyncio.sleep(every_s)
-    return pred()

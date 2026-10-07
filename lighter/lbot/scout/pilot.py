@@ -12,7 +12,6 @@ from __future__ import annotations
 
 import json
 import time
-from pathlib import Path
 from typing import Any
 
 from lbot import ops
@@ -112,7 +111,3 @@ def offer(cfg: Config, scan: dict[str, Any]) -> None:
         p.write_text(key)
         event(cfg, "offer", f"New #1 Most Volume: {key} @ {top['leverage']:g}x, ${top['volume_d']:,.0f} a day at "
                             f"${top['cost_1k']:.3f} per $1,000 (backtest, {top['days']} day(s))")
-
-
-def default_spec_path(cfg: Config, mode: str) -> Path:
-    return cfg.state_dir / f"spec-{mode}.json"

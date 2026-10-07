@@ -198,9 +198,6 @@ class Rest:
                                               "start_timestamp": start_s, "end_timestamp": end_s,
                                               "count_back": count, "ignore_transfers": "false"}, auth=True)
 
-    async def recent_trades(self, market: int, limit: int = 100) -> Any:
-        return await self.get("/api/v1/recentTrades", {"market_id": market, "limit": limit})
-
     async def candles(self, market: int, resolution: str, start_s: int, end_s: int, count: int = 500) -> Any:
         return await self.get("/api/v1/candles", {"market_id": market, "resolution": resolution,
                                                   "start_timestamp": start_s, "end_timestamp": end_s,

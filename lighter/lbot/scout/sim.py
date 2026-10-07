@@ -247,12 +247,6 @@ class Window:
         return cost / qty
 
 
-def rules_for(m: Any) -> MarketRules:
-    """From a lbot.venue.market.Market."""
-    return MarketRules(tick=m.tick, step=m.step, min_base=m.min_base, min_quote=m.min_quote, mmf=m.mmf_frac,
-                       maker_fee=m.maker_fee, taker_fee=m.taker_fee)
-
-
 class Sim:
     def __init__(self, p: Params, sz: Sizes, mr: MarketRules, cfg: SimCfg | None = None, name: str = "") -> None:
         self.p, self.sz, self.mr = p, sz, mr
