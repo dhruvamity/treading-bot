@@ -293,7 +293,7 @@ def test_the_dead_mans_switch_alone_places_two_far_orders_and_trades_nothing(cfg
 def test_a_scheduled_cancel_all_lighter_answers_ok_to_but_does_not_hold_fails_and_the_expiry_is_still_judged(cfg, tmp_path):
     rep, v, _said, notes = dms_alone(cfg, tmp_path, forgets=True)
     r = results(rep)
-    assert r["dead man's switch"] == lt.FAIL and "holds NO scheduled time" in notes["dead man's switch"]
+    assert r["dead man's switch"] == lt.INFO and "holds NO scheduled time" in notes["dead man's switch"]
     assert "did not run" in notes["dead man's switch"]          # what Lighter says it did with the transaction
     assert r["order expiry"] == lt.PASS and "a request after the scheduled time" not in r
     assert rep.clean and not v.orders
@@ -302,11 +302,11 @@ def test_a_scheduled_cancel_all_lighter_answers_ok_to_but_does_not_hold_fails_an
 def test_a_scheduled_cancel_all_that_fires_late_or_never_fails_and_says_which(cfg, tmp_path):
     rep, v, _said, notes = dms_alone(cfg, tmp_path, late_s=150.0)
     r = results(rep)
-    assert r["dead man's switch"] == lt.FAIL and "LATE" in notes["dead man's switch"] and r["order expiry"] == lt.PASS
+    assert r["dead man's switch"] == lt.INFO and "LATE" in notes["dead man's switch"] and r["order expiry"] == lt.PASS
     assert rep.clean and not v.orders
     rep2, v2, _said2, notes2 = dms_alone(cfg, tmp_path / "b", late_s=9e9)
     r2 = results(rep2)
-    assert r2["dead man's switch"] == lt.FAIL and "STILL THERE 30" in notes2["dead man's switch"]
+    assert r2["dead man's switch"] == lt.INFO and "STILL THERE 30" in notes2["dead man's switch"]
     assert r2["order expiry"] == lt.PASS and "while the other order stayed" in notes2["order expiry"]
     assert "accepted; the order is still listed" in notes2["a request after the scheduled time"]
     assert rep2.clean and not v2.orders and v2.scheduled is None      # the clean-up cancelled it and withdrew the time
@@ -315,7 +315,7 @@ def test_a_scheduled_cancel_all_that_fires_late_or_never_fails_and_says_which(cf
 def test_an_expiry_lighter_does_not_act_on_fails_and_a_switch_the_next_request_fires_is_reported(cfg, tmp_path):
     rep, v, _said, notes = dms_alone(cfg, tmp_path, late_s=9e9, expires=False, lazy=True)
     r = results(rep)
-    assert r["dead man's switch"] == lt.FAIL and r["order expiry"] == lt.FAIL and "STILL THERE" in notes["order expiry"]
+    assert r["dead man's switch"] == lt.INFO and r["order expiry"] == lt.FAIL and "STILL THERE" in notes["order expiry"]
     assert "refused (21122" in notes["a request after the scheduled time"]
     assert "now gone" in notes["a request after the scheduled time"]
     assert rep.clean and not v.orders

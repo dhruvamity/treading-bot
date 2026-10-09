@@ -47,6 +47,9 @@ DMS_TRY_MS = (30_000, C.CANCEL_ALL_MIN_MS + 30_000)   # a short horizon first (i
 DMS_LATE_OK_S = 60.0                 # the scheduled cancel-all may fire this long after its time and still pass
 DMS_LATE_S = 300.0                   # and the test waits this long past the time before it calls it never
 PASS, FAIL, INFO, SKIP = "PASS", "FAIL", "INFO", "SKIP"
+# since the runs of 2026-10-09 the bot counts on the expiry of its orders, so the scheduled cancel-all not firing is
+# a fact about Lighter, not a bug of the bot
+NOT_RELIED_ON = "(the bot does not count on this: the expiry on its orders is what clears them) "
 
 
 class Abort(Exception):
@@ -505,14 +508,14 @@ class LiveTest:
         if not cid:
             pass
         elif not ahead:
-            self.note(name, FAIL, f"Lighter refused the scheduled cancel-all: {err}")
+            self.note(name, INFO, NOT_RELIED_ON + f"Lighter refused the scheduled cancel-all: {err}")
         else:       # "OK" only means Lighter took the request: what counts is the time it then holds for the account
             await self.sleep(3.0)
             held, _n = await self.venue_schedule()
             if not held:
                 hashes = list(reply.get("tx_hash") or []) if isinstance(reply, dict) else []
                 why = await self.tx_note(str(hashes[-1])) if hashes else "its answer named no transaction"
-                self.note(name, FAIL, f"{how}; Lighter answered OK but holds NO scheduled time for the account ({why}): "
+                self.note(name, INFO, NOT_RELIED_ON + f"{how}; Lighter answered OK but holds NO scheduled time for the account ({why}): "
                                       "it would never fire")
         if not held and not expiring:
             await self.ex.disarm()
@@ -534,10 +537,10 @@ class LiveTest:
             late = gone.get(cid, self.clock()) - at_ms / 1000
             if cid not in gone:
                 now_held, _n = await self.venue_schedule()
-                self.note(name, FAIL, f"{how}; Lighter held the time ({held}, asked {at_ms}) but the order was STILL "
+                self.note(name, INFO, NOT_RELIED_ON + f"{how}; Lighter held the time ({held}, asked {at_ms}) but the order was STILL "
                                       f"THERE {late:.0f} s past it (the account's time now reads {now_held})")
             elif late > DMS_LATE_OK_S:
-                self.note(name, FAIL, f"{how}; Lighter cancelled the order by itself but LATE: {late:.0f} s past its "
+                self.note(name, INFO, NOT_RELIED_ON + f"{how}; Lighter cancelled the order by itself but LATE: {late:.0f} s past its "
                                       "time. For that long after the bot dies its orders stay up")
             else:
                 self.note(name, PASS, f"{how}; Lighter cancelled the order by itself {max(late, 0):.0f} s past its time")

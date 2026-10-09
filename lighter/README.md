@@ -220,12 +220,12 @@ wild in the last hour, its data fresh.
   and the bot's own books agree), `FAIL` (a bug to fix before a real run), `INFO` (something learned, such as how far from the
   price an order may rest).
 
-  **Runs of 2026-10-09, SPY (three, no cost, each ended flat):** orders, moves, cancels, both leverages, a long and a short with
+  **Runs of 2026-10-09, SPY (four, no cost, each ended flat):** orders, moves, cancels, both leverages, a long and a short with
   their closes, a stop and a take-profit all worked, and Lighter accepted a worst price 5% past the trigger. What they found:
   Lighter holds a scheduled cancel-all for the account but did not act on it for 5 minutes past its time, and then cancelled
-  everything the moment the account sent another request. So it cannot clear a dead bot's orders. An order's own expiry does:
-  Lighter removed a 5.5-minute order 17 s after it expired. The bot's quotes used to carry a 28-day expiry; they now carry 5.5
-  minutes and are replaced before it runs out. `lighter livetest --dms-only` checks both again, on the bot's own order path.
+  everything the moment the account sent another request. So it cannot clear a dead bot's orders, and the test now reports it
+  as `INFO`. An order's own expiry does: the bot's quotes used to carry 28 days; they now carry 5.5 minutes and are replaced
+  before that runs out, and the last run saw Lighter remove an order placed that way 31 s after its expiry.
 - **Before the first quote,** the run cancels your orders on that market, sets the leverage (cross margin) and schedules the cancel-all.
   It treats every order on that market as its own: trade by hand on another market, or use a sub-account (`LIGHTER_ACCOUNT_INDEX`).
 - **Control** (CLI, or Telegram): `lighter pause` / `unpause` (no new orders; closing orders keep working), `close` (close the position, maker
