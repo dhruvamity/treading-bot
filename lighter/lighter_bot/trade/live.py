@@ -115,9 +115,37 @@ class LiveExchange(Exchange):
         if not self.budget.allows(kind):
             return False
         txs, new_orders, _ = self._sign_changes(changes)
+        # The books are written BEFORE the request leaves, and put back if it is refused. Lighter's order stream can
+        # report an order before the request's own answer arrives; written afterwards, a new order was first taken
+        # for someone else's, and "cancelled" was overwritten with "cancelling" until the next reconcile.
+        now = time.time()
+        before: dict[int, tuple[str, float, float, float]] = {}
+        for o in new_orders:
+            o.sent_at = now
+            self.orders[o.cid] = o
+        for c in changes:
+            o = self.orders.get(c.cid) if c.kind in ("modify", "cancel") else None
+            if o is None:
+                continue
+            before[c.cid] = (o.state, o.px, o.qty, o.sent_at)
+            if c.kind == "modify" and c.quote is not None:
+                o.state, o.sent_at = "sent", now
+                o.px, o.qty = c.quote.px, c.quote.qty
+            else:
+                o.state, o.sent_at = "cancelling", now
+
+        def undo() -> None:
+            for o in new_orders:
+                self.orders.pop(o.cid, None)
+            for cid, (state, px, qty, sent_at) in before.items():
+                o = self.orders.get(cid)
+                if o is not None and o.state in ("sent", "cancelling"):      # the stream has not said otherwise
+                    o.state, o.px, o.qty, o.sent_at = state, px, qty, sent_at
+
         try:
             r = await self.rest.send(txs, kind=kind, wait=False)
         except ApiError as e:
+            undo()
             self.errors.append((time.time(), f"{e.code}: {e.message}"))
             self.rejects.append((time.time(), str(e.code)))
             log.warn("send_refused", code=e.code, msg=e.message, n=len(txs))
@@ -125,24 +153,13 @@ class LiveExchange(Exchange):
                 self.budget.block(5.0)
             return False
         except (TimeoutError, OSError) as e:
+            undo()
             log.warn("send_failed", err=str(e))
             self._last_reconcile = 0.0      # find out what landed
             return False
         if r is None:
+            undo()
             return False
-        now = time.time()
-        for o in new_orders:
-            o.sent_at = now
-            self.orders[o.cid] = o
-        for c in changes:
-            o = self.orders.get(c.cid)
-            if o is None:
-                continue
-            if c.kind == "modify" and c.quote is not None:
-                o.state, o.sent_at = "sent", now
-                o.px, o.qty = c.quote.px, c.quote.qty
-            elif c.kind == "cancel":
-                o.state, o.sent_at = "cancelling", now
         return True
 
     async def taker(self, qty_signed: float) -> None:
@@ -300,9 +317,15 @@ class LiveExchange(Exchange):
         try:
             r = await self.rest.account(self.account)
             acc = (r.get("accounts") or [{}])[0]
-            for p in acc.get("positions") or []:
-                if int(p.get("market_id", -1)) == self.market.market_id:
-                    self._on_position(p)
+            rows = acc.get("positions")
+            mine = [p for p in rows or [] if int(p.get("market_id", -1)) == self.market.market_id]
+            for p in mine:
+                self._on_position(p)
+            if isinstance(rows, list) and not mine:
+                # Lighter answered with its positions and this market is not among them: flat. Without this a
+                # closed position stayed in the bot's books for good, and it kept sending exits for it (audit
+                # 2026-10-07; `lighter livetest` reports which way Lighter lists a closed market).
+                self.acct.pos, self.acct.entry = 0.0, None
             if acc.get("total_asset_value") is not None:
                 self.acct.equity = float(acc["total_asset_value"])
             if acc.get("available_balance") is not None:
