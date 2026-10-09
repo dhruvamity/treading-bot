@@ -50,6 +50,9 @@ def pick(cfg: Config, lst: str, n: int) -> dict[str, Any]:
 def start(cfg: Config, spec: RunSpec, *, wait_close_s: float = 600.0, confirmed: bool = False) -> int:
     """Start `spec` in the background (closing a run already going in the same mode first). A live spec needs
     `confirmed` (the owner typed LIVE or the Telegram code): the run checks the confirmation is fresh."""
+    why = cfg.no_trading()
+    if why:      # a recorder or a scout machine (BOT_ROLE): said before anything running is closed
+        raise ValueError(why)
     name = f"run-{spec.mode}"
     if ops.running(cfg, name):
         send_control(cfg.state_dir, spec.mode, "close")

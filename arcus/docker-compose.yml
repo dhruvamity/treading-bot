@@ -3,6 +3,7 @@
 #
 #   docker compose up -d --build                     the scout: record every Arcus perp, backtest every 30 min
 #   SCOUT_CAPITAL=500 docker compose up -d --build   rank for a $500 account (default auto: no keys here, so $100)
+#   BOT_ROLE=recorder docker compose up -d --build   record only, no scans (a small machine: scans need the memory)
 #   docker compose ps                                running and healthy?
 #   docker compose logs -f scout                     what it is doing
 #   cat data/scout/report.txt                        the latest ranking (best per market, and each at max leverage)
@@ -19,6 +20,8 @@ services:
     container_name: arcus-scout
     restart: unless-stopped
     command: ["scout", "run", "--depth", "--workers", "${SCOUT_WORKERS:-auto}", "--capital", "${SCOUT_CAPITAL:-auto}"]
+    environment:
+      BOT_ROLE: "${BOT_ROLE:-all}"
     volumes:
       - ./data:/app/data
       - ./state:/app/state

@@ -18,6 +18,7 @@ import pytest
 
 os.environ["LBOT_NO_SPAWN"] = "1"     # the Lighter part and the funding arbitrage refuse to start a process too
 os.environ["ARB_NO_SPAWN"] = "1"
+os.environ["BOT_ROLE"] = "all"       # whatever this machine's .env says, the tests run as one machine
 
 
 @pytest.fixture(autouse=True)

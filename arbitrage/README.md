@@ -7,6 +7,10 @@ that you set and a confirmation each time.
 
 **`arbitrage <command>` in this guide is `.venv/bin/arbitrage <command>`**, run from `treading-bot/arcus`.
 
+On two machines (`BOT_ROLE` in `arcus/.env`, [main README](../README.md#two-machines-one-records-one-trades)) the executor runs on the
+machine that trades (`all` or `trader`): it needs nothing from the recorder, since it reads both venues itself. A `recorder` or a
+`scout` machine refuses `arbitrage run` and `start`; `scan`, `plan`, `history` and `backtest` work anywhere.
+
 > **Risk warning.** Experimental software that can place real orders with real money. The live adapters have never
 > sent an order (section 6 says exactly what is unproven). Backtests are estimates. Nothing here is financial advice.
 

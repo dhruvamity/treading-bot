@@ -276,6 +276,10 @@ class Bot:
         elif cmd == "auto":
             await self.cmd_auto(chat, arg)
         elif cmd == "scannow":
+            if not self.cfg.ranks:      # a trader: the lists are made on another machine and fetched (arcus sync)
+                await self.api.send(chat, card("🔄", "No scans here", lines(
+                    "This machine does not scan: its lists come from the other machine.", "/status shows their age")))
+                return
             (self.cfg.state_dir / "scan_now").write_text(str(time.time()))
             await self.api.send(chat, card("🔄", "Scan asked", lines("The scout scans within a few seconds; "
                                                                     "/top3 afterwards")))
@@ -389,6 +393,8 @@ class Bot:
             text_, kb = self.list_card(data.split(":")[1])
             await self.api.send(chat, text_, kb)
         elif data == "scan":
+            if not self.cfg.ranks:
+                return "no scans on this machine: the lists come from the other one"
             (self.cfg.state_dir / "scan_now").write_text(str(time.time()))
             return "scan asked"
         elif data == "status":

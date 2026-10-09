@@ -267,7 +267,7 @@ class TelegramBot:
                                     silent=True)
             else:
                 await self.api.send(self.owner_chat_id, text,
-                                    silent=e.get("kind") not in ("failed", "paused", "auto_alert"))
+                                    silent=e.get("kind") not in ("failed", "paused", "auto_alert", "alert"))
 
     # ------------------------------------------------------------------ updates
     async def handle(self, u: dict[str, Any]) -> None:
@@ -524,6 +524,18 @@ class TelegramBot:
         trigger = self._state_dir() / SCAN_NOW
         every, want = settings.scout_options(settings.load(self._state_dir()))
         age = now - scan["ts_us"] / 1e6 if scan else float("inf")
+        from arcus.common import role as roles
+
+        with contextlib.suppress(ValueError):
+            if not roles.ranks(roles.role()):   # a trader: nothing scans here, the lists are fetched (arcus/handoff.py)
+                if not (force or age > 1.5 * 60 * float(every or 30)):
+                    return ""
+                trigger.parent.mkdir(parents=True, exist_ok=True)
+                trigger.touch()                 # the follow service takes its next turn now
+                return ("This machine does not scan: its lists come from the other machine · fetching now"
+                        if os.environ.get("BOT_SYNC_FROM") else
+                        "This machine does not scan and no other machine is set to send lists (arcus sync status) · "
+                        "/run works without them")
         if st.get("running"):
             started = float(st.get("started") or now)
             eta = eta_s(st, int(st.get("workers") or 1), next_is_full(scan, started))

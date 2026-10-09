@@ -17,7 +17,11 @@ import yaml
 ROOT = Path(os.environ.get("LBOT_ROOT") or Path(__file__).resolve().parent.parent)
 
 
-OURS = ("LIGHTER_", "LBOT_", "TELEGRAM_")      # the keys this project reads from a credentials file
+OURS = ("LIGHTER_", "LBOT_", "TELEGRAM_", "BOT_ROLE")      # the keys this project reads from a credentials file
+# What this machine is for (BOT_ROLE, one variable for the three bots; treading-bot/arcus/arcus/common/role.py says why):
+# all = everything on one machine; trader = Telegram and the runs, no recording and no scans (it follows the lists
+# another machine makes); recorder = the tape only; scout = the tape and the scans, no runs.
+ROLES = ("all", "trader", "recorder", "scout")
 
 
 def _env_file(p: Path) -> dict[str, str]:
@@ -123,6 +127,24 @@ class Config:
     telegram_chat: str = ""
     telegram_users: tuple[int, ...] = ()
     loop_ms: int = 500
+    role: str = "all"
+
+    @property
+    def records(self) -> bool:
+        return self.role in ("all", "recorder", "scout")
+
+    @property
+    def ranks(self) -> bool:
+        return self.role in ("all", "scout")
+
+    @property
+    def trades(self) -> bool:
+        return self.role in ("all", "trader")
+
+    def no_trading(self) -> str:
+        """Why this machine must not start a run ("" when it may)."""
+        return "" if self.trades else (f"this machine is a {self.role} (BOT_ROLE={self.role} in arcus/.env): runs "
+                                       "start on the trader machine")
 
     def ensure_dirs(self) -> None:
         for d in (self.data_dir, self.state_dir, self.logs_dir):
@@ -146,6 +168,9 @@ def load(root: Path | None = None, env: dict[str, str] | None = None) -> Config:
     acct = e.get("LIGHTER_ACCOUNT_INDEX", "").strip()
     users = tuple(int(x) for x in e.get("TELEGRAM_ALLOWED_USER_IDS", "").replace(" ", "").split(",")
                   if x.strip().isdigit())
+    role = (e.get("BOT_ROLE") or "all").strip().lower()
+    if role not in ROLES:      # a typing mistake must not quietly turn a recorder into a machine that trades
+        raise ValueError(f"BOT_ROLE={role!r}: must be one of {', '.join(ROLES)}")
     return Config(
         env=name,
         endpoints=Endpoints(v["rest"].rstrip("/"), v["ws"], int(v["chain_id"])),
@@ -168,4 +193,5 @@ def load(root: Path | None = None, env: dict[str, str] | None = None) -> Config:
         telegram_chat=e.get("TELEGRAM_CHAT_ID", "").strip(),
         telegram_users=users,
         loop_ms=int(raw.get("loop_ms", 500)),
+        role=role,
     )

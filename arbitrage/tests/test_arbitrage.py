@@ -262,3 +262,16 @@ def test_the_background_executor_is_never_started_without_its_conditions(tmp_pat
     (tmp_path / "position-live.json").write_text(json.dumps({"phase": "flat"}))
     assert ops.current_mode(tmp_path) == "paper" and not ops.alive(0)
 
+
+
+def test_the_executor_starts_only_on_a_machine_that_trades(tmp_path, monkeypatch):
+    """Two machines (BOT_ROLE): a recorder or a scout machine never starts the arbitrage."""
+    from arbitrage import ops
+    from arbitrage.config import no_trading
+
+    assert no_trading({}) == "" and no_trading({"BOT_ROLE": "trader"}) == "" and no_trading({"BOT_ROLE": "ALL"}) == ""
+    assert "recorder" in no_trading({"BOT_ROLE": "recorder"}) and "must be one of" in no_trading({"BOT_ROLE": "x"})
+    for r in ("recorder", "scout"):
+        monkeypatch.setenv("BOT_ROLE", r)
+        ok, msg = ops.start("paper", {"arcus": 120.0, "lighter": 120.0}, state=tmp_path)
+        assert ok is False and f"this machine is a {r}" in msg and not (tmp_path / "run-paper.pid").exists()

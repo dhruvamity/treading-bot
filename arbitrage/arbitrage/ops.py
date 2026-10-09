@@ -18,7 +18,7 @@ import sys
 import time
 from pathlib import Path
 
-from arbitrage.config import ROOT, STATE, read_env
+from arbitrage.config import ROOT, STATE, no_trading, read_env
 
 MODES = ("paper", "live")
 
@@ -93,6 +93,9 @@ def start(mode: str, collateral: dict[str, float] | None = None, *, state: Path 
     Live is refused without ARB_LIVE=1; the caller has already asked the owner (a typed LIVE, or a typed code)."""
     if mode not in MODES:
         return False, f"unknown mode {mode!r}"
+    why = no_trading()
+    if why:
+        return False, f"not started: {why}"
     pid = running(mode, state)
     if pid:
         return False, f"{mode}: already running (pid {pid})"

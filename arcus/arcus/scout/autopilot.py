@@ -62,6 +62,8 @@ REST_S = 10 * 60
 EVENT_AHEAD_S = 15 * 60   # flat 15 min before the bot's own event window (30 min) opens
 STALE_S = 10 * 60
 START_GRACE_S = 180
+WARM_MIN = 61             # one-minute prices a machine with no tape needs before it judges a market's state
+STALE_PLAYBOOK_DAYS = 3.0  # ... and the oldest playbook it starts a run from (built daily where the tape is)
 DEFAULT_BUDGET = 5.0
 DEFAULT_MAX_COST = 1.5      # bp in the backtest; live BTC has cost about 0.8x the backtest (note 2026-09-26)
 COST_RANGE = (0.8, 3.0)
@@ -250,7 +252,7 @@ class Look:
 class Autopilot:
     def __init__(self, root: Path, pilot: Any, *, calendar: TradingCalendar | None = None,
                  recent: Callable[[str], list[tuple[int, float]]] | None = None,
-                 clock: Callable[[], float] = time.time) -> None:
+                 clock: Callable[[], float] = time.time, tapeless: bool = False) -> None:
         self.root = root                                   # the project root
         self.pilot = pilot
         self.state_dir = root / pilot.control.app.state_dir
@@ -258,6 +260,9 @@ class Autopilot:
         self.calendar = calendar or TradingCalendar()
         self.recent = recent
         self.clock = clock
+        # a trader records nothing (arcus/common/role.py): the usual level comes from the file the scout machine
+        # writes, the newest prices from its own watcher (`recent`, arcus/scout/watch.py)
+        self.tapeless = tapeless
         self._usual: dict[tuple[str, str], rg.Usual] = {}
         self.busy = False
 
@@ -273,7 +278,13 @@ class Autopilot:
         k = (market, _day(now))
         if k not in self._usual:
             self._usual = {kk: v for kk, v in self._usual.items() if kk[1] == k[1]}
-            self._usual[k] = rg.usual(self.store, market, int(now * S))
+            if not self.tapeless:
+                self._usual[k] = rg.usual(self.store, market, int(now * S))
+            else:
+                u = rg.load_usual(self.scout / rg.USUAL_FILE, market)
+                if u is None:      # not here yet: look again next minute (never judge against an empty level)
+                    raise LookupError("no usual level yet: it comes with the lists")
+                self._usual[k] = u
         return self._usual[k]
 
     def look(self, pb: dict[str, Any], now: float, offline: set[str]) -> list[Look]:
@@ -284,7 +295,13 @@ class Autopilot:
             blocked = event_block(self.calendar, m, int(now * S))
             reg = None
             try:
-                reg = rg.now(self.store, m, int(now * S), self.usual(m, now), self.recent(m) if self.recent else None)
+                rec = self.recent(m) if self.recent else None
+                reg = rg.now(self.store, m, int(now * S), self.usual(m, now), rec)
+                if self.tapeless and len(rec or ()) < WARM_MIN:   # a trader, just started: an hour of prices is
+                    reg = None                                    # what the regime is measured on
+                    blocked = blocked or f"collecting prices ({len(rec or ())} of {WARM_MIN} minutes)"
+            except LookupError as e:
+                blocked = blocked or str(e)
             except Exception as e:   # a market with no data now: left out this minute
                 blocked = blocked or f"no regime ({type(e).__name__})"
             if m in offline:
@@ -335,6 +352,13 @@ class Autopilot:
             st["last"] = {"ts": now, "action": "idle", "reason": "no playbook yet (the scout builds it)"}
             save(self.state_dir, st)
             return Decision("idle", "no playbook yet")
+        if self.tapeless and pbk.age_days(pb, now) > STALE_PLAYBOOK_DAYS and not st.get("run"):
+            # a trader whose other machine stopped sending: start nothing on old numbers (a run going is still
+            # judged every minute by the live prices, and stopped as usual)
+            why = f"the playbook is {pbk.age_days(pb, now):.0f} days old: the other machine has stopped sending"
+            st["last"] = {"ts": now, "action": "idle", "reason": why}
+            save(self.state_dir, st)
+            return Decision("idle", why)
         scan = self.pilot.latest_scan() or {}
         looks = self.look(pb, now, set(scan.get("offline") or []))
         opts = [o for lk in looks if not lk.blocked for o in lk.options]

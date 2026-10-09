@@ -306,6 +306,11 @@ class Control:
         return out
 
     def start_run(self, name: str, *, live: bool) -> dict[str, Any]:
+        from arcus.common import role as roles
+
+        why = roles.no_trading()
+        if why:
+            raise RuntimeError(why)
         self.start_asked["live" if live else "paper"] = time.time()   # the starter says it started, not the watcher
         log_dir = self.root / self.app.logs_dir / "runs"
         log_dir.mkdir(parents=True, exist_ok=True)
