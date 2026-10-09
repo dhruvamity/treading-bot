@@ -52,7 +52,7 @@ class Venue:
             self.scheduled = None
             self._cancel_everything()
         for cid, o in list(self.orders.items()):
-            if self.expires and o.get("expiry", 0) <= self.now * 1000:
+            if self.expires and o.get("expiry") and o["expiry"] <= self.now * 1000:
                 self._order_frame({**self.orders.pop(cid), "status": "canceled-expired"})
         await asyncio.sleep(0)
 
@@ -147,7 +147,8 @@ class Venue:
         o = {"client_order_index": cid, "order_index": 2**48 + cid, "price": f"{px:.2f}", "is_ask": not buy,
              "remaining_base_amount": f"{qty:.3f}", "status": "open", "reduce_only": bool(f["ReduceOnly"]),
              "type": {0: "limit", 1: "market", 2: "stop-loss", 4: "take-profit"}[f["Type"]],
-             "trigger_price": f"{f['TriggerPrice'] / 100:.2f}", "expiry": f["OrderExpiry"]}
+             "trigger_price": f"{f['TriggerPrice'] / 100:.2f}",
+             "expiry": self.now * 1000 + f["OrderExpiry"] - time.time() * 1000}      # on this stand-in's own clock
         if f["Type"] in (C.ORDER_STOP_LOSS, C.ORDER_TAKE_PROFIT):
             self.orders[cid] = {**o, "status": "pending"}
             return self._order_frame(self.orders[cid])
@@ -286,7 +287,7 @@ def test_the_dead_mans_switch_alone_places_two_far_orders_and_trades_nothing(cfg
     assert not rep.failed and rep.clean
     assert C.TX_UPDATE_LEVERAGE not in v.sent and v.tid == 0 and v.pos == 0 and not v.orders and v.scheduled is None
     assert v.sent.count(C.TX_CREATE_ORDER) == 2 and "by itself" in notes["dead man's switch"]
-    assert "dead man's switch only" in lt.plan_text(M, 5.0, 1.0, True, True)
+    assert "a dead bot's orders only" in lt.plan_text(M, 5.0, 1.0, True, True)
 
 
 def test_a_scheduled_cancel_all_lighter_answers_ok_to_but_does_not_hold_fails_and_the_expiry_is_still_judged(cfg, tmp_path):

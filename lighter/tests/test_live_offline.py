@@ -44,6 +44,9 @@ def test_changes_are_signed_into_one_batch(ex):
     assert f[2]["Index"] == 77
     assert f[0]["Nonce"] < f[1]["Nonce"] < f[2]["Nonce"]            # a batch needs rising nonces
     assert new[0].px == pytest.approx(84000.0) and new[0].state == "sent"
+    # every quote expires by itself 5.5 minutes on: that is what clears a dead bot's orders on Lighter
+    assert f[0]["OrderExpiry"] == pytest.approx(time.time() * 1000 + 330_000, abs=5_000)
+    assert new[0].expires == f[0]["OrderExpiry"] / 1000
 
 
 def test_order_updates(ex):

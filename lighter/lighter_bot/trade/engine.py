@@ -32,6 +32,7 @@ from lighter_bot.trade.strategy import BUY, SELL, Quote, Quoter, Rules, Setup, V
 
 log = Log("engine")
 US = 1_000_000
+RENEW_S = 120.0      # a live quote is replaced this long before its expiry (lighter_bot/trade/live.py: QUOTE_EXPIRY_MS)
 
 
 @dataclass
@@ -166,9 +167,11 @@ class Engine:
             fh.write(json.dumps(rec) + "\n")
 
     # ---------------------------------------------------------------- the order diff
-    def diff(self, want: list[Quote], orders: list[Order]) -> list[Change]:
+    def diff(self, want: list[Quote], orders: list[Order], now: float | None = None) -> list[Change]:
         """Keep a live order within the tolerance (and 20% of its size); modify it otherwise; cancel what is not wanted
-        (and anything the bot did not place); leave orders still in flight alone."""
+        (and anything the bot did not place); leave orders still in flight alone. A live order close to its expiry is
+        replaced, wanted price or not: Lighter drops it by itself at the expiry, and a modify cannot move that."""
+        now = time.time() if now is None else now
         mid = (self.ex.feed.bbo() or (0, 0, 0, 0))
         tol = max(2 * self.m.tick, self.params.tol_bps * 1e-4 * (mid[0] + mid[1]) / 2)
         live = [o for o in orders if o.state in ("open", "sent")]
@@ -182,10 +185,11 @@ class Engine:
             used.add(match.cid)
             if match.state == "sent":
                 continue            # not acknowledged yet: never modify an order Lighter has not confirmed
+            renew = bool(match.expires) and match.expires - now < RENEW_S
             if abs(match.px - q.px) <= tol and abs(match.qty - q.qty) <= 0.2 * q.qty and \
-                    match.reduce_only == q.reduce_only:
+                    match.reduce_only == q.reduce_only and not renew:
                 continue
-            if match.reduce_only != q.reduce_only:
+            if match.reduce_only != q.reduce_only or renew:
                 out += [Change("cancel", cid=match.cid), Change("new", q)]
             else:
                 out.append(Change("modify", q, match.cid))
@@ -282,7 +286,7 @@ class Engine:
             self._stop.set()
         if g.state == "done" and not pos:
             self.run.done = self.run.done or g.why
-        changes = self.diff(want, orders)
+        changes = self.diff(want, orders, now)
         if changes:
             await ex.send(changes, kind)
         dt = self.period

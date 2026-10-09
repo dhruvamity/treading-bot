@@ -32,6 +32,7 @@ from pathlib import Path
 from typing import Any
 
 from lighter_bot.trade.exchange import Change, Fill
+from lighter_bot.trade.live import QUOTE_EXPIRY_MS
 from lighter_bot.trade.strategy import BUY, SELL, Quote
 from lighter_bot.venue import consts as C
 from lighter_bot.venue.rest import RESERVE, ApiError
@@ -45,7 +46,6 @@ LIQUID_USD = 1_000_000.0
 DMS_TRY_MS = (30_000, C.CANCEL_ALL_MIN_MS + 30_000)   # a short horizon first (if Lighter takes it), else the bot's own
 DMS_LATE_OK_S = 60.0                 # the scheduled cancel-all may fire this long after its time and still pass
 DMS_LATE_S = 300.0                   # and the test waits this long past the time before it calls it never
-EXPIRY_MS = 5 * 60_000 + 30_000      # the shortest expiry Lighter takes on an order is 5 minutes ahead
 PASS, FAIL, INFO, SKIP = "PASS", "FAIL", "INFO", "SKIP"
 
 
@@ -466,28 +466,31 @@ class LiveTest:
                   else f"IT OPENED A POSITION of {pos:+g}")
 
     async def step_dead_mans_switch(self) -> None:
-        """What still protects the account once the bot is dead: Lighter's scheduled cancel-all, and an order's own
-        expiry. Two orders far under the price, one with the shortest expiry; neither is meant to trade."""
+        """What clears the orders of a dead bot: the expiry every quote of the bot carries, and Lighter's scheduled
+        cancel-all. Two orders far under the price, neither meant to trade: one through the bot's own path (so with
+        its expiry), one signed here with the 28-day expiry, which only the scheduled cancel-all can remove."""
         name = "dead man's switch"
         _held, others = await self.venue_schedule()
         if others:      # the scheduled cancel-all is for the whole account, not this market
             self.note(name, SKIP, f"the account has {others} open order(s) in other markets and Lighter's scheduled "
                                   "cancel-all would cancel them too. Nothing was sent for this step")
             return
-        cid, px = await self.far_order(BUY, "test-dms")
-        if cid is None or not await self.until_venue(lambda os_: bool(os_)):
+        ecid, px = await self.far_order(BUY, "test-expiry")
+        if ecid is None or not await self.until_venue(lambda os_: bool(os_)):
             self.note(name, SKIP, f"no resting order to cancel: {self.last_error()}")
             return
-        exp_ms = int(self.clock() * 1000) + EXPIRY_MS
-        ecid, tx = self.sign_order(BUY, self.qty(), px + self.m.tick, order_type=C.ORDER_LIMIT, tif=C.TIF_POST_ONLY,
-                                   reduce_only=False, expiry=exp_ms)
-        _r, eerr = await self.raw([tx])
-        expiring = not eerr and await self.until_venue(lambda os_: self.listed(os_, ecid))
+        exp_ms = int(self.clock() * 1000) + QUOTE_EXPIRY_MS
+        expiring = self.ex.orders[ecid].expires > 0
         if not expiring:
-            self.note("order expiry", FAIL, f"an order with a {EXPIRY_MS / 1000:.0f} s expiry was refused: "
-                                            f"{eerr or 'Lighter does not list it'}")
+            self.note("order expiry", FAIL, "the bot's own order carries no expiry: nothing would clear it")
+        cid, tx = self.sign_order(BUY, self.qty(), px + self.m.tick, order_type=C.ORDER_LIMIT, tif=C.TIF_POST_ONLY,
+                                  reduce_only=False, expiry=C.ORDER_EXPIRY_DEFAULT)
+        _r, derr = await self.raw([tx])
+        if derr or not await self.until_venue(lambda os_: self.listed(os_, cid)):
+            self.note(name, SKIP, f"the order for the scheduled cancel-all did not rest: {derr or 'Lighter does not list it'}")
+            cid = 0
         ahead, err, at_ms, reply = 0, "", 0, None
-        for ms in DMS_TRY_MS:
+        for ms in DMS_TRY_MS if cid else ():
             n = self.ex.nonces.take(2)
             at_ms = int(self.clock() * 1000) + ms
             reply, err = await self.raw([self.ex.signer.cancel_all(tif=C.CANCEL_ALL_ABORT, time_ms=0, nonce=n[0]),
@@ -499,7 +502,9 @@ class LiveTest:
         how = f"scheduled {ahead / 1000:.0f} s ahead" + (" (Lighter takes less than the 5 minutes the bot uses)"
                                                         if ahead < C.CANCEL_ALL_MIN_MS else "")
         held = 0
-        if not ahead:
+        if not cid:
+            pass
+        elif not ahead:
             self.note(name, FAIL, f"Lighter refused the scheduled cancel-all: {err}")
         else:       # "OK" only means Lighter took the request: what counts is the time it then holds for the account
             await self.sleep(3.0)
@@ -538,7 +543,7 @@ class LiveTest:
                 self.note(name, PASS, f"{how}; Lighter cancelled the order by itself {max(late, 0):.0f} s past its time")
         if expiring:
             late = gone.get(ecid, self.clock()) - exp_ms / 1000
-            what = f"an order with a {EXPIRY_MS / 1000:.0f} s expiry"
+            what = f"an order of the bot's own, which carries a {QUOTE_EXPIRY_MS / 1000:.0f} s expiry,"
             if ecid not in gone:
                 self.note("order expiry", FAIL, f"{what} was STILL THERE {late:.0f} s past its expiry")
             elif together:
@@ -550,7 +555,7 @@ class LiveTest:
                 self.note("order expiry", PASS, f"{what} was removed by Lighter {max(late, 0):.0f} s past its expiry"
                                                 + (", while the other order stayed" if held and cid not in gone else ""))
         if held and cid not in gone:    # what does Lighter do with the account's next request, past the scheduled time?
-            ok = await self.send([Change("modify", Quote(BUY, px + 3 * self.m.tick, self.qty(), "test-dms"), cid=cid)])
+            ok = await self.send([Change("modify", Quote(BUY, px + 4 * self.m.tick, self.qty(), "test-dms"), cid=cid)])
             await self.sleep(3.0)
             still = self.listed(await self.venue_orders(), cid)
             now_held, _n = await self.venue_schedule()
@@ -651,11 +656,11 @@ def plan_text(m: Any, lev_low: float, max_loss: float, dms: bool, dms_only: bool
     one = min_qty(m.min_base, m.min_quote, m.step, m.last_price) * m.last_price
     if dms_only:
         return "\n".join((
-            f"LIVE TEST on {m.symbol}, the dead man's switch only: two real orders of about ${one:.2f} each, far under "
+            f"LIVE TEST on {m.symbol}, a dead bot's orders only: two real orders of about ${one:.2f} each, far under "
             "the price, where they do not trade.",
-            "  It asks Lighter to cancel every order on the account 5.5 minutes later and gives one order a 5.5-minute",
-            "  expiry, then waits (up to 11 minutes) to see Lighter remove them by itself. It refuses if the account",
-            "  has orders in other markets.",
+            "  One is placed as the bot places its quotes, with their 5.5-minute expiry. For the other it asks Lighter",
+            "  to cancel every order on the account 5.5 minutes later. Then it waits (up to 11 minutes) to see Lighter",
+            "  remove them by itself. It refuses if the account has orders in other markets.",
             "  Expected cost: nothing. It ends with no orders. Do not trade this market by hand while it runs."))
     return "\n".join((
         f"LIVE TEST on {m.symbol}: real orders, real money, the smallest size Lighter takes (about ${one:.2f} each).",

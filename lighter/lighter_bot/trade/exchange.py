@@ -44,6 +44,7 @@ class Order:
     ahead: float = -1.0        # paper: queue ahead at our price
     oid: int = 0               # Lighter's order index, once known
     why_done: str = ""
+    expires: float = 0.0       # live: when Lighter drops the order by itself (0: paper, or not ours)
 
 
 @dataclass

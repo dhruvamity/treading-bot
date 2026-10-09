@@ -6,8 +6,12 @@
 - Account state arrives over an authenticated WebSocket: account_orders/<market>/<account> (our orders),
   account_all/<account> (positions and fills), user_stats/<account> (equity). A REST reconcile every 5 minutes (and
   whenever an order goes unacknowledged) makes Lighter the source of truth.
-- Dead man's switch: every 60 s the bot moves a scheduled cancel-all 5.5 minutes ahead (abort + schedule, one
-  request). If the bot or its machine dies, Lighter cancels every order within about 5 minutes by itself.
+- A dead bot's orders: every quote carries the shortest expiry Lighter takes (5.5 minutes), and the engine replaces
+  it 2 minutes before that (an expiry cannot be moved). If the bot or its machine dies, Lighter drops every order
+  within 5.5 minutes by itself. The live test of 2026-10-09 measured it: gone 17 s past the expiry.
+- The scheduled cancel-all ("dead man's switch", moved 5.5 minutes ahead every 60 s) is kept, but it is not that
+  protection: the same test showed Lighter acts on it only when the account's next request arrives, and a dead bot
+  sends none.
 - At start the market's orders are cancelled (the bot treats the account's orders on its market as its own) and the
   leverage is set (cross margin).
 """
@@ -35,6 +39,7 @@ log = Log("live")
 AUTH_LIFETIME_S = 7 * 3600
 DMS_EVERY_S = 60.0
 DMS_AHEAD_MS = C.CANCEL_ALL_MIN_MS + 30_000
+QUOTE_EXPIRY_MS = 5 * 60_000 + 30_000      # Lighter takes an expiry from 5 minutes ahead; 30 s of room for the clocks
 RECONCILE_EVERY_S = 300.0
 UNACKED_S = 10.0
 
@@ -92,12 +97,13 @@ class LiveExchange(Exchange):
             if c.kind == "new" and c.quote is not None:
                 q = c.quote
                 cid = self.ids.take()[0]
+                exp_ms = int(time.time() * 1000) + QUOTE_EXPIRY_MS
                 txs.append(self.signer.create_order(
                     market=m.market_id, client_index=cid, size=m.size_int(q.qty), price=self._px(q.side, q.px),
                     is_ask=q.side == SELL, order_type=C.ORDER_LIMIT, tif=C.TIF_POST_ONLY, reduce_only=q.reduce_only,
-                    expiry=C.ORDER_EXPIRY_DEFAULT, nonce=nonce))
+                    expiry=exp_ms, nonce=nonce))
                 new_orders.append(Order(cid, q.side, m.price_of(self._px(q.side, q.px)), m.size_of(m.size_int(q.qty)),
-                                        q.tag, q.reduce_only, "sent", time.time()))
+                                        q.tag, q.reduce_only, "sent", time.time(), expires=exp_ms / 1000))
             elif c.kind == "modify" and c.quote is not None:
                 q = c.quote
                 txs.append(self.signer.modify_order(market=m.market_id, index=c.cid, size=m.size_int(q.qty),

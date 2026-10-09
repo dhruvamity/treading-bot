@@ -138,7 +138,7 @@ What the first live run will prove or disprove, because nothing could be sent wh
 | Arcus post-only and IOC orders, cancel, cancel-all, leverage, positions, balance | the market-making bot's own client, live-proven there |
 | Arcus: reading one order by its id | from the documentation |
 | Arcus: the position stop and take profit (`positionTpsl`, signed as trigger orders) | from the documentation; the docs disagree with themselves on the leg's price field |
-| Lighter: everything that sends (orders, cancels, stops, leverage) | signs correctly offline; never sent by this program. `lighter livetest` (lighter/README.md, section 6) sent each of them once at the minimum size on 2026-10-09: all worked, including a stop and a take-profit built as here with the 5% worst price past the trigger |
+| Lighter: everything that sends (orders, cancels, stops, leverage) | signs correctly offline; never sent by this program. `lighter livetest` (lighter/README.md, section 6) sent each of them once at the minimum size on 2026-10-09: all worked, including a stop and a take-profit built as here with the 5% worst price past the trigger. Not fixed here: this program's own resting maker orders on Lighter carry a 28-day expiry, and Lighter's scheduled cancel-all does not fire by itself, so a dead executor would leave them on the book |
 | Lighter and Arcus reads (book, position, balance, key check) | run against the real accounts on 2026-10-04 |
 | The executor's logic | 38 offline tests on simulated venues, and paper runs on real prices (open, stops, close by command and by the time limit) |
 

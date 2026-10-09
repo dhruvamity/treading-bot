@@ -81,6 +81,17 @@ def test_engine_diff_keeps_modifies_and_cancels(tmp_path):
     assert kinds == [("cancel", 3), ("modify", 2)]            # the bid is within tolerance; 4 is in flight
 
 
+def test_engine_diff_replaces_a_live_order_close_to_its_expiry(tmp_path):
+    eng = Engine(paper(tmp_path), RunState(RunSpec("X", "Mid 0", 10.0)), tmp_path)
+    now = 1_000_000.0
+    live = [Order(1, BUY, 100.00, 1.0, "b", state="open", expires=now + 119),      # Lighter drops it in under 2 minutes
+            Order(2, SELL, 100.02, 1.0, "a", state="open", expires=now + 300),
+            Order(3, BUY, 100.00, 1.0, "c", state="sent", expires=now + 5)]        # in flight: left alone
+    ch = eng.diff([Quote(BUY, 100.00, 1.0, "b"), Quote(SELL, 100.02, 1.0, "a"), Quote(BUY, 100.00, 1.0, "c")], live, now)
+    assert [(c.kind, c.cid) for c in ch] == [("cancel", 1), ("new", 0)] and ch[1].quote.tag == "b"
+    assert eng.diff([Quote(SELL, 100.02, 1.0, "a")], live[1:2], now + 181)[0].kind == "cancel"   # 119 s left by then
+
+
 def test_engine_quotes_and_obeys_controls(tmp_path):
     ex = paper(tmp_path)
     run = RunState(RunSpec("X", "Mid 0", 10.0, capital=100.0))

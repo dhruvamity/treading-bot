@@ -151,9 +151,11 @@ series. `/set capital 250` fixes it.
   everywhere.
 - **Why the stops differ from Arcus's 1/2/10%:** a taker exit costs no fee here, so a stop costs only the spread; and at 50x a 15% kill
   fired on days that were well up and then gave some back.
-- **Other protections:** Lighter's own dead man's switch (a scheduled cancel-all 5.5 minutes ahead, moved every minute: if the bot or its
-  machine dies, Lighter cancels everything by itself within about 5 minutes; **this did not work in the live test of 2026-10-09**, see
-  section 6); a stale feed (no frame for 10 s) pulls the quotes; an error
+- **Other protections:** every quote carries a 5.5-minute expiry (the shortest Lighter takes) and the bot replaces it 2 minutes
+  before that: if the bot or its machine dies, Lighter drops every order by itself within 5.5 minutes (measured in the live test
+  of 2026-10-09: gone 17 s past the expiry). Lighter's scheduled cancel-all, the "dead man's switch", is still moved every minute
+  but is not that protection: Lighter acts on it only when the account's next request arrives, and a dead bot sends none. A
+  position the dead bot was holding stays open: no stop rests on Lighter. Also: a stale feed (no frame for 10 s) pulls the quotes; an error
   in a second cancels all orders; a 429 pauses requests 60 s and lowers the requote rate 20%; positions and orders are reconciled with
   Lighter every 5 minutes.
 
@@ -211,21 +213,20 @@ wild in the last hour, its data fresh.
   then the maximum); rests, moves and cancels a post-only order far from the price; cancel-all; two orders in one request; a batch
   with a bad member; a post-only order that would cross; a buy (as maker, else with a taker order), a stop and a take-profit as the
   arbitrage places them, a close; a reduce-only order with no position; a short and its close; and the two things that should
-  clear a dead bot's orders: Lighter's dead man's switch cancelling one order by itself, and a 5.5-minute expiry removing another
+  clear a dead bot's orders: the 5.5-minute expiry on the bot's own orders removing one, and Lighter's dead man's switch cancelling another
   (`--skip-dms` leaves that out: it can take 11 minutes; `--dms-only` runs that step alone, with two far orders and no trade). It stops and closes everything when the
   account is $1 down (`--max-loss`), and always ends flat with no orders. With a zero-fee account the cost is the spread on about
   four minimum orders: cents. The report is printed and written to `lighter/reports/livetest-<time>.md`: `PASS` (Lighter did it
   and the bot's own books agree), `FAIL` (a bug to fix before a real run), `INFO` (something learned, such as how far from the
   price an order may rest).
 
-  **Runs of 2026-10-09, SPY:** 19 `PASS`, no cost, ended flat. Orders, moves, cancels, both leverages, a long and a short with
-  their closes, a stop and a take-profit all worked, and Lighter accepted a worst price 5% past the trigger. One `FAIL`, twice:
-  the dead man's switch. Lighter answered OK to the scheduled cancel-all and held the time for the account, and the order was
-  still on the book 5 minutes after that time. So this protection does not work on this venue as the bot uses it: if the bot or
-  its server dies during a live run, its orders stay on Lighter's book (they carry a 28-day expiry). Watch a live run, and
-  cancel in the Lighter app if the bot goes quiet. Whether a short order expiry can do the job instead is what the next
-  `lighter livetest --dms-only` shows (the `order expiry` line).
-- **Before the first quote,** the run cancels your orders on that market, sets the leverage (cross margin) and arms the dead man's switch.
+  **Runs of 2026-10-09, SPY (three, no cost, each ended flat):** orders, moves, cancels, both leverages, a long and a short with
+  their closes, a stop and a take-profit all worked, and Lighter accepted a worst price 5% past the trigger. What they found:
+  Lighter holds a scheduled cancel-all for the account but did not act on it for 5 minutes past its time, and then cancelled
+  everything the moment the account sent another request. So it cannot clear a dead bot's orders. An order's own expiry does:
+  Lighter removed a 5.5-minute order 17 s after it expired. The bot's quotes used to carry a 28-day expiry; they now carry 5.5
+  minutes and are replaced before it runs out. `lighter livetest --dms-only` checks both again, on the bot's own order path.
+- **Before the first quote,** the run cancels your orders on that market, sets the leverage (cross margin) and schedules the cancel-all.
   It treats every order on that market as its own: trade by hand on another market, or use a sub-account (`LIGHTER_ACCOUNT_INDEX`).
 - **Control** (CLI, or Telegram): `lighter pause` / `unpause` (no new orders; closing orders keep working), `close` (close the position, maker
   then taker, and stop), `stop` (quotes cancelled, position kept), `resume` (trade again after the kill or a daily stop).
@@ -303,7 +304,7 @@ starts, stops and ends.
 | Fill model | queue at the touch (best bid/offer only) | queue at any price, from the recorded depth |
 | Modes | Mid, Grid, Smart | Mid, Grid, Smart, **Touch** |
 | Stops | position 1–5% (follows the market) / 2% / 10% | 2% / 5% / 25% |
-| Dead man's switch | `scheduleCancel` 60 s, every 20 s | scheduled cancel-all 5.5 min ahead, every 60 s |
+| A dead bot's orders | `scheduleCancel` 60 s, every 20 s | each quote expires in 5.5 min, replaced 2 min before (the scheduled cancel-all does not fire by itself) |
 | Off-hours rules | RWA session margins, trading bounds | none: Lighter's perps trade 24/7 at one margin |
 
 ## 11. Layout and troubleshooting
