@@ -43,6 +43,8 @@ SIZE_X = 1.1                         # of the minimum order
 TAKER_SLIP = 0.003
 LIQUID_USD = 1_000_000.0
 DMS_TRY_MS = (30_000, C.CANCEL_ALL_MIN_MS + 30_000)   # a short horizon first (if Lighter takes it), else the bot's own
+DMS_LATE_OK_S = 60.0                 # the scheduled cancel-all may fire this long after its time and still pass
+DMS_LATE_S = 300.0                   # and the test waits this long past the time before it calls it never
 PASS, FAIL, INFO, SKIP = "PASS", "FAIL", "INFO", "SKIP"
 
 
@@ -97,14 +99,15 @@ def min_qty(min_base: float, min_quote: float, step: float, price: float, x: flo
 
 class LiveTest:
     def __init__(self, ex: Any, *, say: Callable[[str], None] = print, max_loss: float = 1.0, wait_fill_s: float = 20.0,
-                 dms: bool = True, lev_low: float = 5.0, sleep: Callable[[float], Awaitable[None]] = asyncio.sleep,
+                 dms: bool = True, dms_only: bool = False, lev_low: float = 5.0, sleep: Callable[[float], Awaitable[None]] = asyncio.sleep,
                  clock: Callable[[], float] = time.time) -> None:
         self.ex = ex                       # a LiveExchange (lighter_bot/trade/live.py)
         self.m = ex.market
         self.say = say
         self.max_loss = max_loss
         self.wait_fill_s = wait_fill_s
-        self.dms = dms
+        self.dms = dms or dms_only
+        self.dms_only = dms_only           # the dead man's switch step alone: one far order, no trade
         self.lev_low = min(lev_low, self.m.max_leverage)
         self.sleep = sleep
         self.clock = clock
@@ -143,6 +146,20 @@ class LiveTest:
                 row = True
                 pos = float(p.get("position") or 0) * (1 if int(p.get("sign") or 1) >= 0 else -1)
         return float(acc.get("total_asset_value") or 0), pos if abs(pos) > self.m.step / 2 else 0.0, row
+
+    async def venue_schedule(self) -> tuple[int, int]:
+        """(the scheduled cancel-all time Lighter holds for the account, 0 for none; its open orders in every market)."""
+        r = await self.ex.rest.account(self.ex.account)
+        acc = (r.get("accounts") or [{}])[0]
+        return int(acc.get("cancel_all_time") or 0), int(acc.get("total_order_count") or 0)
+
+    async def tx_note(self, tx_hash: str) -> str:
+        """What Lighter says it did with one transaction, for the report."""
+        try:
+            r = await self.ex.rest.tx(tx_hash)
+        except (ApiError, TimeoutError, OSError) as e:
+            return f"its record of the transaction could not be read: {str(e)[:120]}"
+        return f"transaction status {r.get('status')}, event {str(r.get('event_info') or '')[:160] or 'none'}"
 
     async def until(self, cond: Callable[[], Any], timeout: float, every: float = 0.5) -> bool:
         end = self.clock() + timeout
@@ -444,38 +461,61 @@ class LiveTest:
                   else f"IT OPENED A POSITION of {pos:+g}")
 
     async def step_dead_mans_switch(self) -> None:
+        name = "dead man's switch"
+        _held, others = await self.venue_schedule()
+        if others:      # the scheduled cancel-all is for the whole account, not this market
+            self.note(name, SKIP, f"the account has {others} open order(s) in other markets and Lighter's scheduled "
+                                  "cancel-all would cancel them too. Nothing was sent for this step")
+            return
         cid, _px = await self.far_order(BUY, "test-dms")
         if cid is None or not await self.until_venue(lambda os_: bool(os_)):
-            self.note("dead man's switch", SKIP, f"no resting order to cancel: {self.last_error()}")
+            self.note(name, SKIP, f"no resting order to cancel: {self.last_error()}")
             return
-        ahead, err = 0, ""
+        ahead, err, at_ms, reply = 0, "", 0, None
         for ms in DMS_TRY_MS:
             n = self.ex.nonces.take(2)
-            now_ms = int(self.clock() * 1000)
-            _r, err = await self.raw([self.ex.signer.cancel_all(tif=C.CANCEL_ALL_ABORT, time_ms=0, nonce=n[0]),
-                                      self.ex.signer.cancel_all(tif=C.CANCEL_ALL_SCHEDULED, time_ms=now_ms + ms,
-                                                                nonce=n[1])])
+            at_ms = int(self.clock() * 1000) + ms
+            reply, err = await self.raw([self.ex.signer.cancel_all(tif=C.CANCEL_ALL_ABORT, time_ms=0, nonce=n[0]),
+                                         self.ex.signer.cancel_all(tif=C.CANCEL_ALL_SCHEDULED, time_ms=at_ms,
+                                                                   nonce=n[1])])
             if not err:
                 ahead = ms
                 break
         if not ahead:
-            self.note("dead man's switch", FAIL, f"Lighter refused the scheduled cancel-all: {err}")
+            self.note(name, FAIL, f"Lighter refused the scheduled cancel-all: {err}")
             return
-        self.say(f"       waiting up to {ahead / 1000 + 60:.0f} s for Lighter to cancel the order by itself "
-                 "(nothing else is open)...")
+        how = f"scheduled {ahead / 1000:.0f} s ahead" + (" (Lighter takes less than the 5 minutes the bot uses)"
+                                                        if ahead < C.CANCEL_ALL_MIN_MS else "")
+        # "OK" only means Lighter took the request: what counts is the time it then holds for the account
+        await self.sleep(3.0)
+        held, _n = await self.venue_schedule()
+        if not held:
+            hashes = list(reply.get("tx_hash") or []) if isinstance(reply, dict) else []
+            why = await self.tx_note(str(hashes[-1])) if hashes else "its answer named no transaction"
+            self.note(name, FAIL, f"{how}; Lighter answered OK but holds NO scheduled time for the account ({why}): "
+                                  "it would never fire")
+            await self.ex.disarm()
+            return
+        self.say(f"       Lighter holds the time ({held}, asked {at_ms}); waiting up to {ahead / 1000 + DMS_LATE_S:.0f} s "
+                 "for it to cancel the order by itself (nothing else is open)...")
         t0 = self.clock()
         fired = False
-        while self.clock() - t0 < ahead / 1000 + 60:
+        while self.clock() - t0 < ahead / 1000 + DMS_LATE_S:
             await self.sleep(10.0)
             if not await self.venue_orders():
                 fired = True
                 break
         took = self.clock() - t0
-        self.note("dead man's switch", PASS if fired else FAIL,
-                  f"scheduled {ahead / 1000:.0f} s ahead" + (" (Lighter takes less than the 5 minutes the bot uses)"
-                                                            if ahead < C.CANCEL_ALL_MIN_MS else "")
-                  + (f"; Lighter cancelled the order by itself after {took:.0f} s" if fired
-                     else f"; the order was STILL THERE after {took:.0f} s"))
+        late = took - ahead / 1000
+        if not fired:
+            now_held, _n = await self.venue_schedule()
+            self.note(name, FAIL, f"{how}; Lighter held the time ({held}, asked {at_ms}) but the order was STILL THERE "
+                                  f"{late:.0f} s past it (the account's time now reads {now_held})")
+        elif late > DMS_LATE_OK_S:
+            self.note(name, FAIL, f"{how}; Lighter cancelled the order by itself but LATE: after {took:.0f} s, "
+                                  f"{late:.0f} s past its time. For that long after the bot dies its orders stay up")
+        else:
+            self.note(name, PASS, f"{how}; Lighter cancelled the order by itself after {took:.0f} s")
         await self.ex.disarm()
 
     # ---------------------------------------------------------------- the run
@@ -512,6 +552,8 @@ class LiveTest:
             ("reduce-only", self.step_reduce_only_when_flat),
             ("short", self._short),
         ]
+        if self.dms_only:
+            steps = []
         if self.dms:
             steps.append(("dead man's switch", self.step_dead_mans_switch))
         try:
@@ -563,14 +605,21 @@ def pick_market(markets: dict[str, Any]) -> Any:
     return min(busy, key=lambda m: (round(m.min_order_usd(m.last_price), 2), -m.day_volume_usd))
 
 
-def plan_text(m: Any, lev_low: float, max_loss: float, dms: bool) -> str:
+def plan_text(m: Any, lev_low: float, max_loss: float, dms: bool, dms_only: bool = False) -> str:
     one = min_qty(m.min_base, m.min_quote, m.step, m.last_price) * m.last_price
+    if dms_only:
+        return "\n".join((
+            f"LIVE TEST on {m.symbol}, the dead man's switch only: one real order of about ${one:.2f}, far under the "
+            "price, where it does not trade.",
+            "  It asks Lighter to cancel every order on the account 5.5 minutes later, then waits (up to 11 minutes)",
+            "  to see Lighter do it by itself. It refuses if the account has orders in other markets.",
+            "  Expected cost: nothing. It ends with no orders. Do not trade this market by hand while it runs."))
     return "\n".join((
         f"LIVE TEST on {m.symbol}: real orders, real money, the smallest size Lighter takes (about ${one:.2f} each).",
         f"  It sets the leverage ({min(lev_low, m.max_leverage):g}x, then {m.max_leverage:g}x), rests and moves and cancels "
         "orders far from the price,",
         "  buys one minimum order and sells it, sells one short and buys it back, places a stop and a take-profit",
-        "  and removes them" + (", and lets Lighter's dead man's switch cancel one far order (up to 6.5 minutes)." if dms
+        "  and removes them" + (", and lets Lighter's dead man's switch cancel one far order (up to 11 minutes)." if dms
                                 else "."),
         f"  It stops and closes everything if the account falls ${max_loss:.2f} below where it started.",
         "  Expected cost with a zero-fee account: the spread on about four minimum orders (cents).",

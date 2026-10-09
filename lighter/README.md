@@ -152,7 +152,8 @@ series. `/set capital 250` fixes it.
 - **Why the stops differ from Arcus's 1/2/10%:** a taker exit costs no fee here, so a stop costs only the spread; and at 50x a 15% kill
   fired on days that were well up and then gave some back.
 - **Other protections:** Lighter's own dead man's switch (a scheduled cancel-all 5.5 minutes ahead, moved every minute: if the bot or its
-  machine dies, Lighter cancels everything by itself within about 5 minutes); a stale feed (no frame for 10 s) pulls the quotes; an error
+  machine dies, Lighter cancels everything by itself within about 5 minutes; **this did not work in the live test of 2026-10-09**, see
+  section 6); a stale feed (no frame for 10 s) pulls the quotes; an error
   in a second cancels all orders; a 429 pauses requests 60 s and lowers the requote rate 20%; positions and orders are reconciled with
   Lighter every 5 minutes.
 
@@ -210,11 +211,17 @@ wild in the last hour, its data fresh.
   then the maximum); rests, moves and cancels a post-only order far from the price; cancel-all; two orders in one request; a batch
   with a bad member; a post-only order that would cross; a buy (as maker, else with a taker order), a stop and a take-profit as the
   arbitrage places them, a close; a reduce-only order with no position; a short and its close; and Lighter's dead man's switch
-  cancelling an order by itself (`--skip-dms` leaves that out: it can take 6.5 minutes). It stops and closes everything when the
+  cancelling an order by itself (`--skip-dms` leaves that out: it can take 11 minutes; `--dms-only` runs that step alone, with one far order and no trade). It stops and closes everything when the
   account is $1 down (`--max-loss`), and always ends flat with no orders. With a zero-fee account the cost is the spread on about
   four minimum orders: cents. The report is printed and written to `lighter/reports/livetest-<time>.md`: `PASS` (Lighter did it
   and the bot's own books agree), `FAIL` (a bug to fix before a real run), `INFO` (something learned, such as how far from the
   price an order may rest).
+
+  **First run, 2026-10-09, SPY:** 19 `PASS`, no cost, ended flat. Orders, moves, cancels, both leverages, a long and a short
+  with their closes, a stop and a take-profit all worked, and Lighter accepted a worst price 5% past the trigger. One `FAIL`: the
+  dead man's switch. Lighter answered OK to the scheduled cancel-all, and the order was still on the book 66 s after its time.
+  Until `lighter livetest --dms-only` passes, treat that protection as not working: if the bot or its server dies during a live
+  run, its orders may stay on Lighter's book. Watch a live run, and cancel in the Lighter app if the bot goes quiet.
 - **Before the first quote,** the run cancels your orders on that market, sets the leverage (cross margin) and arms the dead man's switch.
   It treats every order on that market as its own: trade by hand on another market, or use a sub-account (`LIGHTER_ACCOUNT_INDEX`).
 - **Control** (CLI, or Telegram): `lighter pause` / `unpause` (no new orders; closing orders keep working), `close` (close the position, maker
@@ -278,7 +285,7 @@ starts, stops and ends.
 | `lighter pause` / `unpause` / `stop` / `close` / `resume` `[--mode paper\|live]` | Control the run |
 | `lighter auto [on\|off\|set\|status] [--live] [--budget X] [--cost X]` | The autopilot |
 | `lighter doctor [MARKET] [--lev N]` | Everything a live run needs (read-only) |
-| `lighter livetest [MARKET] [--skip-dms] [--max-loss 1] [--lev-low 5] [--wait 20]` | **Real money, minimum size:** every kind of request the bot sends, once, with a report (section 6) |
+| `lighter livetest [MARKET] [--skip-dms] [--dms-only] [--max-loss 1] [--lev-low 5] [--wait 20]` | **Real money, minimum size:** every kind of request the bot sends, once, with a report (section 6) |
 | `lighter set [NAME VALUE]` | See or change a setting (`default` undoes it) |
 | `lighter account` | The account as Lighter keeps it |
 | `lighter keys` | A new API key pair (local only; register it with `scripts/register_key.py`) |

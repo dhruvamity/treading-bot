@@ -27,15 +27,17 @@ class Venue:
     cancel-all. It answers the REST calls and pushes the account-stream frames the real one would."""
 
     def __init__(self, ex, *, far_limit=0.015, flat_row=False, stream_flat=True, fill_touch=False, cross_fills=False,
-                 min_cancel_ms=300_000, equity=6.0, slip_max=0.02, bleed=0.0):
+                 min_cancel_ms=300_000, equity=6.0, slip_max=0.02, bleed=0.0, forgets=False, late_s=0.0, elsewhere=0):
         self.ex, self.bid, self.ask = ex, 100.00, 100.02
         self.far_limit, self.flat_row, self.stream_flat = far_limit, flat_row, stream_flat
         self.fill_touch, self.cross_fills, self.min_cancel_ms, self.slip_max = fill_touch, cross_fills, min_cancel_ms, slip_max
         self.equity, self.bleed = equity, bleed
+        self.forgets, self.late_s, self.elsewhere = forgets, late_s, elsewhere   # the scheduled cancel-all going wrong
         self.orders: dict[int, dict] = {}
         self.pos = 0.0
         self.now = time.time()
         self.scheduled: float | None = None
+        self.asked = 0                       # scheduled cancel-alls that arrived
         self.sent: list[int] = []            # every transaction type that arrived
         self.leverage: list[int] = []
         self.tid = 0
@@ -44,7 +46,7 @@ class Venue:
     # ---- time
     async def sleep(self, s: float) -> None:
         self.now += s
-        if self.scheduled is not None and self.now * 1000 >= self.scheduled:
+        if self.scheduled is not None and self.now * 1000 >= self.scheduled + self.late_s * 1000:
             self.scheduled = None
             self._cancel_everything()
         await asyncio.sleep(0)
@@ -82,7 +84,11 @@ class Venue:
             rows.append({"market_id": M.market_id, "position": str(abs(round(self.pos, 6))),
                          "sign": 1 if self.pos >= 0 else -1, "avg_entry_price": "100.01"})
         return {"accounts": [{"total_asset_value": str(self.equity), "available_balance": str(self.equity),
-                              "positions": rows}]}
+                              "positions": rows, "cancel_all_time": int(self.scheduled or 0),
+                              "total_order_count": len(self.orders) + self.elsewhere}]}
+
+    async def tx(self, tx_hash: str):
+        return {"hash": tx_hash, "status": 3, "event_info": '{"ae":"did not run"}'}
 
     async def active_orders(self, account: int, market: int | None = None):
         return {"orders": [dict(o) for o in self.orders.values()]}
@@ -113,7 +119,9 @@ class Venue:
                 if f["TimeInForce"] == C.CANCEL_ALL_NOW:
                     self._cancel_everything()
                 else:
-                    self.scheduled = f["Time"] if f["TimeInForce"] == C.CANCEL_ALL_SCHEDULED else None
+                    self.asked += f["TimeInForce"] == C.CANCEL_ALL_SCHEDULED
+                    self.scheduled = f["Time"] if f["TimeInForce"] == C.CANCEL_ALL_SCHEDULED and not self.forgets \
+                        else None
             elif typ == C.TX_MODIFY_ORDER:
                 o = self.orders[f["Index"]]
                 o["price"] = f"{f['Price'] / 100:.2f}"
@@ -122,7 +130,7 @@ class Venue:
                 self._order_frame({**self.orders.pop(f["Index"]), "status": "canceled"})
             elif typ == C.TX_CREATE_ORDER:
                 self._create(f)
-        return {"code": 200}
+        return {"code": 200, "tx_hash": [f"h{i}" for i in range(len(txs))]} if len(txs) > 1 else {"code": 200}
 
     def _create(self, f: dict) -> None:
         cid, buy, px, qty = f["ClientOrderIndex"], not f["IsAsk"], f["Price"] / 100, f["BaseAmount"] / 1000
@@ -252,6 +260,44 @@ def test_it_stops_and_closes_when_the_account_is_down_more_than_it_may_lose(cfg,
     rep = asyncio.run(t.run())
     assert "more than the $1.00" in rep.aborted and rep.clean and v.pos == 0 and not v.orders
     assert "sell short with a taker order" not in results(rep)                 # it never got that far
+
+
+def dms_alone(cfg, tmp_path, **kw):
+    t, v, said = make(cfg, tmp_path, **kw)
+    t.dms_only = True
+    rep = asyncio.run(t.run())
+    return rep, v, said, {s.name: s.detail for s in rep.steps}
+
+
+def test_the_dead_mans_switch_alone_places_one_far_order_and_trades_nothing(cfg, tmp_path):
+    rep, v, _said, notes = dms_alone(cfg, tmp_path)
+    assert [s.name for s in rep.steps] == ["connect", "dead man's switch", "end"] and not rep.failed and rep.clean
+    assert C.TX_UPDATE_LEVERAGE not in v.sent and v.tid == 0 and v.pos == 0 and not v.orders and v.scheduled is None
+    assert "by itself after 33" in notes["dead man's switch"]
+    assert "dead man's switch only" in lt.plan_text(M, 5.0, 1.0, True, True)
+
+
+def test_a_scheduled_cancel_all_lighter_answers_ok_to_but_does_not_hold_fails_at_once(cfg, tmp_path):
+    rep, v, said, notes = dms_alone(cfg, tmp_path, forgets=True)
+    assert results(rep)["dead man's switch"] == lt.FAIL and "holds NO scheduled time" in notes["dead man's switch"]
+    assert "did not run" in notes["dead man's switch"]          # what Lighter says it did with the transaction
+    assert not any("waiting up to" in x for x in said)          # no 11 minutes spent on a time that is not there
+    assert rep.clean and not v.orders
+
+
+def test_a_scheduled_cancel_all_that_fires_late_or_never_fails_and_says_which(cfg, tmp_path):
+    rep, v, _said, notes = dms_alone(cfg, tmp_path, late_s=150.0)
+    assert results(rep)["dead man's switch"] == lt.FAIL and "LATE" in notes["dead man's switch"]
+    assert rep.clean and not v.orders
+    rep2, v2, _said2, notes2 = dms_alone(cfg, tmp_path / "b", late_s=9e9)
+    assert results(rep2)["dead man's switch"] == lt.FAIL and "STILL THERE 30" in notes2["dead man's switch"]
+    assert rep2.clean and not v2.orders and v2.scheduled is None      # the clean-up cancelled it and withdrew the time
+
+
+def test_the_dead_mans_switch_is_not_tried_when_other_markets_have_orders(cfg, tmp_path):
+    rep, v, _said, notes = dms_alone(cfg, tmp_path, elsewhere=2)
+    assert results(rep)["dead man's switch"] == lt.SKIP and "2 open order(s) in other markets" in notes["dead man's switch"]
+    assert C.TX_CREATE_ORDER not in v.sent and v.asked == 0      # no order, and no scheduled cancel-all asked for
 
 
 def test_a_venue_that_keeps_listing_a_closed_market_also_passes(cfg, tmp_path):
