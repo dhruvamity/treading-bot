@@ -197,6 +197,24 @@ wild in the last hour, its data fresh.
   3. `lighter doctor SPY` must say READY, and the `account tier` line must say standard.
   4. `lighter run SPY "smart +1" --live --sl 10`, read the doctor's lines, and type `LIVE`. From Telegram: 🔴 LIVE, then type the 6-digit
      code it sends within 2 minutes.
+- **Before the first real run: the live test.** Everything above has only met a stand-in for Lighter until this runs. One command
+  does every kind of request the bot sends, once, with the smallest order Lighter takes, and asks Lighter after each what happened:
+
+  ```bash
+  .venv/bin/lighter livetest
+  ```
+
+  It needs `LBOT_LIVE=1`, a passing doctor and `LIVE` typed at its prompt; nothing else can start it (not Telegram, not a flag). It
+  picks the liquid market with the smallest minimum order (SPY: about $11 an order, so $5 in the account is enough), and refuses an
+  account that already has an order or a position on that market, before sending anything. What it does: sets the leverage (5x,
+  then the maximum); rests, moves and cancels a post-only order far from the price; cancel-all; two orders in one request; a batch
+  with a bad member; a post-only order that would cross; a buy (as maker, else with a taker order), a stop and a take-profit as the
+  arbitrage places them, a close; a reduce-only order with no position; a short and its close; and Lighter's dead man's switch
+  cancelling an order by itself (`--skip-dms` leaves that out: it can take 6.5 minutes). It stops and closes everything when the
+  account is $1 down (`--max-loss`), and always ends flat with no orders. With a zero-fee account the cost is the spread on about
+  four minimum orders: cents. The report is printed and written to `lighter/reports/livetest-<time>.md`: `PASS` (Lighter did it
+  and the bot's own books agree), `FAIL` (a bug to fix before a real run), `INFO` (something learned, such as how far from the
+  price an order may rest).
 - **Before the first quote,** the run cancels your orders on that market, sets the leverage (cross margin) and arms the dead man's switch.
   It treats every order on that market as its own: trade by hand on another market, or use a sub-account (`LIGHTER_ACCOUNT_INDEX`).
 - **Control** (CLI, or Telegram): `lighter pause` / `unpause` (no new orders; closing orders keep working), `close` (close the position, maker
@@ -260,6 +278,7 @@ starts, stops and ends.
 | `lighter pause` / `unpause` / `stop` / `close` / `resume` `[--mode paper\|live]` | Control the run |
 | `lighter auto [on\|off\|set\|status] [--live] [--budget X] [--cost X]` | The autopilot |
 | `lighter doctor [MARKET] [--lev N]` | Everything a live run needs (read-only) |
+| `lighter livetest [MARKET] [--skip-dms] [--max-loss 1] [--lev-low 5] [--wait 20]` | **Real money, minimum size:** every kind of request the bot sends, once, with a report (section 6) |
 | `lighter set [NAME VALUE]` | See or change a setting (`default` undoes it) |
 | `lighter account` | The account as Lighter keeps it |
 | `lighter keys` | A new API key pair (local only; register it with `scripts/register_key.py`) |
@@ -295,6 +314,8 @@ Tests and lint: `make test`, `make lint` in the repository root.
 
 | Problem | Check |
 |---|---|
+| `livetest` refuses: "already has ... on SPY" | It will not touch orders or a position it did not place. Name a market you hold nothing on: `lighter livetest QQQ` |
+| `livetest` says "DID NOT END CLEAN" | Open the Lighter app now: cancel the orders and close the position on that market by hand. Then send the report |
 | `doctor`: key registered FAIL | Register the key (`scripts/register_key.py`); wait a minute after registering |
 | `doctor`: account tier WARN | A premium or plus account pays fees. Switch back to standard in the Lighter app (once a day) |
 | Log says "rate limited" | Lighter answered 429: the bot paused 60 s and requotes less. If it repeats, lower `requests.quotes_per_min` in `config/app.yaml` |

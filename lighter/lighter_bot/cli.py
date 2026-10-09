@@ -304,6 +304,58 @@ def cmd_auto(a: argparse.Namespace) -> None:
         print(f"last: {au.last}")
 
 
+def cmd_livetest(a: argparse.Namespace) -> None:
+    """Every kind of request the bot sends, once, on the real venue, with the smallest order (lighter_bot/livetest.py).
+    Real money: it needs LBOT_LIVE=1, a passing doctor and LIVE typed here. Nothing else can start it."""
+    from lighter_bot import doctor, livetest
+    from lighter_bot.scout import autopilot
+    from lighter_bot.trade.feed import MarketFeed
+    from lighter_bot.trade.live import LiveExchange, resolve_account
+    from lighter_bot.trade.runner import fetch_markets
+    from lighter_bot.venue.nonce import ClientIds, Nonces
+    from lighter_bot.venue.rest import Rest
+    cfg = _cfg()
+    if cfg.no_trading():
+        sys.exit(f"refused: {cfg.no_trading()}")
+    if ops.running(cfg, "run-live"):
+        sys.exit("refused: a live run is going (lighter stop first): two programs must not trade one account")
+    au = autopilot.Auto.load(cfg)
+    if au.on and au.mode == "live":
+        sys.exit("refused: the autopilot is on in live mode and could start a run meanwhile (lighter auto off first)")
+    ms = asyncio.run(fetch_markets(cfg))
+    try:
+        m = ms[a.market.upper()] if a.market else livetest.pick_market(ms)
+    except (KeyError, ValueError) as e:
+        sys.exit(f"refused: {e if isinstance(e, ValueError) else a.market + ' is not a Lighter perp (lighter markets)'}")
+    ok, lines = asyncio.run(doctor.check(cfg, m.symbol, None, settings.stops(cfg)))
+    print(doctor.render(ok, lines))
+    if not ok:
+        sys.exit("refused: the doctor found problems")
+    print("\n" + livetest.plan_text(m, a.lev_low, a.max_loss, not a.skip_dms))
+    if not sys.stdin.isatty():
+        sys.exit("refused: the live test needs you at the keyboard to type LIVE")
+    if input("\nType LIVE to start: ").strip() != "LIVE":
+        sys.exit("not started")
+    log_setup(cfg.logs_dir, "livetest", echo="warn")
+
+    async def go() -> Any:
+        rest = Rest(cfg.endpoints.rest)
+        try:
+            account = await resolve_account(rest, cfg)
+        finally:
+            await rest.close()
+        ex = LiveExchange(m, MarketFeed(cfg.endpoints.ws, m), cfg, account,
+                          ClientIds(cfg.state_dir / "client-ids-live.txt"),
+                          Nonces(cfg.state_dir / f"nonce-{account}-{cfg.creds.api_key_index}.txt"))
+        return await livetest.LiveTest(ex, max_loss=a.max_loss, wait_fill_s=a.wait, dms=not a.skip_dms,
+                                       lev_low=a.lev_low).run()
+
+    rep = asyncio.run(go())
+    p = livetest.write_report(rep, cfg.root / "reports")
+    print("\n" + rep.text() + f"\nWritten to {p}")
+    sys.exit(0 if rep.clean and not rep.failed else 1)
+
+
 def cmd_doctor(a: argparse.Namespace) -> None:
     from lighter_bot import doctor
     cfg = _cfg()
@@ -420,6 +472,14 @@ def main(argv: list[str] | None = None) -> None:
     p.add_argument("market", nargs="?")
     p.add_argument("--lev")
     p.set_defaults(fn=cmd_doctor)
+    p = sub.add_parser("livetest", help="REAL MONEY, minimum size: every kind of request the bot sends, once, with "
+                                        "a report (you type LIVE)")
+    p.add_argument("market", nargs="?", help="default: the liquid market with the smallest minimum order")
+    p.add_argument("--lev-low", type=float, default=5.0, help="the first leverage it sets (then the market's maximum)")
+    p.add_argument("--max-loss", type=float, default=1.0, help="stop and close everything this many dollars down")
+    p.add_argument("--wait", type=float, default=20.0, help="seconds a post-only order at the touch may wait for a fill")
+    p.add_argument("--skip-dms", action="store_true", help="leave out the dead man's switch step (up to 6.5 minutes)")
+    p.set_defaults(fn=cmd_livetest)
     p = sub.add_parser("set", help="see or change a setting: lighter set daily_stop 5")
     p.add_argument("name", nargs="?", choices=list(settings.SETTINGS))
     p.add_argument("value", nargs="?")
