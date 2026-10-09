@@ -222,9 +222,9 @@ the 24 h re-run covers only setups that pass on their full days. `/set scan_ever
 
 ## 6. The pilot and the autopilot
 
-**Approving** (`arcus pilot approve N [--live]`, or the Telegram Run buttons): it re-reads the latest scan and refuses if it is over
-90 minutes old (and from Telegram, if the top 3 changed between your tap and your confirm); writes `config/sessions/pilot.yaml`
-with the strategy, leverage, sizes and stops at the backtested capital plus the `sizing` recipe the engine re-sizes from; closes
+**Approving** (`arcus pilot approve N [--live]`, or the Telegram Run buttons): it re-reads the latest scan (one over 90 minutes old
+is shown with a warning, never refused: a long scan must not block a run); writes `config/sessions/pilot.yaml`
+with the strategy, leverage, sizes and stops sized for the account now plus the `sizing` recipe the engine re-sizes from; closes
 a running bot first (reduce-only maker exit, then taker; it stops after 10 minutes even if a position is left, with a critical
 alert); and starts `arcus run pilot`.
 
@@ -248,6 +248,9 @@ The same BTC Mid 0 costs 0.6 bp in a calm weekend hour and 2.7 bp in a wild week
   is gone. It switches when another setup gives 1.5× the volume after 20 minutes, and rests 10 minutes after a stop.
 - **The ceiling** is tuned daily for your budget (the playbook replays the rule over 4 weeks at every ceiling); `/auto cost 1.6`
   fixes it, `/auto cost auto` gives the tuning back.
+- **On a trader machine** (`BOT_ROLE=trader`, [main README](../README.md#two-machines-one-records-one-trades)) there is no tape, so
+  the playbook and each market's usual volatility are fetched from the machine that makes them, and the last hour's prices come from
+  the trader's own feed. It waits for an hour of prices after a start, and starts nothing on a playbook over 3 days old.
 - **Turning it on:** `/auto` → 📝 On (paper) or 🔴 On (LIVE), or `/auto on live budget=5`. LIVE needs `BOT_PILOT_LIVE=1` and a typed
   code, and the doctor runs before every live start. It turns itself **off** when you take over (your `/run`, `/stop`, `/closeall`,
   `/cancelall`, `/pilotclose`, or a run from the shell); `/auto off` closes its run and stops. State: `state/autopilot.json`,
@@ -355,10 +358,11 @@ message mentions is written `/l_…`, so tapping it stays on Lighter: `/closeall
 | `arcus report [--date D] [--mode M]` | The daily report: Net = spread capture + inventory PnL + funding − fees − liquidation loss |
 | `arcus diagnose [--hours N \| --since … --until …] [--market M] [--replay]` | Why a run filled what it filled: orders, acks, rejects, how long quotes rested, what blocked quoting. `--replay` backtests the same minutes beside the run. Read-only |
 | **Scout** | |
-| `arcus scout run [--workers auto\|N] [--every-min M] [--depth] [--ladder] [--capital auto\|USD]` | The recorder + scanner daemon (`arcus up` runs it) |
+| `arcus scout run [--workers auto\|N] [--every-min M] [--depth] [--ladder] [--capital auto\|USD] [--record-only \| --follow]` | The recorder + scanner daemon (`arcus up` runs it). `--record-only`: the tape and no scans; `--follow`: neither, the lists come from another machine. With no flag the machine's `BOT_ROLE` decides |
 | `arcus scout scan [--markets …] [--full]` / `limits` / `playbook [--capital USD]` | One scan now, printed; the least and most capital each market can use; the autopilot's table |
 | **Data** | |
 | `arcus export …` / `import [FILE]` | One file with everything new since the last export / take such a file in (main README, section 4) |
+| `arcus sync [status\|key\|allow KEY\|pull\|push USER@TRADER]` | Two machines: a trader takes the lists from the machine that makes them (main README, section 3) |
 | `arcus telegram [--read-only]` / `guardian` / `secrets …` | The Telegram bot / the independent guardian / an encrypted secrets store (alternative to `.env`) |
 
 `arcus --help` lists every option. One-off tools in `scripts/`: `arcus_register_key.py` (register or rotate an API key; run it on your own
@@ -442,7 +446,8 @@ Backtests on the recorded books (September–October 2026) and two live weekends
 arcus/
   arcus/           scout/ (tape, sim, scan, record, pilot, autopilot, playbook, regime, profiles), core/ (engine, risk, guardian,
                    order manager, budget, doctor, runner), strategies/ (mid, grid, smart, setup, quoting), venues/ (arcus, paper),
-                   telegram/ (bot, views, dashboard, control, watcher), common/, cli.py, ops.py, export.py
+                   telegram/ (bot, views, dashboard, control, watcher), common/ (role.py: what this machine is for), cli.py,
+                   ops.py, export.py, handoff.py (a trader fetches the lists; scout/watch.py is its own market feed)
   config/          app.yaml, sessions/, venues/arcus.yaml, calendars/
   deploy/          scripts/bootstrap.sh (server setup), scripts/region_check.py
   scripts/         one-off tools (section 8)        tests/   offline: no network, no keys, no processes

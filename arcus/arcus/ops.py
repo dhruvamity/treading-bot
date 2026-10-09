@@ -5,6 +5,10 @@ Background services (each a normal `bot` command, detached, logging to logs/<nam
 - telegram: `arcus telegram`, the phone control bot (when TELEGRAM_BOT_TOKEN and TELEGRAM_CHAT_ID are in .env);
 - guardian: `arcus guardian`, which cancels everything if the LIVE bot goes silent (only while a live bot runs:
             with no live bot it would fire at once).
+What "everything a machine needs" is depends on its role (BOT_ROLE in .env, arcus/common/role.py): a recorder runs
+the scout with --record-only and no Telegram bot, a trader runs it with --follow (no recording, no scans: it takes
+the lists from the other machine), a scout machine records and ranks without Telegram. The service keeps its name
+in every role, so `arcus down` and `arcus status` are the same everywhere.
 The trading bot itself is started by the pilot (`arcus pilot approve 1 [--live]`, or Telegram's /top3 -> Run) and is
 not a service here; `arcus down --all` stops it too (quotes cancelled, positions kept).
 
@@ -28,6 +32,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
+from arcus.common import role as roles
 from arcus.common.config import AppConfig
 from arcus.common.proc import pid_alive
 
@@ -46,6 +51,22 @@ SERVICES = (
     Service("guardian", ("guardian",), "cancels everything if the live bot goes silent", 20.0),
 )
 BY_NAME = {s.name: s for s in SERVICES}
+# the scout service per role: the flag added to its command (the Lighter scout takes the same two) and what it
+# then does. A trader records nothing, so --depth is dropped there.
+SCOUT_FLAG: dict[str, tuple[str, ...]] = {"all": (), "scout": (), "recorder": ("--record-only",),
+                                          "trader": ("--follow",)}
+SCOUT_WHAT = {"scout": "records every market, ranks setups (a trader fetches the lists)",
+              "recorder": "records every market (no scans on this machine)",
+              "trader": "takes the lists from the other machine, watches the run"}
+
+
+def service(name: str, role: str = "all") -> Service:
+    """The service as this role runs it."""
+    s = BY_NAME[name]
+    if name != "scout" or role == "all":
+        return s
+    args = tuple(a for a in s.args if not (role == "trader" and a == "--depth")) + SCOUT_FLAG[role]
+    return Service(s.name, args, SCOUT_WHAT[role], s.stop_wait_s)
 
 
 def bot_bin() -> str:
@@ -73,8 +94,12 @@ def uptime_s(app: AppConfig, name: str) -> float | None:
 
 
 def wanted(app: AppConfig, env: dict[str, str], live_running: bool) -> dict[str, str]:
-    """{service: why} for what should run here now; a missing key means skipped (the reason is in `skipped`)."""
-    out = {"scout": "always"}
+    """{service: why} for what should run here now; a missing key means skipped (the reason is in `skipped`).
+    The machine's role is read from `env` (BOT_ROLE; ValueError when it is not a role)."""
+    r = roles.role(env)
+    out = {"scout": "always" if r == "all" else f"this machine is a {r}: {SCOUT_WHAT[r]}"}
+    if not roles.trades(r):
+        return out
     if env.get("TELEGRAM_BOT_TOKEN") and env.get("TELEGRAM_CHAT_ID"):
         out["telegram"] = "Telegram is set up in .env"
     if live_running:
@@ -83,6 +108,10 @@ def wanted(app: AppConfig, env: dict[str, str], live_running: bool) -> dict[str,
 
 
 def skipped(env: dict[str, str], live_running: bool) -> dict[str, str]:
+    r = roles.role(env)
+    if not roles.trades(r):
+        why = f"this machine is a {r}: the trader runs it"
+        return {"telegram": why, "guardian": why}
     out = {}
     if not (env.get("TELEGRAM_BOT_TOKEN") and env.get("TELEGRAM_CHAT_ID")):
         out["telegram"] = "no TELEGRAM_BOT_TOKEN / TELEGRAM_CHAT_ID in .env"
@@ -91,9 +120,9 @@ def skipped(env: dict[str, str], live_running: bool) -> dict[str, str]:
     return out
 
 
-def start(app: AppConfig, name: str) -> tuple[bool, str]:
+def start(app: AppConfig, name: str, role: str = "all") -> tuple[bool, str]:
     """Start one service in the background unless it already runs. (started?, message)."""
-    s = BY_NAME[name]
+    s = service(name, role)
     pid = pid_of(app, name)
     if pid:
         return False, f"{name}: already running (pid {pid})"
@@ -133,15 +162,16 @@ def stop(app: AppConfig, name: str) -> tuple[bool, str]:
 
 
 # ------------------------------------------------------------------ the bot's other two parts
-def lighter_up() -> str:
-    """Start the Lighter scout (recorder and scans: no keys, no orders) unless it runs."""
+def lighter_up(role: str = "all") -> str:
+    """Start the Lighter scout unless it runs: recorder and scans (no keys, no orders), or what this machine's role
+    leaves of them (recording only on a recorder; neither on a trader, where it follows the other machine's lists)."""
     try:
         from lighter_bot import ops as lops
         from lighter_bot.config import load
 
         cfg = load()
         was = lops.running(cfg, "scout")
-        pid = lops.start(cfg, "scout", ["scout", "run"])
+        pid = lops.start(cfg, "scout", ["scout", "run", *SCOUT_FLAG[role]])
     except Exception as e:   # not installed, or its config does not load: the Arcus services are not affected
         return f"lighter scout: not started ({type(e).__name__}: {e}). In treading-bot/arcus: make install"
     return (f"lighter scout: {'already running' if was else 'started'} (pid {pid}), "
@@ -173,9 +203,11 @@ def others_down(everything: bool) -> list[str]:
     return out
 
 
-def others_status() -> list[str]:
+def others_status(role: str = "all") -> list[str]:
     """The Lighter and funding-arbitrage lines of `arcus status`."""
     lines = ["", "LIGHTER"]
+    does = {"all": "records every Lighter market, ranks setups", "scout": "records every Lighter market, ranks setups",
+            "recorder": "records every Lighter market", "trader": "follows the other machine's Lighter lists"}[role]
     try:
         from lighter_bot import ops as lops
         from lighter_bot.config import load
@@ -185,16 +217,18 @@ def others_status() -> list[str]:
         rec = st.get("recorder") or {}
         age = time.time() - float(rec.get("t") or 0) if rec else None
         lines.append(f"  scout     {'running (pid ' + str(pid) + ')' if pid else 'STOPPED (arcus up starts it)':<46} "
-                     "records every Lighter market, ranks setups")
+                     f"{does}")
         if rec:
             lines.append(f"  recorder  {rec.get('markets', 0)} markets · {int(rec.get('rows_total') or 0):,} rows · last "
-                         f"written {ago(age)} ago" + (" · PAUSED: disk nearly full" if rec.get("paused_for_disk") else ""))
+                         f"written {ago(age)} ago" + (" · PAUSED: disk nearly full" if rec.get("paused_for_disk") else "")
+                         + (" (on the other machine, as last fetched)" if role == "trader" else ""))
         runs = [m for m in ("live", "paper") if st["services"].get(f"run-{m}")]
         for m in runs:
             r = st.get(m) or {}
             lines.append(f"  {m.upper():<6} {r.get('market', '?')} {r.get('setup', '')} · {r.get('state', '?')}")
         if not runs:
-            lines.append("  no run. Start one: /l_run in Telegram, or lighter run SPY 'smart +1'")
+            lines.append("  no run. Start one: /l_run in Telegram, or lighter run SPY 'smart +1'" if roles.trades(role)
+                         else "  no runs here: they start on the trader machine")
     except Exception as e:
         lines.append(f"  not available ({type(e).__name__}: {e}). In treading-bot/arcus: make install")
     lines += ["", "FUNDING ARB"]
@@ -209,7 +243,8 @@ def others_status() -> list[str]:
                 lines.append(f"  {mode.upper():<6} {'running (pid ' + str(pid) + ')' if pid else 'NOT RUNNING'} · "
                              f"{ph or 'never run'}")
         if not any_:
-            lines.append("  not running. /arb_scan and /arb_start in Telegram, or arbitrage scan")
+            lines.append("  not running. /arb_scan and /arb_start in Telegram, or arbitrage scan" if roles.trades(role)
+                         else "  not here: it runs on the trader machine")
     except Exception as e:
         lines.append(f"  not available ({type(e).__name__}: {e}). In treading-bot/arcus: make install")
     return lines
@@ -230,17 +265,25 @@ def dashboard(app: AppConfig, env: dict[str, str], root: Path) -> str:
 
     ctl = Control(app, root=root)
     live = ctl.is_running("live")
-    lines = ["SERVICES"]
+    r = roles.role(env)
+    lines = [] if r == "all" else [f"THIS MACHINE: {r} ({roles.WHAT[r]}; BOT_ROLE in .env)", ""]
+    lines.append("SERVICES")
     skip = skipped(env, live)
-    for s in SERVICES:
+    for base in SERVICES:
+        s = service(base.name, r)
         pid = pid_of(app, s.name)
         state = f"running {ago(uptime_s(app, s.name))} (pid {pid})" if pid else \
             f"off: {skip[s.name]}" if s.name in skip else "STOPPED (arcus up starts it)"
         lines.append(f"  {s.name:<9} {state:<46} {s.what}")
+    if r == "trader":
+        from arcus import handoff
+
+        lines += ["", "THE OTHER MACHINE (arcus sync)"] + ["  " + x for x in handoff.status_lines(app.state_dir, env)]
     lines += ["", "TRADING BOT"]
     modes = [m for m in ("live", "paper") if ctl.is_running(m)]
     if not modes:
-        lines.append("  not running. Start one: arcus pilot approve 1 (paper) or arcus pilot approve 1 --live")
+        lines.append("  not running. Start one: arcus pilot approve 1 (paper) or arcus pilot approve 1 --live"
+                     if roles.trades(r) else "  no runs here: they start on the trader machine")
     for m in modes:
         v = ctl.view(m)
         snap = v.snapshot or {}
@@ -275,7 +318,9 @@ def dashboard(app: AppConfig, env: dict[str, str], root: Path) -> str:
         if not top:
             lines.append("   nothing within the budget (/top3 in Telegram shows the closest)")
     except (OSError, ValueError, KeyError):
-        lines.append("  no scan yet")
+        lines.append({"recorder": "  this machine does not scan (it records; scan where the tape is brought to)",
+                      "trader": "  no scan here yet: the lists come from the other machine (arcus sync status)"
+                      }.get(r, "  no scan yet"))
     lines += ["", "BALANCE"]
     last = BalanceLog(Path(app.state_dir) / "balances.jsonl").latest()
     if last:
@@ -284,4 +329,4 @@ def dashboard(app: AppConfig, env: dict[str, str], root: Path) -> str:
                      + (f" · trading PnL ${p:+,.2f}" if p is not None else ""))
     else:
         lines.append("  no reading yet (the scout reads it before each scan once ARCUS_ADDRESS is in .env)")
-    return "\n".join(lines + others_status())
+    return "\n".join(lines + others_status(r))

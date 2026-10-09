@@ -24,8 +24,22 @@ KEYS = ("ARCUS_ADDRESS", "ARCUS_ACCOUNT_INDEX", "LIGHTER_ACCOUNT_INDEX", "PROFUN
         "TELEGRAM_CHAT_ID")
 
 
+# What this machine is for (BOT_ROLE, one variable for the three bots; arcus/arcus/common/role.py says why). The
+# arbitrage trades, so its executor starts on a machine that trades: "all" (the default) or "trader".
+ROLES = ("all", "trader", "recorder", "scout")
+
+
 def _ours(k: str) -> bool:
-    return k in KEYS or k.startswith("ARB_")
+    return k in KEYS or k.startswith("ARB_") or k == "BOT_ROLE"
+
+
+def no_trading(env: dict[str, str] | None = None) -> str:
+    """Why this machine must not start the executor ("" when it may)."""
+    r = ((read_env() if env is None else env).get("BOT_ROLE") or "all").strip().lower()
+    if r not in ROLES:
+        return f"BOT_ROLE={r!r} in arcus/.env: must be one of {', '.join(ROLES)}"
+    return "" if r in ("all", "trader") else (f"this machine is a {r} (BOT_ROLE={r} in arcus/.env): the executor "
+                                              "starts on the trader machine")
 
 
 def _env_file(p: Path) -> dict[str, str]:

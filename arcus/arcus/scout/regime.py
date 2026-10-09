@@ -13,9 +13,11 @@ after a normal one and 2.7 after a wild one (over 2x). A trend bias does not hel
 
 from __future__ import annotations
 
+import json
 import math
 import time
 from dataclasses import dataclass
+from pathlib import Path
 from typing import Any
 
 import numpy as np
@@ -32,6 +34,7 @@ SHOCK_MIN_BPS = 15.0
 SHOCK_LOOK_MIN = 15
 COOL_S = 30 * 60
 USUAL_DAYS = 28
+USUAL_FILE = "usual.json"   # data/scout: each market's usual level, for a machine that has no tape of its own
 
 
 def bucket(ratio: float) -> str:
@@ -99,6 +102,28 @@ def usual(store: TapeStore, market: str, now_us: int, days: int = USUAL_DAYS) ->
                 t = s0 + h * 3600 * S
                 per.setdefault((weekend_at(t + 1800 * S), h), []).append(rv)
     return Usual({k: float(np.median(v)) for k, v in per.items()}, time.strftime("%Y-%m-%d", time.gmtime(now_us / S)))
+
+
+def save_usual(path: Path, usuals: dict[str, Usual], now: float | None = None) -> None:
+    """Write the markets' usual levels where a trader can fetch them (arcus/handoff.py): a trader records nothing, so
+    it cannot work them out from 28 days of tape as `usual` does."""
+    out = {"ts": now or time.time(),
+           "markets": {m: {"day": u.day, "rv": {f"{int(w)}|{h}": v for (w, h), v in sorted(u.rv.items())}}
+                       for m, u in usuals.items() if u.rv}}
+    path.parent.mkdir(parents=True, exist_ok=True)
+    tmp = path.with_suffix(".tmp")
+    tmp.write_text(json.dumps(out))
+    tmp.replace(path)
+
+
+def load_usual(path: Path, market: str) -> Usual | None:
+    """One market's usual level from that file; None when the file or the market is missing or unreadable."""
+    try:
+        e = json.loads(path.read_text())["markets"][market]
+        rv = {(k.split("|")[0] == "1", int(k.split("|")[1])): float(v) for k, v in e["rv"].items()}
+    except (OSError, ValueError, KeyError, TypeError, IndexError):
+        return None
+    return Usual(rv, str(e.get("day") or "")) if rv else None
 
 
 @dataclass

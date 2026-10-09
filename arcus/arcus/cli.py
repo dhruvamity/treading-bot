@@ -10,6 +10,7 @@
     arcus doctor pilot              is everything ready for live? (reads only)
     arcus export                    one file with everything recorded and traded since the last export (no keys)
     arcus import [FILE]             take such a file in on another machine
+    arcus sync status               two machines: a trader takes the lists from the machine that makes them
 
 Commands that touch a real account (cancel-all, flatten) ask for CONFIRM.
 """
@@ -27,6 +28,7 @@ from decimal import Decimal
 from pathlib import Path
 from typing import Any
 
+from arcus.common import role as roles
 from arcus.common import sizing
 from arcus.common.config import load_app, load_arcus_config, load_session
 from arcus.common.logging import setup_logging
@@ -41,6 +43,23 @@ def _run(coro: Any) -> Any:
     except ImportError:
         pass
     return asyncio.run(coro)
+
+
+def _role() -> str:
+    """This machine's role (BOT_ROLE in .env); a word that is not a role stops the command with what to fix."""
+    try:
+        return roles.role()
+    except ValueError as e:
+        print(e)
+        sys.exit(2)
+
+
+def _must_trade() -> None:
+    """Stop here on a machine whose role does not trade (a recorder or a scout machine)."""
+    why = roles.no_trading()
+    if why:
+        print(f"not started: {why}")
+        sys.exit(2)
 
 
 def _confirm(what: str) -> None:
@@ -136,6 +155,7 @@ def cmd_run(a: argparse.Namespace) -> None:
     from arcus.core.livelock import RunMode
     from arcus.core.runner import BotRunner
 
+    _must_trade()
     sessions = _load_sessions(a)
     mode = _run_mode(a)
     app = load_app()
@@ -176,12 +196,15 @@ def cmd_up(a: argparse.Namespace) -> None:
     from arcus.telegram.control import Control
 
     app = load_app()
+    r = _role()
     live = Control(app).is_running("live")
     for name, why in ops.wanted(app, dict(os.environ), live).items():
-        print(f"{ops.start(app, name)[1]}  [{why}]")
+        print(f"{ops.start(app, name, r)[1]}  [{why}]")
     for name, why in ops.skipped(dict(os.environ), live).items():
         print(f"{name}: not started ({why})")
-    print(ops.lighter_up() + "  [always: it records, with no keys and no orders]")
+    print(ops.lighter_up(r) + {"trader": "  [it follows the other machine's lists; no recording here]",
+                               "recorder": "  [it records, with no keys and no orders; no scans here]"
+                               }.get(r, "  [always: it records, with no keys and no orders]"))
     print("\n" + ops.dashboard(app, dict(os.environ), Path.cwd()))
 
 
@@ -250,6 +273,7 @@ def cmd_status(a: argparse.Namespace) -> None:
     if not a.json:
         from arcus import ops
 
+        _role()      # a word in BOT_ROLE that is not a role: say so instead of a traceback
         print(ops.dashboard(app, dict(os.environ), Path.cwd()))
         return
     modes = [a.mode] if a.mode else ["live", "testnet", "paper"]
@@ -565,16 +589,28 @@ def cmd_scout(a: argparse.Namespace) -> None:
         from arcus.telegram.control import Control
 
         cfg = load_arcus_config()
+        r = _role()
+        # the three jobs (arcus/scout/service.py): a flag decides, else the machine's role
+        record, rank, supervise = roles.jobs(r, follow=a.follow, record_only=a.record_only)
+        pull = None
+        if supervise and not rank and os.environ.get("BOT_SYNC_FROM"):
+            from arcus import handoff
+
+            pull = lambda: handoff.pull(handoff.roots(root), root / app.state_dir)   # noqa: E731
         pid = Path(app.state_dir) / "scout.pid"
         pid.parent.mkdir(parents=True, exist_ok=True)
         pid.write_text(str(os.getpid()))
         spec = a.capital or app.sizing.capital_usd
-        print(f"scout: recording all Arcus perps, scanning every {a.every_min:g} min at capital {spec}; "
-              "Ctrl-C stops it")
+        print("scout: " + (f"recording all Arcus perps, scanning every {a.every_min:g} min at capital {spec}" if rank
+                           else "recording all Arcus perps (no scans on this machine)" if record else
+                           "following: no recording and no scans here; the lists come from "
+                           + (os.environ.get("BOT_SYNC_FROM") or "nowhere yet (BOT_SYNC_FROM is not set)"))
+              + "; Ctrl-C stops it")
         try:
             _run(run_service(root, Pilot(root, Control(app)), rest_url=cfg.rest.mainnet, ws_url=cfg.ws.mainnet,
                              every_min=a.every_min, workers=a.workers, ladder=a.ladder, depth=a.depth,
-                             capital=a.capital, sizing=app.sizing))
+                             capital=a.capital, sizing=app.sizing, record=record, rank=rank, supervise=supervise,
+                             pull=pull))
         finally:
             with contextlib.suppress(OSError):
                 if pid.read_text() == str(os.getpid()):
@@ -645,6 +681,7 @@ def cmd_pilot(a: argparse.Namespace) -> None:
             for i, c in enumerate(top, 1):
                 print(f"  {i}. {describe(c)}")
     elif a.action == "approve":
+        _must_trade()
         lev = "max" if a.max_lev else "rec"
         c = pilot.pick(a.n, a.list, lev)
         print(describe(c))
@@ -673,6 +710,7 @@ def cmd_auto(a: argparse.Namespace) -> None:
     app = load_app()
     state = Path(app.state_dir)
     if a.action == "on":
+        _must_trade()
         if a.live:
             if os.environ.get("BOT_PILOT_LIVE") != "1":
                 print("live is off: set BOT_PILOT_LIVE=1 in .env first")
@@ -755,6 +793,60 @@ def cmd_import(a: argparse.Namespace) -> None:
         print(f"not imported: {e}")
         sys.exit(2)
     sys.exit(0 if res["ok"] else 1)
+
+
+def cmd_sync(a: argparse.Namespace) -> None:
+    """Two machines: a trader takes the lists from the machine that makes them (arcus/handoff.py)."""
+    from arcus import handoff
+
+    app = load_app()
+    where = handoff.roots(Path.cwd())
+    state = Path(app.state_dir)
+    try:
+        if a.action == "serve":       # the other end of a pull: only ever run by sshd, through `arcus sync allow`
+            sys.stdout.buffer.write(handoff.pack(where, handoff.since_of(os.environ.get("SSH_ORIGINAL_COMMAND"))))
+            sys.stdout.buffer.flush()
+        elif a.action == "receive":   # the other end of a push
+            why = handoff.may_receive()
+            if why:
+                raise handoff.SyncError(why)
+            st = handoff.take(where, state, sys.stdin.buffer.read(handoff.MAX_TOTAL + 1), "a push")
+            print(f"took {len(st['took'])} file(s)" + "".join(f"\n  not taken: {k}: {v}"
+                                                             for k, v in st["refused"].items()))
+        elif a.action == "key":
+            pub = handoff.make_key(handoff.key_path())
+            print(f"{pub}\n\nOn the OTHER machine (the one that records), in treading-bot/arcus, paste that line "
+                  f"in quotes:\n  .venv/bin/arcus sync allow '{pub}'\n\nThen here, put its address in .env "
+                  f"({handoff.FROM}=user@its-address) and try:\n  .venv/bin/arcus sync pull")
+        elif a.action == "allow":
+            if not a.arg:
+                raise handoff.SyncError("give the public key `arcus sync key` printed on the trader, in quotes")
+            line, added = handoff.allow(a.arg, Path.cwd())
+            print(("Added to ~/.ssh/authorized_keys:" if added else "Already in ~/.ssh/authorized_keys:") + f"\n  {line}"
+                  "\nThat key can now run `arcus sync serve` here and nothing else: no shell, no other file.")
+        elif a.action == "pull":
+            why = handoff.may_receive()
+            if why:
+                raise handoff.SyncError(why)
+            st = handoff.pull(where, state)
+            if st.get("error"):
+                raise handoff.SyncError(st["error"])
+            print(f"took {len(st.get('took') or [])} file(s) from {st.get('source')}")
+            print("\n".join(handoff.status_lines(state)))
+        elif a.action == "push":
+            dest = handoff.Dest.parse(a.arg)
+            print(handoff.ssh_push(dest, a.path, handoff.pack(where)))
+        else:
+            r = _role()
+            print(f"this machine: {r} ({roles.WHAT[r]})")
+            print("\n".join(handoff.status_lines(state)) if r == "trader" else
+                  "it makes its own lists: nothing to fetch. A trader fetches from it once `arcus sync allow` is done "
+                  "here." if roles.ranks(r) else
+                  "it records only: it has no lists to hand over (scan where the tape is brought to, then "
+                  "`arcus sync push user@trader` from there).")
+    except (handoff.SyncError, ValueError) as e:
+        print(f"sync: {e}", file=sys.stderr)
+        sys.exit(2)
 
 
 def cmd_secrets(a: argparse.Namespace) -> None:
@@ -846,7 +938,8 @@ def build_parser() -> argparse.ArgumentParser:
     sp.add_argument("--adopt-positions", action="store_true", help="an existing position is the bot's to manage")
     sp.add_argument("--seconds", type=float, help="stop after this long")
     sp.add_argument("--state-db", help=argparse.SUPPRESS)
-    sp = add("up", cmd_up, "start everything this machine should run: both scouts, the Telegram bot, guardian")
+    sp = add("up", cmd_up, "start everything this machine should run (BOT_ROLE in .env): both scouts, the "
+             "Telegram bot, guardian")
     sp = add("down", cmd_down, "stop the scouts and the Telegram bot; --all also stops every run (positions kept)")
     sp.add_argument("--all", action="store_true")
     sp = add("status", cmd_status, "one screen: services, trading bot, what is deployed, last scan, balance")
@@ -890,6 +983,12 @@ def build_parser() -> argparse.ArgumentParser:
                          "maximum only, and Telegram's /run runs any leverage)")
     sp.add_argument("--depth", action="store_true",
                     help="run: also record the top 10 book levels (queue-position data for larger orders; more disk)")
+    g = sp.add_mutually_exclusive_group()
+    g.add_argument("--record-only", action="store_true",
+                   help="run: record the tape and nothing else (no scans; a recorder machine, BOT_ROLE=recorder)")
+    g.add_argument("--follow", action="store_true",
+                   help="run: no recording and no scans; take the lists from the other machine and watch the run "
+                        "(a trader machine, BOT_ROLE=trader)")
     sp.add_argument("--capital",
                     help="the capital to backtest at: auto (the subaccount's equity; paper capital if unfunded) or "
                          "a dollar amount (default: config/app.yaml sizing.capital_usd)")
@@ -953,6 +1052,14 @@ def build_parser() -> argparse.ArgumentParser:
     sp = add("import", cmd_import, "take in a file made by `arcus export`: check it, merge the tape, unpack the rest")
     sp.add_argument("path", nargs="?", help="the tb-*.tar file or its folder (default: the newest in "
                                             "treading-bot/exports or ~/Downloads)")
+    sp = add("sync", cmd_sync, "two machines: a trader takes the lists from the machine that makes them")
+    sp.add_argument("action", nargs="?", default="status",
+                    choices=["status", "key", "allow", "pull", "push", "serve", "receive"],
+                    help="status; key: make the trader's key; allow KEY: let it fetch from this machine; pull: fetch "
+                         "now; push user@trader: hand over lists you scanned here by hand")
+    sp.add_argument("arg", nargs="?", help="allow: the public key, in quotes; push: user@host[:port]")
+    sp.add_argument("--path", default="treading-bot/arcus",
+                    help="push: the arcus folder on the trader (default treading-bot/arcus, from its home folder)")
     sp = add("secrets", cmd_secrets, "encrypted secrets store")
     sp.add_argument("action", choices=["init", "set", "list-redacted", "status", "import-env"])
     sp.add_argument("name", nargs="?")

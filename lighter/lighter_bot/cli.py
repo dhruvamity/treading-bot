@@ -19,7 +19,10 @@ CONFIRM_FRESH_S = 600
 
 
 def _cfg() -> Config:
-    cfg = load()
+    try:
+        cfg = load()
+    except ValueError as e:      # a word in BOT_ROLE or LIGHTER_ENV that is not one: say so instead of a traceback
+        sys.exit(str(e))
     cfg.ensure_dirs()
     return cfg
 
@@ -43,9 +46,13 @@ def _money(text: str | None) -> float | None:
 
 
 # ------------------------------------------------------------------------------------------------ commands
+ROLE_FLAG = {"all": [], "scout": [], "recorder": ["--record-only"], "trader": ["--follow"]}
+
+
 def cmd_up(a: argparse.Namespace) -> None:
     cfg = _cfg()
-    print(f"scout: pid {ops.start(cfg, 'scout', ['scout', 'run'])}")
+    print(f"scout: pid {ops.start(cfg, 'scout', ['scout', 'run', *ROLE_FLAG[cfg.role]])}"
+          + ("" if cfg.role == "all" else f" (this machine is a {cfg.role}: BOT_ROLE in arcus/.env)"))
     print("telegram: the trading bot's one Telegram bot shows Lighter too (`arcus up` in treading-bot/arcus; /l there)")
 
 
@@ -120,7 +127,11 @@ def cmd_scout(a: argparse.Namespace) -> None:
     cfg = _cfg()
     if a.what == "run":
         log_setup(cfg.logs_dir, "scout", echo="warn")
-        asyncio.run(service.run(cfg, record=not a.no_record, seconds=a.seconds))
+        # the three jobs (lighter_bot/scout/service.py): a flag decides, else the machine's role
+        record = False if a.follow or a.no_record else True if a.record_only else cfg.records
+        rank = False if a.follow or a.record_only else cfg.ranks
+        supervise = True if a.follow else False if a.record_only else cfg.trades
+        asyncio.run(service.run(cfg, record=record, seconds=a.seconds, rank=rank, supervise=supervise))
         return
     cap = float(a.capital) if a.capital not in (None, "auto") else asyncio.run(service.account_capital(cfg))
     eff = settings.effective(cfg)
@@ -197,6 +208,8 @@ def _spec_from_args(cfg: Config, a: argparse.Namespace) -> Any:
 def cmd_run(a: argparse.Namespace) -> None:
     from lighter_bot.trade.runner import RunRefused, build
     cfg = _cfg()
+    if cfg.no_trading():
+        sys.exit(f"refused: {cfg.no_trading()}")
     spec = _spec_from_args(cfg, a)
     if spec.mode == "live":
         confirmed = False
@@ -248,6 +261,8 @@ def cmd_pilot(a: argparse.Namespace) -> None:
     if a.what == "status":
         cmd_status(argparse.Namespace(json=False))
         return
+    if cfg.no_trading():
+        sys.exit(f"refused: {cfg.no_trading()}")
     row = pilot.pick(cfg, a.list, a.n)
     spec = RunSpec(market=row["market"], setup=row["setup"], leverage=float(row["leverage"]),
                    mode="live" if a.live else "paper", capital=None if a.live else float(row["capital"]),
@@ -261,6 +276,8 @@ def cmd_auto(a: argparse.Namespace) -> None:
     from lighter_bot.scout import autopilot
     cfg = _cfg()
     if a.action == "on":
+        if cfg.no_trading():
+            sys.exit(f"refused: {cfg.no_trading()}")
         mode = "live" if a.live else "paper"
         if mode == "live":
             if not cfg.live_allowed:
@@ -352,6 +369,10 @@ def main(argv: list[str] | None = None) -> None:
     p.add_argument("--markets")
     p.add_argument("--full", action="store_true", help="re-run the last 24 h for every setup")
     p.add_argument("--no-record", action="store_true")
+    g = p.add_mutually_exclusive_group()
+    g.add_argument("--record-only", action="store_true", help="run: the tape and nothing else (a recorder machine)")
+    g.add_argument("--follow", action="store_true",
+                   help="run: no recording and no scans; follow the lists another machine makes (a trader machine)")
     p.add_argument("--seconds", type=float)
     p.set_defaults(fn=cmd_scout)
     p = sub.add_parser("backtest", help="one setup on the recorded days")

@@ -115,6 +115,8 @@ chmod 600 .env
 | `LIGHTER_ADDRESS`, `LIGHTER_API_PRIVATE_KEY`, `LIGHTER_API_KEY_INDEX`, `LIGHTER_ACCOUNT_INDEX` | The Lighter key ([lighter/README.md](lighter/README.md), section 3) | Lighter live |
 | `LBOT_LIVE=1` | Allows live Lighter runs | Lighter live |
 | `ARB_LIVE=1`, `ARCUS_ACCOUNT_INDEX` | Allows the live arbitrage; the Arcus subaccount it uses | arbitrage live |
+| `BOT_ROLE` | What this machine is for: `all` (default), `trader`, `recorder` or `scout` ([two machines](#two-machines-one-records-one-trades)) | two machines |
+| `BOT_SYNC_FROM`, `BOT_SYNC_KEY` | On a trader: `user@host` of the machine that makes the lists, and the key file it fetches with (default `~/.ssh/treading_bot_sync`) | a trader that fetches lists |
 
 The switch names (`BOT_PILOT_LIVE`, `LBOT_LIVE`, `ARB_LIVE`) are unchanged from earlier versions on purpose, so an existing
 `.env` keeps working. Recording, backtests and paper need **no keys at all**. Check what you filled in (both only read):
@@ -189,6 +191,69 @@ make install
 - **Seed a new server** with the history you already have: `arcus export --full` on the old machine, copy the file,
   `arcus import` on the new one.
 
+### Two machines: one records, one trades
+
+One small server cannot record, rank and trade at once: on 2026-10-09 the two recorders together took about 210 MB,
+and a single backtest of the busiest market's day peaked at 664 MB. Split the work instead: put `BOT_ROLE` in each
+machine's `.env`, and `arcus up` starts only what that machine is for. All three bots follow it.
+
+| `BOT_ROLE` | Records the tape | Ranks (scans, playbook) | Telegram, runs, guardian | Fits |
+|---|---|---|---|---|
+| `all` (default) | yes | yes | yes | 4 cores, 8 GB |
+| `trader` | no | no | yes | 1 core, 1 GB |
+| `recorder` | yes | no | no | 1 core, 1 GB plus disk |
+| `scout` | yes | yes | no | 4 cores, 8 GB |
+
+- **The keys live on the trader only.** A recorder or a scout machine needs none: leave its `.env` empty apart from
+  `BOT_ROLE`. It refuses to start a run, the autopilot or the arbitrage, and it never starts the Telegram bot
+  (Telegram hands each message to one poller, so two machines polling one bot would each see half of them).
+- **A trader needs nothing from the other machine to trade.** It reads the market list from the venues itself, so
+  `/run`, `/l_run`, the arbitrage, the stops and the guardian all work with the recorder switched off.
+- **What it does not have by itself is the lists** (`/top3`, the pilot's picks, both autopilots): they are worked out
+  from the tape, where the tape is. They reach the trader in one of two ways, below.
+
+**A trader and a recorder (two small servers).** No connection between them is needed. On each:
+
+```bash
+echo "BOT_ROLE=recorder" >> .env
+```
+
+(`BOT_ROLE=trader` on the other), then `.venv/bin/arcus up`. For lists, bring the tape to a bigger computer and scan
+there: `arcus export` on the recorder, `arcus import` at home ([section 4](#4-export-and-import)), then
+
+```bash
+.venv/bin/arcus scout scan
+.venv/bin/arcus scout playbook
+.venv/bin/arcus sync push USER@TRADER
+```
+
+`sync push` uses your own SSH login to the trader and hands it the lists you just made. The trader shows how old they
+are; an old Arcus list is a warning, not a refusal, and Lighter refuses a pick from a scan over 90 minutes old.
+
+**A trader and a scout machine.** The trader fetches the lists by itself, about every two minutes. Once:
+
+1. On the trader: `.venv/bin/arcus sync key` makes a key and prints its public half.
+2. On the scout machine: `.venv/bin/arcus sync allow 'ssh-ed25519 AAAA…'` (paste that line, in quotes).
+3. On the trader: put `BOT_SYNC_FROM=USER@SCOUT-ADDRESS` in `.env`, try `.venv/bin/arcus sync pull`, then
+   `arcus down` and `arcus up`. `.venv/bin/arcus sync status` (and `arcus status`) show when it last worked.
+
+**How the two are connected, and what could go wrong.**
+- The trader asks; nothing ever logs in to the trader. It opens no port for this.
+- The key from step 1 can do one thing on the other machine: run `arcus sync serve`, which sends a fixed list of
+  small files (the last scan and its report, the playbook, the markets' usual volatility, the Lighter lists and
+  ceilings, the recorders' health). It gets no shell and cannot read any other file, whatever it asks for.
+- The trader treats what arrives as untrusted: only those file names, each checked before it replaces the one here.
+- If the other machine were broken into, the attacker gets no key and no way into the trader. They could hand over
+  wrong lists. A run's sizes and stops are worked out on the trader from its own account and settings, a LIVE run
+  still needs you, and the autopilot stays inside its daily budget; treat a list as advice, as before.
+- If the other machine goes quiet for 20 minutes, or its recorder stops, the trader says so once in Telegram
+  (`⚠️ TWO MACHINES`) and again when it is back. It keeps trading; it starts no autopilot run on lists that stopped
+  arriving.
+- SSH's first connection trusts the address you typed (`accept-new`); after that a changed machine is refused.
+
+Checked on one computer on 2026-10-10 (each role run from its own folder, the lists handed over through the real
+commands); **not yet run between two real servers**. On the first try, watch `arcus sync status`.
+
 **A machine that only records (Docker).** The scout places no orders and needs no keys, so it can run anywhere with
 Docker. From `arcus/` (the Arcus scout, container `arcus-scout`) or `lighter/` (container `lighter-scout`):
 
@@ -199,7 +264,8 @@ cat data/scout/recorder.json
 ```
 
 Arcus's `data/scout/report.txt` is the latest ranking; `SCOUT_CAPITAL=500 docker compose up -d` ranks for a $500 account
-(the container has no keys, so the default is the $100 paper capital) and `SCOUT_WORKERS=2` caps the scan workers. The
+(the container has no keys, so the default is the $100 paper capital) and `SCOUT_WORKERS=2` caps the scan workers;
+`BOT_ROLE=recorder docker compose up -d` records without scanning (a small machine). The
 containers restart after a crash or reboot and report unhealthy if the recorder has not written for 15 minutes. **Do not
 use Docker on a machine that trades:** a container cannot see a native bot's process, so the pilot could not review,
 pause or resume a live run. Run `arcus up` there instead. To bring Docker results home:
@@ -302,7 +368,10 @@ Anything else you keep at the top level of the repository (research folders, dow
 | A list is empty: "still recording" or "1 full day of data (needs 3)" | Each market needs 3 full recorded days. `/run` can still start it |
 | "Nothing passes all checks" | Normal in volatile hours. Wait for the next scan |
 | `report.txt` is old | Is the scout up? `arcus status`, then `tail logs/scout.out` |
-| The pilot refuses to approve | The scan is over 90 minutes old, or the top 3 changed. Check `arcus pilot status` |
+| The lists are old ("from a scan 3.2 h old") | Is the scout up (`arcus status`)? An old Arcus list is a warning and still runs; Lighter refuses a pick from a scan over 90 minutes old |
+| "not started: this machine is a recorder" | `BOT_ROLE` in `.env` says this machine does not trade. Start the run on the trader |
+| `sync: ssh failed (255)` on a trader | Can this machine reach the other on its SSH port? Was `arcus sync allow` run there with this machine's key (`arcus sync key` prints it again)? |
+| `⚠️ TWO MACHINES` in Telegram | The trader cannot fetch the lists, or the other machine's recorder is silent. Look at that machine: `arcus status` there |
 | `doctor` says "never funded" | Deposit USDG to the subaccount the key is bound to |
 | Repeated `UNDERCOLLATERALIZED` | Not enough margin for the order size. The bot pauses that market by itself |
 | A run was paused | `/openpositions` shows why. It resumes after two passing scans |
@@ -316,7 +385,7 @@ Anything else you keep at the top level of the repository (research folders, dow
 | Something else | `arcus export --no-tape`, and read its `SUMMARY.md`, section 4 |
 
 Emergencies (orders must go now, the server is unreachable, a key leaked): [arcus/RUNBOOK.md](arcus/RUNBOOK.md),
-section 2.
+section 4.
 
 ---
 

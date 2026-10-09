@@ -55,6 +55,9 @@ from arcus.venues.base import Venue
 from arcus.venues.symbols import canonical_base
 
 SESSION = "pilot"
+# what a scan row never decides: the run's own limits and identity are the owner's (or the autopilot's) to give. A
+# trader's scan comes from another machine (arcus/handoff.py), so a row is advice, never an instruction.
+RUN_KEYS = ("max_loss_usd", "take_profit_usd", "volume_target_usd", "run_id", "profile", "lev")
 SWITCH_X = 1.5
 RESUME_AFTER_GO_SCANS = 2
 MAX_SCAN_AGE_S = 90 * 60
@@ -364,10 +367,16 @@ class Pilot:
         backtest at that leverage and capital rides along when the last scan has one (c["backtested"]), else the run
         is marked not backtested at this size, and the live engine sizes it from the account like any other run."""
         setting = config_for(setting).name   # "touch 0bp" -> "Mid 0"; raises ValueError for an unknown setup
-        rows = [c for c in (self.latest_scan() or {}).get("all") or [] if c["market"] == market
+        rows = [{k: v for k, v in c.items() if k not in RUN_KEYS}
+                for c in (self.latest_scan() or {}).get("all") or [] if c["market"] == market
                 and setting_of(c) == setting]
         meta = self._meta().get(market)
         if meta is None:   # no market list (yet): only what the last scan backtested can run
+            from arcus.common import role as roles
+
+            if roles.role() == "trader":   # ... but never sized by another machine's scan: this one sizes its runs
+                raise ValueError(f"{market}: this machine has no market list yet (it reads it from Arcus every 10 "
+                                 "minutes; `arcus status` shows the scout service). Try again in a minute")
             return self._scan_row(market, setting, lev, rows)
         if meta.get("status") not in (None, "ONLINE"):
             raise ValueError(f"{market} is not an online Arcus market")
@@ -476,6 +485,11 @@ class Pilot:
     async def deploy(self, c: dict[str, Any], *, live: bool, by: str, wait_close_s: float = 660.0,
                      wait_start_s: float = 90.0) -> str:
         """Run candidate c (from pick() or find()): close whatever runs, write the session, start it."""
+        from arcus.common import role as roles
+
+        why = roles.no_trading()
+        if why:      # a recorder or a scout machine: said before anything running is closed
+            raise ValueError(why)
         mode = "live" if live else "paper"
         st = self.state()
         a = st.get("active")

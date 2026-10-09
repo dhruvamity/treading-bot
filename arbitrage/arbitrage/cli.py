@@ -232,10 +232,13 @@ def _mode(a: argparse.Namespace) -> str:
 
 
 def cmd_run(a: argparse.Namespace, cfg: Config) -> int:
-    from arbitrage.config import read_env
+    from arbitrage.config import no_trading, read_env
     from arbitrage.exec import run as runner
 
     mode = _mode(a)
+    if no_trading():
+        print(f"not started: {no_trading()}")
+        return 1
     if mode == "live":
         if read_env().get("ARB_LIVE", "").strip() != "1":
             print("LIVE is off: put ARB_LIVE=1 in arcus/.env first (README.md, section 6). Nothing was sent.")

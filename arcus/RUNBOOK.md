@@ -17,6 +17,15 @@ each setting means is in the [Arcus README](README.md).
 | run | `arcus run SESSION`: engines, dead man's switch, reconciliation, heartbeat | live |
 | guardian | Started with a live run. Watches `state/heartbeat.live`: silent for 60 s, or the drawdown limit hit, and it cancels all orders and alerts. A run stopped on purpose leaves a last heartbeat saying so, and the guardian exits without alarming | read + cancel |
 
+**Two machines** (`BOT_ROLE` in `.env`; main README, section 3). The same three commands, and `$A up` starts what the role says:
+
+| Role | scout service | Telegram bot, runs, guardian |
+|---|---|---|
+| `all` (one machine) | records and ranks | yes |
+| `trader` | follows: no recording, no scans; fetches the lists (`$A sync status`), reviews the run on each new scan, runs the autopilot | yes |
+| `recorder` | records only | no: `$A run`, `pilot approve`, `auto on` are refused |
+| `scout` | records and ranks | no |
+
 Logs are in `logs/` (JSON lines, secrets redacted): `tail -f logs/bot.jsonl`; decisions are in `logs/decisions.jsonl`.
 
 ## 2. Daily checks (2 minutes)
@@ -31,6 +40,8 @@ Logs are in `logs/` (JSON lines, secrets redacted): `tail -f logs/bot.jsonl`; de
 6. With the autopilot on: `$A auto` (or `/auto`) shows the pot, what it runs and why. `data/scout/playbook.json` and
    `state/calendars/earnings.csv` should be under a day old.
 7. Lighter and the arbitrage: `/l_status`, `/arb_status` (their READMEs have the daily checks).
+8. Two machines: on the trader, `$A sync status` shows when the lists last arrived and how old each file is. On the recorder,
+   `$A status` and `df -h`: nothing there tells your phone by itself, except through the trader's `⚠️ TWO MACHINES` alert.
 
 ## 3. Start, stop, change a run
 
@@ -53,6 +64,8 @@ any FAIL. From a terminal, leave out `--yes`: you get the doctor report and type
 | Orders must go NOW | `$A cancel-all --venue arcus` (your key's subaccount, mainnet; `--yes` skips the prompt); `/cancelall` from the phone |
 | Close positions | `$A flatten --venue arcus` (maker, reduce-only); add `--taker` for IOC; `/closeall` from the phone |
 | Server unreachable | The Arcus dead man's switch (`scheduleCancel`) cancels everything within its 60 s deadline. Then use the Arcus web app: cancel all, close positions. Lighter has its own switch; use the Lighter app |
+| `⚠️ TWO MACHINES`: cannot fetch the lists | The trader keeps trading, and a list's pick is no longer re-checked. Look at the other machine (`$A status` there), then `$A sync pull` on the trader. To stop depending on it: `/closeall`, or run your own pick with `/run` |
+| The recorder machine is broken into | It holds no keys and cannot log in to the trader. On the trader remove `BOT_SYNC_FROM` from `.env` and `$A down`, `$A up`; rebuild the recorder; delete its line in `~/.ssh/authorized_keys` if you reuse the machine |
 | Suspected key leak | Revoke the key in the Arcus web app (API Keys), create a new one, replace `ARCUS_API_PRIVATE_KEY` in `.env`, restart |
 
 ## 5. Safe mode and kill switches
