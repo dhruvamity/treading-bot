@@ -6,8 +6,12 @@
 - Account state arrives over an authenticated WebSocket: account_orders/<market>/<account> (our orders),
   account_all/<account> (positions and fills), user_stats/<account> (equity). A REST reconcile every 5 minutes (and
   whenever an order goes unacknowledged) makes Lighter the source of truth.
-- Dead man's switch: every 60 s the bot moves a scheduled cancel-all 5.5 minutes ahead (abort + schedule, one
-  request). If the bot or its machine dies, Lighter cancels every order within about 5 minutes by itself.
+- A dead bot's orders: every quote carries the shortest expiry Lighter takes (5.5 minutes), and the engine replaces
+  it 2 minutes before that (an expiry cannot be moved). If the bot or its machine dies, Lighter drops every order
+  within 5.5 minutes by itself. The live test of 2026-10-09 measured it: gone 17 s past the expiry.
+- The scheduled cancel-all ("dead man's switch", moved 5.5 minutes ahead every 60 s) is kept, but it is not that
+  protection: the same test showed Lighter acts on it only when the account's next request arrives, and a dead bot
+  sends none.
 - At start the market's orders are cancelled (the bot treats the account's orders on its market as its own) and the
   leverage is set (cross margin).
 """
@@ -35,6 +39,7 @@ log = Log("live")
 AUTH_LIFETIME_S = 7 * 3600
 DMS_EVERY_S = 60.0
 DMS_AHEAD_MS = C.CANCEL_ALL_MIN_MS + 30_000
+QUOTE_EXPIRY_MS = 5 * 60_000 + 30_000      # Lighter takes an expiry from 5 minutes ahead; 30 s of room for the clocks
 RECONCILE_EVERY_S = 300.0
 UNACKED_S = 10.0
 
@@ -92,12 +97,13 @@ class LiveExchange(Exchange):
             if c.kind == "new" and c.quote is not None:
                 q = c.quote
                 cid = self.ids.take()[0]
+                exp_ms = int(time.time() * 1000) + QUOTE_EXPIRY_MS
                 txs.append(self.signer.create_order(
                     market=m.market_id, client_index=cid, size=m.size_int(q.qty), price=self._px(q.side, q.px),
                     is_ask=q.side == SELL, order_type=C.ORDER_LIMIT, tif=C.TIF_POST_ONLY, reduce_only=q.reduce_only,
-                    expiry=C.ORDER_EXPIRY_DEFAULT, nonce=nonce))
+                    expiry=exp_ms, nonce=nonce))
                 new_orders.append(Order(cid, q.side, m.price_of(self._px(q.side, q.px)), m.size_of(m.size_int(q.qty)),
-                                        q.tag, q.reduce_only, "sent", time.time()))
+                                        q.tag, q.reduce_only, "sent", time.time(), expires=exp_ms / 1000))
             elif c.kind == "modify" and c.quote is not None:
                 q = c.quote
                 txs.append(self.signer.modify_order(market=m.market_id, index=c.cid, size=m.size_int(q.qty),
@@ -115,9 +121,37 @@ class LiveExchange(Exchange):
         if not self.budget.allows(kind):
             return False
         txs, new_orders, _ = self._sign_changes(changes)
+        # The books are written BEFORE the request leaves, and put back if it is refused. Lighter's order stream can
+        # report an order before the request's own answer arrives; written afterwards, a new order was first taken
+        # for someone else's, and "cancelled" was overwritten with "cancelling" until the next reconcile.
+        now = time.time()
+        before: dict[int, tuple[str, float, float, float]] = {}
+        for o in new_orders:
+            o.sent_at = now
+            self.orders[o.cid] = o
+        for c in changes:
+            o = self.orders.get(c.cid) if c.kind in ("modify", "cancel") else None
+            if o is None:
+                continue
+            before[c.cid] = (o.state, o.px, o.qty, o.sent_at)
+            if c.kind == "modify" and c.quote is not None:
+                o.state, o.sent_at = "sent", now
+                o.px, o.qty = c.quote.px, c.quote.qty
+            else:
+                o.state, o.sent_at = "cancelling", now
+
+        def undo() -> None:
+            for o in new_orders:
+                self.orders.pop(o.cid, None)
+            for cid, (state, px, qty, sent_at) in before.items():
+                o = self.orders.get(cid)
+                if o is not None and o.state in ("sent", "cancelling"):      # the stream has not said otherwise
+                    o.state, o.px, o.qty, o.sent_at = state, px, qty, sent_at
+
         try:
             r = await self.rest.send(txs, kind=kind, wait=False)
         except ApiError as e:
+            undo()
             self.errors.append((time.time(), f"{e.code}: {e.message}"))
             self.rejects.append((time.time(), str(e.code)))
             log.warn("send_refused", code=e.code, msg=e.message, n=len(txs))
@@ -125,24 +159,13 @@ class LiveExchange(Exchange):
                 self.budget.block(5.0)
             return False
         except (TimeoutError, OSError) as e:
+            undo()
             log.warn("send_failed", err=str(e))
             self._last_reconcile = 0.0      # find out what landed
             return False
         if r is None:
+            undo()
             return False
-        now = time.time()
-        for o in new_orders:
-            o.sent_at = now
-            self.orders[o.cid] = o
-        for c in changes:
-            o = self.orders.get(c.cid)
-            if o is None:
-                continue
-            if c.kind == "modify" and c.quote is not None:
-                o.state, o.sent_at = "sent", now
-                o.px, o.qty = c.quote.px, c.quote.qty
-            elif c.kind == "cancel":
-                o.state, o.sent_at = "cancelling", now
         return True
 
     async def taker(self, qty_signed: float) -> None:
@@ -300,9 +323,15 @@ class LiveExchange(Exchange):
         try:
             r = await self.rest.account(self.account)
             acc = (r.get("accounts") or [{}])[0]
-            for p in acc.get("positions") or []:
-                if int(p.get("market_id", -1)) == self.market.market_id:
-                    self._on_position(p)
+            rows = acc.get("positions")
+            mine = [p for p in rows or [] if int(p.get("market_id", -1)) == self.market.market_id]
+            for p in mine:
+                self._on_position(p)
+            if isinstance(rows, list) and not mine:
+                # Lighter answered with its positions and this market is not among them: flat. Without this a
+                # closed position stayed in the bot's books for good, and it kept sending exits for it (audit
+                # 2026-10-07; `lighter livetest` reports which way Lighter lists a closed market).
+                self.acct.pos, self.acct.entry = 0.0, None
             if acc.get("total_asset_value") is not None:
                 self.acct.equity = float(acc["total_asset_value"])
             if acc.get("available_balance") is not None:

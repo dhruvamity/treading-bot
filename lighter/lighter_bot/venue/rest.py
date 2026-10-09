@@ -180,6 +180,9 @@ class Rest:
     async def account(self, index: int) -> Any:
         return await self.get("/api/v1/account", {"by": "index", "value": str(index)})
 
+    async def tx(self, tx_hash: str) -> Any:
+        return await self.get("/api/v1/tx", {"by": "hash", "value": tx_hash})
+
     async def active_orders(self, account: int, market: int | None = None) -> Any:
         return await self.get("/api/v1/accountActiveOrders", {"account_index": account, "market_id": market},
                               auth=True)

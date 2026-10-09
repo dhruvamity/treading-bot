@@ -44,6 +44,9 @@ def test_changes_are_signed_into_one_batch(ex):
     assert f[2]["Index"] == 77
     assert f[0]["Nonce"] < f[1]["Nonce"] < f[2]["Nonce"]            # a batch needs rising nonces
     assert new[0].px == pytest.approx(84000.0) and new[0].state == "sent"
+    # every quote expires by itself 5.5 minutes on: that is what clears a dead bot's orders on Lighter
+    assert f[0]["OrderExpiry"] == pytest.approx(time.time() * 1000 + 330_000, abs=5_000)
+    assert new[0].expires == f[0]["OrderExpiry"] / 1000
 
 
 def test_order_updates(ex):
@@ -84,3 +87,84 @@ def test_positions_fills_and_equity(ex):
     ex.on_msg({"channel": "user_stats:4242", "type": "update/user_stats",
                "stats": {"portfolio_value": "101.5", "available_balance": "60", "total_stats": {}}})
     assert ex.acct.equity == pytest.approx(101.5)
+
+
+# ------------------------------------------------------------------------------------------------ the send path
+class _Answering:
+    """A REST stand-in whose `send` lets Lighter's order stream speak first, as it can on the real venue."""
+
+    def __init__(self, ex, frames=(), error=None):
+        self.ex, self.frames, self.error = ex, list(frames), error
+
+    async def send(self, txs, *, kind="reserve", wait=True):
+        for f in self.frames:
+            self.ex.on_msg({"channel": "account_orders:1", "type": "update/account_orders", "orders": {"1": [f(txs)]}})
+        if self.error:
+            raise self.error
+        return {"code": 200}
+
+
+def test_an_order_the_stream_reports_before_the_request_answers_is_ours(ex):
+    """Written after the request, a new order was first taken for someone else's ("foreign", to be cancelled), and a
+    cancelled one was set back to "cancelling" until the next reconcile."""
+    import asyncio
+
+    def opened(txs):
+        return {"client_order_index": signer.tx_fields(txs[0])["ClientOrderIndex"], "order_index": 2**48 + 1,
+                "price": "84000.0", "remaining_base_amount": "0.01000", "status": "open", "is_ask": False}
+
+    ex.rest = _Answering(ex, [opened])
+    assert asyncio.run(ex.send([Change("new", Quote(BUY, 84000.0, 0.01, "b"))], "reserve")) is True
+    (o,) = ex.orders.values()
+    assert o.state == "open" and o.tag == "b" and o.oid == 2**48 + 1          # ours, and already known to be open
+    ex.rest = _Answering(ex, [lambda txs: {"client_order_index": o.cid, "status": "canceled", "price": "84000.0"}])
+    assert asyncio.run(ex.send([Change("cancel", cid=o.cid)], "reserve")) is True
+    assert ex.orders[o.cid].state == "done"                                    # not back to "cancelling"
+
+
+def test_a_refused_request_leaves_the_books_as_they_were(ex):
+    import asyncio
+
+    from lighter_bot.venue.rest import ApiError
+
+    _, new, _ = ex._sign_changes([Change("new", Quote(BUY, 84000.0, 0.01, "b"))])
+    o = new[0]
+    o.state, o.sent_at = "open", 5.0
+    ex.orders[o.cid] = o
+    ex.rest = _Answering(ex, error=ApiError(400, C.ERR_NOT_ENOUGH_MARGIN, "not enough margin to create the order"))
+    ok = asyncio.run(ex.send([Change("new", Quote(SELL, 84100.0, 0.01, "a")),
+                              Change("modify", Quote(BUY, 83990.0, 0.02, "b"), cid=o.cid)], "reserve"))
+    assert ok is False and list(ex.orders) == [o.cid]                          # the new order never existed
+    assert (o.state, o.px, o.qty, o.sent_at) == ("open", 84000.0, 0.01, 5.0)   # the modify is taken back
+    assert ex.errors and "21739" in ex.errors[-1][1]
+    ex.rest = _Answering(ex, error=TimeoutError("no answer"))
+    assert asyncio.run(ex.send([Change("cancel", cid=o.cid)], "reserve")) is False
+    assert ex.orders[o.cid].state == "open" and ex._last_reconcile == 0.0      # as before: find out what landed
+
+
+def test_a_market_lighter_no_longer_lists_is_a_flat_position(ex):
+    """Lighter may stop listing a market once the position is closed: the bot must then hold nothing, or it keeps
+    sending exits for a position that is gone."""
+    import asyncio
+
+    class Rest:
+        def __init__(self, rows):
+            self.rows = rows
+
+        async def account(self, index):
+            return {"accounts": [{"total_asset_value": "50", "available_balance": "50", **self.rows}]}
+
+        async def active_orders(self, account, market=None):
+            return {"orders": []}
+
+    ex.acct.pos, ex.acct.entry = 0.01, 84000.0
+    ex.rest = Rest({"positions": [{"market_id": 9, "position": "3", "sign": 1}]})      # another market only
+    asyncio.run(ex.reconcile())
+    assert ex.acct.pos == 0.0 and ex.acct.entry is None and ex.acct.equity == 50.0
+    ex.acct.pos = 0.01
+    ex.rest = Rest({})                                    # an answer with no positions list at all: nothing is learnt
+    asyncio.run(ex.reconcile())
+    assert ex.acct.pos == 0.01
+    ex.rest = Rest({"positions": [{"market_id": 1, "position": "0.02", "sign": -1, "avg_entry_price": "84100"}]})
+    asyncio.run(ex.reconcile())
+    assert ex.acct.pos == pytest.approx(-0.02)
