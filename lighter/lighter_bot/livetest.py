@@ -45,6 +45,7 @@ LIQUID_USD = 1_000_000.0
 DMS_TRY_MS = (30_000, C.CANCEL_ALL_MIN_MS + 30_000)   # a short horizon first (if Lighter takes it), else the bot's own
 DMS_LATE_OK_S = 60.0                 # the scheduled cancel-all may fire this long after its time and still pass
 DMS_LATE_S = 300.0                   # and the test waits this long past the time before it calls it never
+EXPIRY_MS = 5 * 60_000 + 30_000      # the shortest expiry Lighter takes on an order is 5 minutes ahead
 PASS, FAIL, INFO, SKIP = "PASS", "FAIL", "INFO", "SKIP"
 
 
@@ -152,6 +153,10 @@ class LiveTest:
         r = await self.ex.rest.account(self.ex.account)
         acc = (r.get("accounts") or [{}])[0]
         return int(acc.get("cancel_all_time") or 0), int(acc.get("total_order_count") or 0)
+
+    @staticmethod
+    def listed(orders: list[dict[str, Any]], cid: int) -> bool:
+        return any(int(o.get("client_order_index") or 0) == cid for o in orders)
 
     async def tx_note(self, tx_hash: str) -> str:
         """What Lighter says it did with one transaction, for the report."""
@@ -461,16 +466,26 @@ class LiveTest:
                   else f"IT OPENED A POSITION of {pos:+g}")
 
     async def step_dead_mans_switch(self) -> None:
+        """What still protects the account once the bot is dead: Lighter's scheduled cancel-all, and an order's own
+        expiry. Two orders far under the price, one with the shortest expiry; neither is meant to trade."""
         name = "dead man's switch"
         _held, others = await self.venue_schedule()
         if others:      # the scheduled cancel-all is for the whole account, not this market
             self.note(name, SKIP, f"the account has {others} open order(s) in other markets and Lighter's scheduled "
                                   "cancel-all would cancel them too. Nothing was sent for this step")
             return
-        cid, _px = await self.far_order(BUY, "test-dms")
+        cid, px = await self.far_order(BUY, "test-dms")
         if cid is None or not await self.until_venue(lambda os_: bool(os_)):
             self.note(name, SKIP, f"no resting order to cancel: {self.last_error()}")
             return
+        exp_ms = int(self.clock() * 1000) + EXPIRY_MS
+        ecid, tx = self.sign_order(BUY, self.qty(), px + self.m.tick, order_type=C.ORDER_LIMIT, tif=C.TIF_POST_ONLY,
+                                   reduce_only=False, expiry=exp_ms)
+        _r, eerr = await self.raw([tx])
+        expiring = not eerr and await self.until_venue(lambda os_: self.listed(os_, ecid))
+        if not expiring:
+            self.note("order expiry", FAIL, f"an order with a {EXPIRY_MS / 1000:.0f} s expiry was refused: "
+                                            f"{eerr or 'Lighter does not list it'}")
         ahead, err, at_ms, reply = 0, "", 0, None
         for ms in DMS_TRY_MS:
             n = self.ex.nonces.take(2)
@@ -481,41 +496,68 @@ class LiveTest:
             if not err:
                 ahead = ms
                 break
-        if not ahead:
-            self.note(name, FAIL, f"Lighter refused the scheduled cancel-all: {err}")
-            return
         how = f"scheduled {ahead / 1000:.0f} s ahead" + (" (Lighter takes less than the 5 minutes the bot uses)"
                                                         if ahead < C.CANCEL_ALL_MIN_MS else "")
-        # "OK" only means Lighter took the request: what counts is the time it then holds for the account
-        await self.sleep(3.0)
-        held, _n = await self.venue_schedule()
-        if not held:
-            hashes = list(reply.get("tx_hash") or []) if isinstance(reply, dict) else []
-            why = await self.tx_note(str(hashes[-1])) if hashes else "its answer named no transaction"
-            self.note(name, FAIL, f"{how}; Lighter answered OK but holds NO scheduled time for the account ({why}): "
-                                  "it would never fire")
+        held = 0
+        if not ahead:
+            self.note(name, FAIL, f"Lighter refused the scheduled cancel-all: {err}")
+        else:       # "OK" only means Lighter took the request: what counts is the time it then holds for the account
+            await self.sleep(3.0)
+            held, _n = await self.venue_schedule()
+            if not held:
+                hashes = list(reply.get("tx_hash") or []) if isinstance(reply, dict) else []
+                why = await self.tx_note(str(hashes[-1])) if hashes else "its answer named no transaction"
+                self.note(name, FAIL, f"{how}; Lighter answered OK but holds NO scheduled time for the account ({why}): "
+                                      "it would never fire")
+        if not held and not expiring:
             await self.ex.disarm()
             return
-        self.say(f"       Lighter holds the time ({held}, asked {at_ms}); waiting up to {ahead / 1000 + DMS_LATE_S:.0f} s "
-                 "for it to cancel the order by itself (nothing else is open)...")
-        t0 = self.clock()
-        fired = False
-        while self.clock() - t0 < ahead / 1000 + DMS_LATE_S:
+        last = max(at_ms if held else 0, exp_ms if expiring else 0) / 1000 + DMS_LATE_S
+        self.say(f"       waiting up to {last - self.clock():.0f} s for Lighter to remove the two orders by itself: one by "
+                 + (f"the scheduled cancel-all it holds ({held}, asked {at_ms})" if held else "(no scheduled time held)")
+                 + ", one by its own expiry...")
+        gone: dict[int, float] = {}              # client id -> when Lighter stopped listing it
+        watch = ([cid] if held else []) + ([ecid] if expiring else [])
+        while self.clock() < last and len(gone) < len(watch):
             await self.sleep(10.0)
-            if not await self.venue_orders():
-                fired = True
-                break
-        took = self.clock() - t0
-        late = took - ahead / 1000
-        if not fired:
+            os_ = await self.venue_orders()
+            for c in watch:
+                if c not in gone and not self.listed(os_, c):
+                    gone[c] = self.clock()
+        together = cid in gone and ecid in gone and gone[cid] == gone[ecid]
+        if held:
+            late = gone.get(cid, self.clock()) - at_ms / 1000
+            if cid not in gone:
+                now_held, _n = await self.venue_schedule()
+                self.note(name, FAIL, f"{how}; Lighter held the time ({held}, asked {at_ms}) but the order was STILL "
+                                      f"THERE {late:.0f} s past it (the account's time now reads {now_held})")
+            elif late > DMS_LATE_OK_S:
+                self.note(name, FAIL, f"{how}; Lighter cancelled the order by itself but LATE: {late:.0f} s past its "
+                                      "time. For that long after the bot dies its orders stay up")
+            else:
+                self.note(name, PASS, f"{how}; Lighter cancelled the order by itself {max(late, 0):.0f} s past its time")
+        if expiring:
+            late = gone.get(ecid, self.clock()) - exp_ms / 1000
+            what = f"an order with a {EXPIRY_MS / 1000:.0f} s expiry"
+            if ecid not in gone:
+                self.note("order expiry", FAIL, f"{what} was STILL THERE {late:.0f} s past its expiry")
+            elif together:
+                self.note("order expiry", INFO, f"{what} went in the same 10 s as the scheduled cancel-all: this run "
+                                                "cannot tell which removed it")
+            elif late > DMS_LATE_OK_S:
+                self.note("order expiry", FAIL, f"{what} was removed by Lighter but LATE: {late:.0f} s past its expiry")
+            else:
+                self.note("order expiry", PASS, f"{what} was removed by Lighter {max(late, 0):.0f} s past its expiry"
+                                                + (", while the other order stayed" if held and cid not in gone else ""))
+        if held and cid not in gone:    # what does Lighter do with the account's next request, past the scheduled time?
+            ok = await self.send([Change("modify", Quote(BUY, px + 3 * self.m.tick, self.qty(), "test-dms"), cid=cid)])
+            await self.sleep(3.0)
+            still = self.listed(await self.venue_orders(), cid)
             now_held, _n = await self.venue_schedule()
-            self.note(name, FAIL, f"{how}; Lighter held the time ({held}, asked {at_ms}) but the order was STILL THERE "
-                                  f"{late:.0f} s past it (the account's time now reads {now_held})")
-        elif late > DMS_LATE_OK_S:
-            self.note(name, FAIL, f"{how}; Lighter cancelled the order by itself but LATE: after {took:.0f} s, "
-                                  f"{late:.0f} s past its time. For that long after the bot dies its orders stay up")
-        else:
-            self.note(name, PASS, f"{how}; Lighter cancelled the order by itself after {took:.0f} s")
+            self.note("a request after the scheduled time", INFO,
+                      "moving the order Lighter should have cancelled was "
+                      + ("accepted" if ok else f"refused ({self.last_error()})")
+                      + f"; the order is {'still listed' if still else 'now gone'}; the account's time reads {now_held}")
         await self.ex.disarm()
 
     # ---------------------------------------------------------------- the run
@@ -609,17 +651,18 @@ def plan_text(m: Any, lev_low: float, max_loss: float, dms: bool, dms_only: bool
     one = min_qty(m.min_base, m.min_quote, m.step, m.last_price) * m.last_price
     if dms_only:
         return "\n".join((
-            f"LIVE TEST on {m.symbol}, the dead man's switch only: one real order of about ${one:.2f}, far under the "
-            "price, where it does not trade.",
-            "  It asks Lighter to cancel every order on the account 5.5 minutes later, then waits (up to 11 minutes)",
-            "  to see Lighter do it by itself. It refuses if the account has orders in other markets.",
+            f"LIVE TEST on {m.symbol}, the dead man's switch only: two real orders of about ${one:.2f} each, far under "
+            "the price, where they do not trade.",
+            "  It asks Lighter to cancel every order on the account 5.5 minutes later and gives one order a 5.5-minute",
+            "  expiry, then waits (up to 11 minutes) to see Lighter remove them by itself. It refuses if the account",
+            "  has orders in other markets.",
             "  Expected cost: nothing. It ends with no orders. Do not trade this market by hand while it runs."))
     return "\n".join((
         f"LIVE TEST on {m.symbol}: real orders, real money, the smallest size Lighter takes (about ${one:.2f} each).",
         f"  It sets the leverage ({min(lev_low, m.max_leverage):g}x, then {m.max_leverage:g}x), rests and moves and cancels "
         "orders far from the price,",
         "  buys one minimum order and sells it, sells one short and buys it back, places a stop and a take-profit",
-        "  and removes them" + (", and lets Lighter's dead man's switch cancel one far order (up to 11 minutes)." if dms
+        "  and removes them" + (", and lets Lighter's dead man's switch cancel one far order and expire another (up to 11 minutes)." if dms
                                 else "."),
         f"  It stops and closes everything if the account falls ${max_loss:.2f} below where it started.",
         "  Expected cost with a zero-fee account: the spread on about four minimum orders (cents).",

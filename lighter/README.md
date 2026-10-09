@@ -210,18 +210,21 @@ wild in the last hour, its data fresh.
   account that already has an order or a position on that market, before sending anything. What it does: sets the leverage (5x,
   then the maximum); rests, moves and cancels a post-only order far from the price; cancel-all; two orders in one request; a batch
   with a bad member; a post-only order that would cross; a buy (as maker, else with a taker order), a stop and a take-profit as the
-  arbitrage places them, a close; a reduce-only order with no position; a short and its close; and Lighter's dead man's switch
-  cancelling an order by itself (`--skip-dms` leaves that out: it can take 11 minutes; `--dms-only` runs that step alone, with one far order and no trade). It stops and closes everything when the
+  arbitrage places them, a close; a reduce-only order with no position; a short and its close; and the two things that should
+  clear a dead bot's orders: Lighter's dead man's switch cancelling one order by itself, and a 5.5-minute expiry removing another
+  (`--skip-dms` leaves that out: it can take 11 minutes; `--dms-only` runs that step alone, with two far orders and no trade). It stops and closes everything when the
   account is $1 down (`--max-loss`), and always ends flat with no orders. With a zero-fee account the cost is the spread on about
   four minimum orders: cents. The report is printed and written to `lighter/reports/livetest-<time>.md`: `PASS` (Lighter did it
   and the bot's own books agree), `FAIL` (a bug to fix before a real run), `INFO` (something learned, such as how far from the
   price an order may rest).
 
-  **First run, 2026-10-09, SPY:** 19 `PASS`, no cost, ended flat. Orders, moves, cancels, both leverages, a long and a short
-  with their closes, a stop and a take-profit all worked, and Lighter accepted a worst price 5% past the trigger. One `FAIL`: the
-  dead man's switch. Lighter answered OK to the scheduled cancel-all, and the order was still on the book 66 s after its time.
-  Until `lighter livetest --dms-only` passes, treat that protection as not working: if the bot or its server dies during a live
-  run, its orders may stay on Lighter's book. Watch a live run, and cancel in the Lighter app if the bot goes quiet.
+  **Runs of 2026-10-09, SPY:** 19 `PASS`, no cost, ended flat. Orders, moves, cancels, both leverages, a long and a short with
+  their closes, a stop and a take-profit all worked, and Lighter accepted a worst price 5% past the trigger. One `FAIL`, twice:
+  the dead man's switch. Lighter answered OK to the scheduled cancel-all and held the time for the account, and the order was
+  still on the book 5 minutes after that time. So this protection does not work on this venue as the bot uses it: if the bot or
+  its server dies during a live run, its orders stay on Lighter's book (they carry a 28-day expiry). Watch a live run, and
+  cancel in the Lighter app if the bot goes quiet. Whether a short order expiry can do the job instead is what the next
+  `lighter livetest --dms-only` shows (the `order expiry` line).
 - **Before the first quote,** the run cancels your orders on that market, sets the leverage (cross margin) and arms the dead man's switch.
   It treats every order on that market as its own: trade by hand on another market, or use a sub-account (`LIGHTER_ACCOUNT_INDEX`).
 - **Control** (CLI, or Telegram): `lighter pause` / `unpause` (no new orders; closing orders keep working), `close` (close the position, maker

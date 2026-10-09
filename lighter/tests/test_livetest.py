@@ -27,12 +27,14 @@ class Venue:
     cancel-all. It answers the REST calls and pushes the account-stream frames the real one would."""
 
     def __init__(self, ex, *, far_limit=0.015, flat_row=False, stream_flat=True, fill_touch=False, cross_fills=False,
-                 min_cancel_ms=300_000, equity=6.0, slip_max=0.02, bleed=0.0, forgets=False, late_s=0.0, elsewhere=0):
+                 min_cancel_ms=300_000, equity=6.0, slip_max=0.02, bleed=0.0, forgets=False, late_s=0.0, elsewhere=0,
+                 expires=True, lazy=False):
         self.ex, self.bid, self.ask = ex, 100.00, 100.02
         self.far_limit, self.flat_row, self.stream_flat = far_limit, flat_row, stream_flat
         self.fill_touch, self.cross_fills, self.min_cancel_ms, self.slip_max = fill_touch, cross_fills, min_cancel_ms, slip_max
         self.equity, self.bleed = equity, bleed
         self.forgets, self.late_s, self.elsewhere = forgets, late_s, elsewhere   # the scheduled cancel-all going wrong
+        self.expires, self.lazy = expires, lazy      # does an order's expiry remove it; does the next request fire it
         self.orders: dict[int, dict] = {}
         self.pos = 0.0
         self.now = time.time()
@@ -49,6 +51,9 @@ class Venue:
         if self.scheduled is not None and self.now * 1000 >= self.scheduled + self.late_s * 1000:
             self.scheduled = None
             self._cancel_everything()
+        for cid, o in list(self.orders.items()):
+            if self.expires and o.get("expiry", 0) <= self.now * 1000:
+                self._order_frame({**self.orders.pop(cid), "status": "canceled-expired"})
         await asyncio.sleep(0)
 
     def clock(self) -> float:
@@ -99,6 +104,11 @@ class Venue:
     async def send(self, txs, *, kind="reserve", wait=True):
         fields = [(t.tx_type, signer.tx_fields(t)) for t in txs]
         mid = (self.bid + self.ask) / 2
+        if self.lazy and self.scheduled is not None and self.now * 1000 >= self.scheduled \
+                and fields[0][0] != C.TX_CANCEL_ALL:
+            self.scheduled = None
+            self._cancel_everything()
+            raise ApiError(400, 21122, "dead man's switch should be triggered")
         for typ, f in fields:                                   # refuse the request whole, as Lighter's API does
             if typ == C.TX_CREATE_ORDER:
                 px, trig = f["Price"] / 100, f["TriggerPrice"] / 100
@@ -137,7 +147,7 @@ class Venue:
         o = {"client_order_index": cid, "order_index": 2**48 + cid, "price": f"{px:.2f}", "is_ask": not buy,
              "remaining_base_amount": f"{qty:.3f}", "status": "open", "reduce_only": bool(f["ReduceOnly"]),
              "type": {0: "limit", 1: "market", 2: "stop-loss", 4: "take-profit"}[f["Type"]],
-             "trigger_price": f"{f['TriggerPrice'] / 100:.2f}"}
+             "trigger_price": f"{f['TriggerPrice'] / 100:.2f}", "expiry": f["OrderExpiry"]}
         if f["Type"] in (C.ORDER_STOP_LOSS, C.ORDER_TAKE_PROFIT):
             self.orders[cid] = {**o, "status": "pending"}
             return self._order_frame(self.orders[cid])
@@ -218,6 +228,7 @@ def test_the_whole_sequence_passes_and_ends_flat_with_no_orders(cfg, tmp_path):
     assert "1% past the trigger" in notes["stop and take-profit orders"]       # the arbitrage's 5% was refused here
     assert "no longer lists the market at all" in notes["sell to close: flat"]
     assert "scheduled 330 s ahead" in notes["dead man's switch"] and "by itself" in notes["dead man's switch"]
+    assert r["order expiry"] == lt.INFO and "cannot tell" in notes["order expiry"]      # both went in the same moment
     assert 0 < rep.equity_start - rep.equity_end < 0.05     # the spread on four minimum orders
     text = rep.text()
     assert "Ended flat with no orders." in text and "| dead man's switch | PASS |" in text
@@ -269,29 +280,44 @@ def dms_alone(cfg, tmp_path, **kw):
     return rep, v, said, {s.name: s.detail for s in rep.steps}
 
 
-def test_the_dead_mans_switch_alone_places_one_far_order_and_trades_nothing(cfg, tmp_path):
+def test_the_dead_mans_switch_alone_places_two_far_orders_and_trades_nothing(cfg, tmp_path):
     rep, v, _said, notes = dms_alone(cfg, tmp_path)
-    assert [s.name for s in rep.steps] == ["connect", "dead man's switch", "end"] and not rep.failed and rep.clean
+    assert [s.name for s in rep.steps] == ["connect", "dead man's switch", "order expiry", "end"]
+    assert not rep.failed and rep.clean
     assert C.TX_UPDATE_LEVERAGE not in v.sent and v.tid == 0 and v.pos == 0 and not v.orders and v.scheduled is None
-    assert "by itself after 33" in notes["dead man's switch"]
+    assert v.sent.count(C.TX_CREATE_ORDER) == 2 and "by itself" in notes["dead man's switch"]
     assert "dead man's switch only" in lt.plan_text(M, 5.0, 1.0, True, True)
 
 
-def test_a_scheduled_cancel_all_lighter_answers_ok_to_but_does_not_hold_fails_at_once(cfg, tmp_path):
-    rep, v, said, notes = dms_alone(cfg, tmp_path, forgets=True)
-    assert results(rep)["dead man's switch"] == lt.FAIL and "holds NO scheduled time" in notes["dead man's switch"]
+def test_a_scheduled_cancel_all_lighter_answers_ok_to_but_does_not_hold_fails_and_the_expiry_is_still_judged(cfg, tmp_path):
+    rep, v, _said, notes = dms_alone(cfg, tmp_path, forgets=True)
+    r = results(rep)
+    assert r["dead man's switch"] == lt.FAIL and "holds NO scheduled time" in notes["dead man's switch"]
     assert "did not run" in notes["dead man's switch"]          # what Lighter says it did with the transaction
-    assert not any("waiting up to" in x for x in said)          # no 11 minutes spent on a time that is not there
+    assert r["order expiry"] == lt.PASS and "a request after the scheduled time" not in r
     assert rep.clean and not v.orders
 
 
 def test_a_scheduled_cancel_all_that_fires_late_or_never_fails_and_says_which(cfg, tmp_path):
     rep, v, _said, notes = dms_alone(cfg, tmp_path, late_s=150.0)
-    assert results(rep)["dead man's switch"] == lt.FAIL and "LATE" in notes["dead man's switch"]
+    r = results(rep)
+    assert r["dead man's switch"] == lt.FAIL and "LATE" in notes["dead man's switch"] and r["order expiry"] == lt.PASS
     assert rep.clean and not v.orders
     rep2, v2, _said2, notes2 = dms_alone(cfg, tmp_path / "b", late_s=9e9)
-    assert results(rep2)["dead man's switch"] == lt.FAIL and "STILL THERE 30" in notes2["dead man's switch"]
+    r2 = results(rep2)
+    assert r2["dead man's switch"] == lt.FAIL and "STILL THERE 30" in notes2["dead man's switch"]
+    assert r2["order expiry"] == lt.PASS and "while the other order stayed" in notes2["order expiry"]
+    assert "accepted; the order is still listed" in notes2["a request after the scheduled time"]
     assert rep2.clean and not v2.orders and v2.scheduled is None      # the clean-up cancelled it and withdrew the time
+
+
+def test_an_expiry_lighter_does_not_act_on_fails_and_a_switch_the_next_request_fires_is_reported(cfg, tmp_path):
+    rep, v, _said, notes = dms_alone(cfg, tmp_path, late_s=9e9, expires=False, lazy=True)
+    r = results(rep)
+    assert r["dead man's switch"] == lt.FAIL and r["order expiry"] == lt.FAIL and "STILL THERE" in notes["order expiry"]
+    assert "refused (21122" in notes["a request after the scheduled time"]
+    assert "now gone" in notes["a request after the scheduled time"]
+    assert rep.clean and not v.orders
 
 
 def test_the_dead_mans_switch_is_not_tried_when_other_markets_have_orders(cfg, tmp_path):
