@@ -11,8 +11,8 @@ On two machines (`BOT_ROLE` in `arcus/.env`, [main README](../README.md#two-mach
 machine that trades (`all` or `trader`): it needs nothing from the recorder, since it reads both venues itself. A `recorder` or a
 `scout` machine refuses `arbitrage run` and `start`; `scan`, `plan`, `history` and `backtest` work anywhere.
 
-> **Risk warning.** Experimental software that can place real orders with real money. The live adapters have never
-> sent an order (section 6 says exactly what is unproven). Backtests are estimates. Nothing here is financial advice.
+> **Risk warning.** Experimental software that can place real orders with real money. Only its Lighter adapter has sent
+> real orders (section 6 says exactly what is unproven, and `arbitrage livetest` tests the rest). Backtests are estimates. Nothing here is financial advice.
 
 ## 1. The idea
 
@@ -68,8 +68,10 @@ arbitrage close      arbitrage close --now # close the position: as maker first,
 arbitrage pause      arbitrage resume      # open nothing new (an open position is kept) / look again
 arbitrage skip CASHCAT   arbitrage unskip CASHCAT   # markets it must never open
 
-arbitrage livetest [SYMBOL] [--expiry]     # REAL MONEY, smallest size: the Lighter leg's orders once, with a report
-                                           # (needs ARB_LIVE=1 and LIVE typed; sends nothing to Arcus)
+arbitrage livetest [SYMBOL] [--what all|lighter|arcus|engine] [--expiry] [--hold 30]
+                                           # REAL MONEY, smallest size, a report per part: the Lighter leg, the Arcus
+                                           # leg, then the executor on both venues, both ways round (needs ARB_LIVE=1
+                                           # and LIVE typed once; a part runs only if the one before passed)
 
 arbitrage settings                         # every setting, its value, its range
 arbitrage set max_hold_h 72                # change one; the running bot uses it from its next loop
@@ -139,10 +141,11 @@ What the first live run will prove or disprove, because nothing could be sent wh
 | Piece | State |
 |---|---|
 | Arcus post-only and IOC orders, cancel, cancel-all, leverage, positions, balance | the market-making bot's own client, live-proven there |
-| Arcus: reading one order by its id | from the documentation |
-| Arcus: the position stop and take profit (`positionTpsl`, signed as trigger orders) | from the documentation; the docs disagree with themselves on the leg's price field |
+| Arcus: reading one order by its id | from the documentation. `arbitrage livetest --what arcus` checks it against Arcus's own list (written 2026-10-10, **not yet run**) |
+| Arcus: the position stop and take profit (`positionTpsl`, signed as trigger orders) | from the documentation; the docs disagree with themselves on the leg's price field. The same test places the pair on a real position (**not yet run**) |
 | Lighter: everything that sends (orders, cancels, stops, leverage) | signs correctly offline; never sent by this program. The Lighter bot's own test sent the same kinds of request on the venue on 2026-10-09 and 10 (lighter/README.md, section 6), including a stop and a take-profit built as here. `arbitrage livetest` sends them through this program's own adapter, once, at the smallest size: a maker order with its 5.5-minute expiry, the cancel and re-place the engine does before that expiry, a taker order, the position as the adapter reads it, the stop pair, cancel-all, the close. Its report is in `arbitrage/reports/`. **Run on 2026-10-10 (SPY): 9 of 9 passed, cost $0.0003, ended flat**; Lighter gave the maker order 328 s to live, and the adapter's own reading of orders, fills and the position matched Lighter's at every step |
 | Lighter: the stop pair | counted as placed only when Lighter's own list shows both orders: Lighter answers OK to a batch and leaves out a member it does not like (seen on the venue) |
+| The two-leg engine on both real venues | `arbitrage livetest --what engine`: one position each way round, entry, stops on both, hold, maker and taker exits, each step checked against the venues' own reads (`arbitrage/exec/drill.py`; 5 offline tests on simulated venues; **not yet run live**) |
 | Lighter and Arcus reads (book, position, balance, key check) | run against the real accounts on 2026-10-04 |
 | The executor's logic | 38 offline tests on simulated venues, and paper runs on real prices (open, stops, close by command and by the time limit) |
 

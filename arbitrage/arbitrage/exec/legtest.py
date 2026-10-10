@@ -17,6 +17,7 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import math
 import time
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass, field
@@ -45,6 +46,7 @@ class Report:
     equity_end: float | None = None
     aborted: str = ""
     clean: bool = False
+    title: str = "the Lighter leg"
 
     @property
     def failed(self) -> list[tuple[str, str, str]]:
@@ -54,7 +56,7 @@ class Report:
         n = {r: sum(1 for s in self.steps if s[1] == r) for r in (PASS, FAIL, INFO)}
         cost = (f"Cost ${self.equity_start - self.equity_end:+.4f} (equity ${self.equity_start:.4f} to "
                 f"${self.equity_end:.4f})" if self.equity_start is not None and self.equity_end is not None else "")
-        out = [f"# Arbitrage live test, the Lighter leg: {self.symbol}, account {self.account}, "
+        out = [f"# Arbitrage live test, {self.title}: {self.symbol}, account {self.account}, "
                f"{time.strftime('%Y-%m-%d %H:%M UTC', time.gmtime(self.started))}", "",
                f"{n[PASS]} passed, {n[FAIL]} failed, {n[INFO]} notes. {cost}".rstrip(),
                ("Ended flat with no orders." if self.clean else "DID NOT END CLEAN: look at the Lighter app now."),
@@ -65,6 +67,9 @@ class Report:
 
 
 class LegTest:
+    venue_name = "Lighter"
+    lists_stops = True       # the venue's open-orders list shows the stop orders
+
     def __init__(self, venue: Any, symbol: str, say: Callable[[str], None] = print, *, max_loss: float = 1.0,
                  expiry: bool = False, sleep: Callable[[float], Awaitable[None]] = asyncio.sleep,
                  clock: Callable[[], float] = time.time) -> None:
@@ -80,7 +85,21 @@ class LegTest:
         self.size = 0.0
         self.last = ""                     # why the last maker order did not rest
 
-    # ---------------------------------------------------------------- reading Lighter itself
+    # ---------------------------------------------------------------- what differs between the venues
+    def step_size(self) -> float:
+        return float(self.v.market.step)
+
+    def order_size(self, ask: float) -> float:
+        """The smallest order the venue takes, a little over."""
+        from lighter_bot.livetest import min_qty
+
+        m = self.v.market
+        return min_qty(m.min_base, m.min_quote, m.step, ask)
+
+    def account_id(self) -> int:
+        return int(self.v.account)
+
+    # ---------------------------------------------------------------- reading the venue itself
     def note(self, name: str, result: str, detail: str) -> None:
         self.rep.steps.append((name, result, detail))
         self.say(f"  {result:<4} {name}: {detail}")
@@ -125,10 +144,8 @@ class LegTest:
 
     # ---------------------------------------------------------------- the steps
     async def step_connect(self) -> None:
-        from lighter_bot.livetest import min_qty
-
         await self.v.start(self.symbol)
-        self.rep.account = self.v.account
+        self.rep.account = self.account_id()
         eq, pos = await self.account()
         orders = await self.listed()
         self.rep.equity_start = eq
@@ -145,8 +162,7 @@ class LegTest:
             await self.sleep(1.0)
         if top is None:
             raise Abort("no order book from Lighter's feed after 15 s")
-        m = self.v.market
-        self.size = min_qty(m.min_base, m.min_quote, m.step, top.ask)
+        self.size = self.order_size(top.ask)
         told = await self.v.position(self.symbol)
         self.note("connect", PASS if told == 0 else FAIL,
                   f"equity ${eq:.2f}; {self.symbol} {top.bid:g}/{top.ask:g}; one test order is {self.size:g} "
@@ -234,7 +250,7 @@ class LegTest:
             self.note("taker order", FAIL, "no order book")
             return
         oid = str(await self.v.taker(self.symbol, BUY, self.size, top.ask * (1 + TAKER_SLIP), False))
-        step = self.v.market.step
+        step = self.step_size()
 
         async def filled() -> bool:
             return (await self.info(oid)).filled >= self.size - step / 2
@@ -267,8 +283,11 @@ class LegTest:
 
         both = await self.until(two)
         kinds = sorted(f"{o.get('type')}/{o.get('status')}" for o in await self.listed())
-        self.note("stop and take-profit", PASS if ok and both else FAIL,
-                  f"the adapter says {'placed' if ok else 'REFUSED'}; Lighter lists: {', '.join(kinds) or 'nothing'}")
+        self.note("stop and take-profit", PASS if ok and both else INFO if ok and not self.lists_stops else FAIL,
+                  f"the adapter says {'placed' if ok else 'REFUSED'}; {self.venue_name} lists: "
+                  f"{', '.join(kinds) or 'nothing'}"
+                  + ("" if both or not ok or self.lists_stops else " (its open-orders list may not show stop orders: "
+                     "only 'placed' is known)"))
         await self.v.cancel_all(self.symbol)
 
         async def none() -> bool:
@@ -348,6 +367,40 @@ class LegTest:
         return self.rep
 
 
+class ArcusLegTest(LegTest):
+    """The same steps for the Arcus leg (exec/arcus.py), read back through Arcus's own REST (the Arcus bot's adapter).
+    Arcus's minimum order is $5 and a minimum size; it charges a taker fee (2.25 bp), so the cost is a few cents."""
+
+    venue_name = "Arcus"
+    lists_stops = False
+
+    def step_size(self) -> float:
+        return float(self.v.markets[self.symbol].step_size)
+
+    def order_size(self, ask: float) -> float:
+        m = self.v.markets[self.symbol]
+        step = float(m.step_size)
+        q = max(float(m.min_size), float(m.min_notional) / ask) * 1.2
+        return math.ceil(q / step - 1e-9) * step
+
+    def account_id(self) -> int:
+        return int(self.v.account)
+
+    async def listed(self) -> list[dict[str, Any]]:
+        rows = []
+        for st in await self.v.adapter.open_orders():
+            if st.base != self.symbol:
+                continue
+            kind = "reduce-only" if st.reduce_only else str(getattr(st.tif, "value", st.tif) or "order")
+            rows.append({"client_order_index": st.client_id, "type": kind, "status": st.status.value.lower()})
+        return rows
+
+    async def account(self) -> tuple[float, float]:
+        bal = await self.v.adapter.balances()
+        pos = sum(float(p.size) for p in await self.v.adapter.positions() if p.base == self.symbol)
+        return float(bal["equity"]), pos if abs(pos) > self.step_size() / 2 else 0.0
+
+
 def plan_text(symbol: str, expiry: bool, max_loss: float) -> str:
     return "\n".join((
         f"LIVE TEST of the arbitrage's Lighter leg on {symbol}: real orders, real money, the smallest size "
@@ -360,8 +413,20 @@ def plan_text(symbol: str, expiry: bool, max_loss: float) -> str:
         "  It ends flat with no orders, and sends nothing to Arcus. Do not trade this market by hand while it runs."))
 
 
-def write_report(rep: Report, reports_dir: Path) -> Path:
+def plan_text_arcus(symbol: str, max_loss: float) -> str:
+    return "\n".join((
+        f"LIVE TEST of the arbitrage's Arcus leg on {symbol}: real orders, real money, the smallest size Arcus takes.",
+        "  It rests a post-only buy under the price, cancels and places it again as the engine does, buys one minimum",
+        "  order with an IOC order, places the position stop and take profit, cancels them, and sells (reduce-only).",
+        f"  It stops and closes everything if the account falls ${max_loss:.2f} below where it started.",
+        "  Expected cost: Arcus's taker fee (2.25 bp) twice plus the spread on one minimum order: cents.",
+        "  It ends flat with no orders, and sends nothing to Lighter. Use a subaccount with no orders or position on "
+        "this market."))
+
+
+def write_report(rep: Report, reports_dir: Path, tag: str = "") -> Path:
     reports_dir.mkdir(parents=True, exist_ok=True)
-    p = reports_dir / f"livetest-{time.strftime('%Y%m%d-%H%M%SZ', time.gmtime(rep.started))}.md"
+    name = time.strftime('%Y%m%d-%H%M%SZ', time.gmtime(rep.started))
+    p = reports_dir / f"livetest-{tag + '-' if tag else ''}{name}.md"
     p.write_text(rep.text())
     return p

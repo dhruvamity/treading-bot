@@ -324,7 +324,7 @@ starts, stops and ends.
 | `lighter up` / `down [--all]` / `status [--json]` | This scout alone; its own status screen with the lists |
 | `lighter markets` | Every Lighter perp: max leverage, tick, minimum order, 24 h volume |
 | `lighter record [--seconds N] [--markets A,B] [--no-depth]` | Record by hand (the scout does it) |
-| `lighter scout run [--record-only \| --follow]` / `scout scan [--capital 250] [--markets A,B] [--full]` | The scout daemon (with no flag the machine's `BOT_ROLE` decides what it does) / one scan now |
+| `lighter scout run [--record-only \| --follow]` / `scout scan [--capital 250] [--markets A,B] [--full] [--as-of now\|tape]` | The scout daemon (with no flag the machine's `BOT_ROLE` decides what it does) / one scan now |
 | `lighter backtest MARKET SETUP [--capital 100] [--lev 50] [--stops 2/5/25] [--days D1,D2]` | One setup, day by day, with markouts |
 | `lighter run MARKET SETUP [--lev N\|max] [--capital X] [--sl X] [--tp X] [--vol 1m] [--seconds N [--flat]] [--live] [--bg]` | Run a setup (`--seconds`: stop after that long, position kept; with `--flat`, closed first) |
 | `lighter pilot approve N [--list most\|cheapest\|max] [--live]` | Run a list's pick |

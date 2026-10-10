@@ -628,7 +628,17 @@ def cmd_scout(a: argparse.Namespace) -> None:
         cap, src = choose(spec, eq, z)
         n = scan_workers(a.workers if a.workers != "auto" else over.get("scan_workers"),
                          bool(Control(app).running_modes()))
-        res = scan(root / "data" / "scout", workers=n, markets=a.markets or None, ladder=a.ladder,
+        as_of = None
+        if a.as_of == "tape":
+            import datetime as dt
+
+            from arcus.scout.scan import tape_end_us
+
+            as_of = tape_end_us(root / "data" / "scout")
+            if as_of is None:
+                sys.exit("scan: no tape under data/scout/tape (arcus import first)")
+            print(f"scanning as of the end of the tape: {dt.datetime.fromtimestamp(as_of / 1e6, dt.UTC):%Y-%m-%d %H:%M} UTC")
+        res = scan(root / "data" / "scout", now_us=as_of, workers=n, markets=a.markets or None, ladder=a.ladder,
                    capital=cap, pct=z.pct(), capital_source=src, shortlist=not a.full,
                    volume_cost=settings.volume_cost(over))
         save_scan(root, res)
@@ -655,6 +665,28 @@ def cmd_scout(a: argparse.Namespace) -> None:
                             markets=tuple(a.markets) if a.markets else pbk.MARKETS)
         t = book.build(workers=n, budget_s=0)
         print(pbk.table_text(t))
+
+
+def cmd_recommend(a: argparse.Namespace) -> None:
+    """What to run, as Telegram lines to paste (arcus/recommend.py). --scan scans both bots first, as of the tape's end."""
+    import subprocess
+
+    from arcus import recommend
+    from arcus.common import settings
+
+    app = load_app()
+    root = Path.cwd()
+    if a.scan:
+        here = Path(sys.executable).parent
+        for exe in ("arcus", "lighter"):
+            cmd = [str(here / exe), "scout", "scan", "--as-of", "tape", *(["--capital", a.capital] if a.capital else [])]
+            print("$ " + " ".join(Path(c).name if i == 0 else c for i, c in enumerate(cmd)), flush=True)
+            r = subprocess.run(cmd, cwd=root, stdout=subprocess.DEVNULL)
+            if r.returncode:
+                print(f"{exe}: the scan failed ({r.returncode}); the lists below are from the one before", file=sys.stderr)
+    lists = ["volume", "cheapest", "max"] if a.list == "all" else [a.list]
+    budget = settings.volume_cost(settings.load(app.state_dir))
+    print(recommend.report(root, a.markets, lists, a.n, budget))
 
 
 def cmd_pilot(a: argparse.Namespace) -> None:
@@ -976,6 +1008,9 @@ def build_parser() -> argparse.ArgumentParser:
                     help="processes a scan may use: auto (all cores but one; one while a bot runs here) or a number")
     sp.add_argument("--full", action="store_true",
                     help="scan: re-run the last 24 h for every setting, not only those passing on their full days")
+    sp.add_argument("--as-of", choices=["now", "tape"], default="now",
+                    help="scan: judge the markets as of now (default) or as of the end of the tape, for a tape recorded "
+                         "elsewhere and brought here with `arcus import`")
     sp.add_argument("--markets", nargs="*")
     sp.add_argument("--limit", type=int, default=25)
     sp.add_argument("--ladder", action="store_true",
@@ -992,6 +1027,14 @@ def build_parser() -> argparse.ArgumentParser:
     sp.add_argument("--capital",
                     help="the capital to backtest at: auto (the subaccount's equity; paper capital if unfunded) or "
                          "a dollar amount (default: config/app.yaml sizing.capital_usd)")
+    sp = add("recommend", cmd_recommend, "what to run, as Telegram lines to paste: the best setups of each list, per market")
+    sp.add_argument("markets", nargs="*", help="only these markets (SPY QQQ); none = the top of each list")
+    sp.add_argument("--list", choices=["all", "volume", "cheapest", "max"], default="all")
+    sp.add_argument("-n", type=int, default=3, help="how many per list (default 3)")
+    sp.add_argument("--scan", action="store_true",
+                    help="scan both bots first, as of the end of the tape (the tape brought home with `arcus import`)")
+    sp.add_argument("--capital", help="with --scan: the capital to rank for (default: the settings' capital, "
+                                      "$100 without a funded account)")
     sp = add("pilot", cmd_pilot, "one deployment at a time: status, approve N [--live], close")
     sp.add_argument("action", choices=["status", "approve", "close"])
     sp.add_argument("n", nargs="?", type=int, default=1, help="approve: which of the top 3")

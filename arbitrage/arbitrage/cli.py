@@ -12,6 +12,7 @@
     arbitrage start [--arcus 120 --lighter 120] | start --live | stop  the same executor in the background
     arbitrage status [--live] | close [--now] | pause | resume         the running bot (add --live for the live one)
     arbitrage skip CASHCAT | unskip CASHCAT                            markets it must not open
+    arbitrage livetest [SYMBOL] [--what all|lighter|arcus|engine]      REAL MONEY, smallest size: legs, then engine
 
 In the one Telegram bot the same commands are `/arb_<command>`.
 """
@@ -257,11 +258,13 @@ def cmd_run(a: argparse.Namespace, cfg: Config) -> int:
 
 
 def cmd_livetest(a: argparse.Namespace, cfg: Config) -> int:
-    """The Lighter leg of the executor, once, on the real venue at the smallest size (arbitrage/exec/legtest.py).
-    Real money: ARB_LIVE=1 and LIVE typed here. It sends nothing to Arcus."""
+    """The live tests, once, on the real venues at the smallest size: the Lighter leg, the Arcus leg, then the
+    executor itself on both (arbitrage/exec/legtest.py, drill.py). Real money: ARB_LIVE=1 and LIVE typed here once.
+    A later part runs only if the earlier ones passed and ended flat."""
     from arbitrage import ops
     from arbitrage.config import STATE, no_trading, read_env
-    from arbitrage.exec import legtest
+    from arbitrage.exec import drill, legtest
+    from arbitrage.exec.arcus import ArcusTrade
     from arbitrage.exec.lighter import LighterTrade
 
     if no_trading():
@@ -275,17 +278,49 @@ def cmd_livetest(a: argparse.Namespace, cfg: Config) -> int:
         print("LIVE is off: put ARB_LIVE=1 in arcus/.env first (README.md, section 6). Nothing was sent.")
         return 1
     symbol = a.symbol.upper()
-    print(legtest.plan_text(symbol, a.expiry, a.max_loss))
+    parts = ("lighter", "arcus", "engine") if a.what == "all" else (a.what,)
+    texts = {"lighter": legtest.plan_text(symbol, a.expiry, a.max_loss),
+             "arcus": legtest.plan_text_arcus(symbol, a.max_loss), "engine": drill.plan_text(symbol, a.max_loss)}
+    for part in parts:
+        print(texts[part] + "\n")
     if not sys.stdin.isatty():
         print("not started: the live test needs you at the keyboard to type LIVE")
         return 1
-    if input("\nType LIVE to start: ").strip() != "LIVE":
+    if input("Type LIVE to start: ").strip() != "LIVE":
         print("not started")
         return 1
-    rep = asyncio.run(legtest.LegTest(LighterTrade(STATE), symbol, max_loss=a.max_loss, expiry=a.expiry).run())
-    p = legtest.write_report(rep, ROOT / "reports")
-    print("\n" + rep.text() + f"\nWritten to {p}")
-    return 0 if rep.clean and not rep.failed else 1
+    bad = 0
+    for part in parts:
+        print(f"\n=== {part} ===")
+        if part == "lighter":
+            rep = asyncio.run(legtest.LegTest(LighterTrade(STATE), symbol, max_loss=a.max_loss,
+                                              expiry=a.expiry).run())
+        elif part == "arcus":
+            rep = asyncio.run(legtest.ArcusLegTest(ArcusTrade(ROOT.parent / "arcus"), symbol,
+                                                   max_loss=a.max_loss).run())
+            rep.title = "the Arcus leg"
+        else:
+            rep = asyncio.run(_run_drill(symbol, a.max_loss, a.hold, STATE))
+        p = legtest.write_report(rep, ROOT / "reports", part)
+        print("\n" + rep.text() + f"\nWritten to {p}")
+        if not (rep.clean and not rep.failed and not rep.aborted):
+            bad = 1
+            if part != parts[-1]:
+                print(f"\nStopped after {part}: fix what it shows before the next part sends anything.")
+            break
+    return bad
+
+
+async def _run_drill(symbol: str, max_loss: float, hold: float, state: Path) -> object:
+    from arbitrage.exec import drill, legtest
+    from arbitrage.exec.arcus import ArcusTrade
+    from arbitrage.exec.lighter import LighterTrade
+
+    arcus, lighter = ArcusTrade(ROOT.parent / "arcus"), LighterTrade(state)
+    # the reads that check the engine come from the same two adapters, through the leg tests' readers
+    grounds = {"arcus": legtest.ArcusLegTest(arcus, symbol), "lighter": legtest.LegTest(lighter, symbol)}
+    return await drill.Drill({"arcus": arcus, "lighter": lighter}, grounds, symbol, max_loss=max_loss,
+                             hold_s=hold).run()
 
 
 def cmd_service(a: argparse.Namespace, cfg: Config) -> int:
@@ -485,9 +520,12 @@ def main(argv: list[str] | None = None) -> None:
     money(p)
     p = sub.add_parser("stop", help="stop the background executor (its position and stops stay)")
     p.add_argument("--live", action="store_true")
-    p = sub.add_parser("livetest", help="REAL MONEY, minimum size: the Lighter leg's orders, once, with a report "
-                                        "(needs ARB_LIVE=1 and LIVE typed)")
+    p = sub.add_parser("livetest", help="REAL MONEY, minimum size: the Lighter leg, the Arcus leg, then the "
+                                        "executor on both venues, with reports (needs ARB_LIVE=1, LIVE typed)")
     p.add_argument("symbol", nargs="?", default="SPY")
+    p.add_argument("--what", choices=["all", "lighter", "arcus", "engine"], default="all",
+                   help="all (default): the three parts in turn, each only if the one before passed")
+    p.add_argument("--hold", type=float, default=30.0, help="engine part: seconds each position is held (default 30)")
     p.add_argument("--expiry", action="store_true",
                    help="also wait about 6 minutes to see Lighter expire a maker order")
     p.add_argument("--max-loss", type=float, default=1.0, help="stop and close everything this many dollars down")

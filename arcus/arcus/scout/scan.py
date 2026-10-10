@@ -709,6 +709,18 @@ def best_at_max(cands: list[Candidate]) -> list[Candidate]:
     return sorted(best.values(), key=_order)
 
 
+def tape_end_us(root: Path) -> int | None:
+    """When the newest book row on the tape was written (BTC's, the busiest book): what to scan "as of" for a tape that
+    was recorded somewhere else and brought here (`arcus scout scan --as-of tape`). None when there is no tape."""
+    store = TapeStore(root / "tape")
+    days = store.days(ALIVE_MARKET)
+    if not days:
+        return None
+    start = day_start_us(days[-1])
+    ts = store.load_range(ALIVE_MARKET, start, start + US_DAY).bbo["ts"]
+    return int(ts.max()) if len(ts) else None
+
+
 def scan(root: Path, *, now_us: int | None = None, markets: list[str] | None = None, workers: int = 6,
          capital: float = 100.0, pct: Pct | None = None, capital_source: str = "fixed", risk: Risk | None = None,
          ladder: bool = False, shortlist: bool = True, always: set[tuple[str, str]] | None = None,

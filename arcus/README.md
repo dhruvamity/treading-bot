@@ -359,7 +359,8 @@ message mentions is written `/l_…`, so tapping it stays on Lighter: `/closeall
 | `arcus diagnose [--hours N \| --since … --until …] [--market M] [--replay]` | Why a run filled what it filled: orders, acks, rejects, how long quotes rested, what blocked quoting. `--replay` backtests the same minutes beside the run. Read-only |
 | **Scout** | |
 | `arcus scout run [--workers auto\|N] [--every-min M] [--depth] [--ladder] [--capital auto\|USD] [--record-only \| --follow]` | The recorder + scanner daemon (`arcus up` runs it). `--record-only`: the tape and no scans; `--follow`: neither, the lists come from another machine. With no flag the machine's `BOT_ROLE` decides |
-| `arcus scout scan [--markets …] [--full]` / `limits` / `playbook [--capital USD]` | One scan now, printed; the least and most capital each market can use; the autopilot's table |
+| `arcus scout scan [--markets …] [--full] [--as-of now\|tape]` / `limits` / `playbook [--capital USD]` | One scan now, printed (`--as-of tape`: as of the end of a tape brought home with `arcus import`); the least and most capital each market can use; the autopilot's table |
+| `arcus recommend [MARKET …] [--list all\|volume\|cheapest\|max] [-n 3] [--scan [--capital USD]]` | The best setups of each list for Arcus and Lighter, as the `/run` and `/l_run` lines to paste; `--scan` scans both first, as of the tape's end. Reads only |
 | **Data** | |
 | `arcus export …` / `import [FILE]` | One file with everything new since the last export / take such a file in (main README, section 4) |
 | `arcus sync [status\|key\|allow KEY\|pull\|push USER@TRADER]` | Two machines: a trader takes the lists from the machine that makes them (main README, section 3) |

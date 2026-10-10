@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import argparse
 import asyncio
+import datetime as dt
 import json
 import sys
 import time
@@ -135,9 +136,16 @@ def cmd_scout(a: argparse.Namespace) -> None:
         return
     cap = float(a.capital) if a.capital not in (None, "auto") else asyncio.run(service.account_capital(cfg))
     eff = settings.effective(cfg)
-    from lighter_bot.scout.scan import Scanner
+    from lighter_bot.scout.scan import Scanner, tape_end_us
+    as_of = None
+    if a.as_of == "tape":
+        as_of = tape_end_us(cfg.data_dir)
+        if as_of is None:
+            sys.exit("scan: no tape under lighter/data/tape (arcus import first)")
+        print(f"scanning as of the end of the tape: {dt.datetime.fromtimestamp(as_of / 1e6, dt.UTC):%Y-%m-%d %H:%M} UTC")
     Scanner(cfg).scan(cap, markets=a.markets.split(",") if a.markets else None, stops=settings.stops(cfg),
-                      volume_cost=float(eff["volume_cost"]), lev_cap=settings.lev_cap(cfg), full24=a.full)
+                      volume_cost=float(eff["volume_cost"]), lev_cap=settings.lev_cap(cfg), full24=a.full,
+                      now_us=as_of)
     print((cfg.data_dir / "scout" / "report.txt").read_text())
 
 
@@ -489,6 +497,9 @@ def main(argv: list[str] | None = None) -> None:
     p.add_argument("--capital")
     p.add_argument("--markets")
     p.add_argument("--full", action="store_true", help="re-run the last 24 h for every setup")
+    p.add_argument("--as-of", choices=("now", "tape"), default="now",
+                   help="scan: judge the markets as of now (default) or as of the end of the tape (a tape brought "
+                        "here with `arcus import`)")
     p.add_argument("--no-record", action="store_true")
     g = p.add_mutually_exclusive_group()
     g.add_argument("--record-only", action="store_true", help="run: the tape and nothing else (a recorder machine)")
