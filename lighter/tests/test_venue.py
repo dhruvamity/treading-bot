@@ -38,6 +38,20 @@ def test_the_leverage_an_account_has_on_a_market():
     assert m.account_leverage({"positions": [{"market_id": 26, "initial_margin_fraction": "0"}]}) == 2.0
 
 
+def test_the_leverage_command_is_wired_and_refuses_an_unknown_market(cfg, monkeypatch):
+    from lighter_bot import cli
+    from lighter_bot.trade import runner
+
+    async def no_markets(_cfg):
+        return {}
+
+    monkeypatch.setattr(cli, "_cfg", lambda: cfg)
+    monkeypatch.setattr(runner, "fetch_markets", no_markets)
+    with pytest.raises(SystemExit) as e:
+        cli.main(["leverage", "NOSUCH", "2"])
+    assert "not a Lighter perp" in str(e.value)
+
+
 def test_book_nonce_continuity():
     b = Book(1)
     b.snapshot({"bids": [{"price": "100", "size": "1"}], "asks": [{"price": "101", "size": "2"}], "nonce": 10})

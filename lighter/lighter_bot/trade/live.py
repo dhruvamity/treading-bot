@@ -262,7 +262,8 @@ class LiveExchange(Exchange):
         try:
             r = await self.rest.send(txs, kind=RESERVE, wait=False)
         except ApiError as e:
-            self.vstop = cur     # refused whole: what rested still rests
+            self.vstop = cur     # refused whole: what rested still rests (a reconcile says if it does not)
+            self._last_reconcile = 0.0
             self.errors.append((time.time(), f"{e.code}: {e.message}"))
             log.warn("stop_refused", code=e.code, msg=e.message)
             return

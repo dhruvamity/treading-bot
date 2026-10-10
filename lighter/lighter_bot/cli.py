@@ -395,7 +395,10 @@ def cmd_leverage(a: argparse.Namespace) -> None:
         finally:
             await rest.close()
 
-    account, acc = asyncio.run(read())
+    try:
+        account, acc = asyncio.run(read())
+    except RuntimeError as e:       # no key or no account in .env
+        sys.exit(f"refused: {e}")
     now = m.account_leverage(acc)
     print(f"{m.symbol}: {now:g}x on account {account} (Lighter's default for it is {m.default_leverage:g}x)")
     if want is None or abs(want - now) < 1e-9:
@@ -531,7 +534,7 @@ def main(argv: list[str] | None = None) -> None:
     p = sub.add_parser("leverage", help="the account's leverage on a market; with a number, set it: lighter leverage SPY 2")
     p.add_argument("market")
     p.add_argument("leverage", nargs="?")
-    p.set_defaults(func=cmd_leverage)
+    p.set_defaults(fn=cmd_leverage)
     p = sub.add_parser("doctor", help="everything a live run needs (read-only)")
     p.add_argument("market", nargs="?")
     p.add_argument("--lev")

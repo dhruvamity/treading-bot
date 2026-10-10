@@ -204,13 +204,17 @@ class LiveTest:
                         "this test may lose")
 
     # ---------------------------------------------------------------- sending
-    async def send(self, changes: list[Change]) -> bool:
-        """The bot's own send, once the minute's request budget has room (the bot skips a requote that does not fit;
-        a test step must not read that as a refusal)."""
+    async def room(self) -> None:
+        """Wait until the minute's request budget has room: the bot skips a request that does not fit, and a test
+        step must not read that as a refusal."""
         for _ in range(90):
             if self.ex.budget.allows(RESERVE):
                 break
             await self.sleep(1.0)
+
+    async def send(self, changes: list[Change]) -> bool:
+        """The bot's own send, once the request budget has room."""
+        await self.room()
         return bool(await self.ex.send(changes, RESERVE))
 
     async def rest_order(self, side: int, qty: float, price: float, tag: str, *, reduce_only: bool = False
@@ -480,10 +484,13 @@ class LiveTest:
         name = "the bot's stop on Lighter"
         loss = abs(pos) * (self.ex.acct.entry or sum(self.bbo()) / 2) * TRIGGER_AWAY      # a trigger 3% away
         self.ex._last_vstop = 0.0
+        n_err = len(self.ex.errors)
+        await self.room()
         await self.ex.protect(time.time(), loss)
         s = self.ex.vstop
         if s is None:
-            self.note(name, FAIL, f"not placed: {self.last_error()}")
+            self.note(name, FAIL, "not placed: " + (self.last_error() if len(self.ex.errors) > n_err else
+                                                    "the bot sent nothing (no entry price, or the price is past it)"))
             return
         row: dict[str, Any] = {}
 
@@ -508,10 +515,13 @@ class LiveTest:
             return
         by_itself = not self.listed(await self.venue_orders(), s.cid)
         self.ex._last_vstop = 0.0
+        await self.room()
         await self.ex.protect(time.time(), 1.0)
         gone = await self.until_venue(lambda os_: not self.listed(os_, s.cid), 10.0)
-        self.note("the stop goes when the position is closed", PASS if gone and self.ex.vstop is None else FAIL,
-                  ("Lighter had already removed it by itself" if by_itself else "the bot cancelled it")
+        self.note("the stop goes when the position is closed", PASS if gone else FAIL,
+                  (("Lighter had already removed it by itself" if by_itself else "the bot cancelled it")
+                   + "; the bot's own record of it is " + ("cleared" if self.ex.vstop is None
+                                                         else "still there until its next reconcile"))
                   if gone else "IT IS STILL LISTED")
 
     async def step_close(self, pos: float, name: str) -> None:
