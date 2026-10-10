@@ -33,7 +33,7 @@ from typing import Any
 
 from lighter_bot.trade.engine import plan
 from lighter_bot.trade.exchange import Change, Fill
-from lighter_bot.trade.live import QUOTE_EXPIRY_MS
+from lighter_bot.trade.live import QUOTE_EXPIRY_MS, STREAM_FRESH_S
 from lighter_bot.trade.strategy import BUY, SELL, Quote
 from lighter_bot.venue import consts as C
 from lighter_bot.venue.rest import RESERVE, ApiError
@@ -117,6 +117,7 @@ class LiveTest:
         self.dms_only = dms_only           # the dead man's switch step alone: one far order, no trade
         self.only = tuple(only)            # these steps alone (names in STEPS); empty: all of them
         self.lev_changed = False           # the test set a leverage: the one it found is put back at the end
+        self.stop_cid = 0                  # the bot's stop on Lighter this test had placed
         self.lev_low = min(lev_low, self.m.max_leverage)
         self.sleep = sleep
         self.clock = clock
@@ -272,7 +273,9 @@ class LiveTest:
         pos = 0.0
         for _ in range(tries):
             _eq, pos, _row = await self.venue_account()
-            if not pos:
+            if not pos and abs(self.ex.acct.pos) > self.m.step / 2:
+                pos = self.ex.acct.pos      # Lighter's account read can trail its own stream after a fill: believe
+            if not pos:                     # the stream then (a reduce-only order for nothing does nothing)
                 return 0.0
             self.ex.taker_in_flight_until = 0.0
             await self.ex.taker(-pos)
@@ -435,7 +438,12 @@ class LiveTest:
         if cid is not None and not filled:
             await self.send([Change("cancel", cid=cid)])
             await self.sleep(2.0)
-        _eq, pos, _row = await self.venue_account()
+        pos = 0.0
+        for _ in range(10 if abs(self.ex.acct.pos) > self.m.step / 2 else 1):     # the read can trail the stream
+            _eq, pos, _row = await self.venue_account()
+            if pos:
+                break
+            await self.sleep(1.0)
         if pos:
             f = self.fills[-1] if len(self.fills) > n else None
             self.note(f"{name} as maker", PASS, f"a post-only order at the touch filled: position {pos:+g}"
@@ -445,7 +453,12 @@ class LiveTest:
         self.note(f"{name} as maker", INFO, f"not filled in {self.wait_fill_s:.0f} s at the touch (normal): cancelled")
         err = await self.taker_open(side, q)
         got = await self.until(lambda: abs(self.ex.acct.pos) > self.m.step / 2, 10.0)
-        _eq, pos, _row = await self.venue_account()
+        pos = 0.0
+        for _ in range(10):     # Lighter's account read can trail its own stream: on 2026-10-10 it still said flat a
+            _eq, pos, _row = await self.venue_account()     # second after a fill, and the test called that "no fill"
+            if pos:
+                break
+            await self.sleep(1.0)
         f = self.fills[-1] if len(self.fills) > n else None
         ok = bool(pos) and (pos > 0) == (side == BUY)
         self.note(f"{name} with a taker order", PASS if ok and got and f else FAIL,
@@ -503,6 +516,7 @@ class LiveTest:
             row.update(next((o for o in os_ if int(o.get("client_order_index") or 0) == s.cid), {}))
             return bool(row)
 
+        self.stop_cid = s.cid
         listed = await self.until_venue(there, 10.0)
         acked = await self.until(lambda: self.ex.vstop is not None and self.ex.vstop.state == "open", 10.0)
         foreign = [o.cid for o in self.ex.live_orders() if o.tag == "foreign"]
@@ -515,15 +529,20 @@ class LiveTest:
 
     async def step_venue_stop_gone(self) -> None:
         """Flat again: the stop must go (Lighter may drop a reduce-only order itself; else the bot cancels it)."""
-        s = self.ex.vstop
-        if s is None:
+        cid, name = self.stop_cid, "the stop goes when the position is closed"
+        if not cid:
             return
-        by_itself = not self.listed(await self.venue_orders(), s.cid)
+        by_itself = not self.listed(await self.venue_orders(), cid)
+        if by_itself and self.ex.vstop is None:
+            self.note(name, PASS, "Lighter removed it by itself when the position closed"
+                                  + (f" (it ended as {self.ex.vstop_ended})" if self.ex.vstop_ended else "")
+                                  + ", and its stream told the bot")
+            return
         self.ex._last_vstop = 0.0
         await self.room()
         await self.ex.protect(time.time(), 1.0)
-        gone = await self.until_venue(lambda os_: not self.listed(os_, s.cid), 10.0)
-        self.note("the stop goes when the position is closed", PASS if gone else FAIL,
+        gone = await self.until_venue(lambda os_: not self.listed(os_, cid), 10.0)
+        self.note(name, PASS if gone else FAIL,
                   (("Lighter had already removed it by itself" if by_itself else "the bot cancelled it")
                    + "; the bot's own record of it is " + ("cleared" if self.ex.vstop is None
                                                          else "still there until its next reconcile"))
@@ -545,6 +564,9 @@ class LiveTest:
         _eq, vpos, row = await self.venue_account()
         streamed = abs(self.ex.acct.pos) < self.m.step / 2          # what the account stream told the bot
         await self.ex.reconcile()
+        if abs(self.ex.acct.pos) >= self.m.step / 2:    # a position the stream gave seconds ago outranks the read
+            await self.sleep(STREAM_FRESH_S + 1.0)      # for a moment (the read can trail a fill): look again
+            await self.ex.reconcile()
         agree = abs(self.ex.acct.pos) < self.m.step / 2             # ... and what a REST reconcile leaves it with
         self.note(f"{name}: flat", PASS if not left and agree else FAIL,
                   f"Lighter says position {vpos:+g}; " + ("it still lists the market with 0" if row else
@@ -687,7 +709,8 @@ class LiveTest:
         with contextlib.suppress(Exception):
             await self.sleep(2.0)
             orders = await self.venue_orders()
-            self.rep.equity_end = (await self.venue_account())[0]
+            self.rep.equity_end, again, _row = await self.venue_account()     # a second look, seconds later
+            left = left or again
         self.rep.clean = not left and not orders
         self.note("end", PASS if self.rep.clean else FAIL,
                   f"flat, no orders, the scheduled cancel-all withdrawn{lev}" if self.rep.clean else

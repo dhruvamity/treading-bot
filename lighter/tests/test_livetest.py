@@ -28,13 +28,15 @@ class Venue:
 
     def __init__(self, ex, *, far_limit=0.015, flat_row=False, stream_flat=True, fill_touch=False, cross_fills=False,
                  min_cancel_ms=300_000, equity=6.0, slip_max=0.06, bleed=0.0, forgets=False, late_s=0.0, elsewhere=0,
-                 expires=True, lazy=False):
+                 expires=True, lazy=False, drops_stop=False, slow_account=0):
         self.ex, self.bid, self.ask = ex, 100.00, 100.02
         self.far_limit, self.flat_row, self.stream_flat = far_limit, flat_row, stream_flat
         self.fill_touch, self.cross_fills, self.min_cancel_ms, self.slip_max = fill_touch, cross_fills, min_cancel_ms, slip_max
         self.equity, self.bleed = equity, bleed
         self.forgets, self.late_s, self.elsewhere = forgets, late_s, elsewhere   # the scheduled cancel-all going wrong
         self.expires, self.lazy = expires, lazy      # does an order's expiry remove it; does the next request fire it
+        self.drops_stop = drops_stop                 # a reduce-only stop goes by itself once the position is closed
+        self.slow_account, self.stale = slow_account, 0     # account reads that still say flat after a fill
         self.orders: dict[int, dict] = {}
         self.pos = 0.0
         self.now = time.time()
@@ -48,6 +50,7 @@ class Venue:
     # ---- time
     async def sleep(self, s: float) -> None:
         self.now += s
+        self.ex._pos_stream_at -= s          # time passes for the exchange too: the stream's word gets older
         if self.scheduled is not None and self.now * 1000 >= self.scheduled + self.late_s * 1000:
             self.scheduled = None
             self._cancel_everything()
@@ -71,6 +74,10 @@ class Venue:
     def _trade(self, cid: int, buy: bool, qty: float, px: float, maker: bool) -> None:
         self.tid += 1
         self.pos += qty if buy else -qty
+        self.stale = self.slow_account if abs(self.pos) > 1e-9 else 0
+        if self.drops_stop and abs(self.pos) < 1e-9:
+            for c in [c for c, o in self.orders.items() if o["status"] == "pending" and o["reduce_only"]]:
+                self._order_frame({**self.orders.pop(c), "status": "canceled-reduce-only"})
         self.equity -= (self.ask - self.bid) / 2 * qty + self.bleed
         t = {"trade_id": self.tid, "price": str(px), "size": str(qty), "timestamp": int(time.time() * 1000),
              "is_maker_ask": (not buy) if maker else buy, "bid_account_id": ACCT if buy else 9,
@@ -85,6 +92,10 @@ class Venue:
     # ---- REST
     async def account(self, index: int):
         rows = []
+        self.stale -= 1
+        if self.stale >= 0:                                    # Lighter's read trailing its own stream
+            return {"accounts": [{"total_asset_value": str(self.equity), "available_balance": str(self.equity),
+                                  "positions": [], "cancel_all_time": 0, "total_order_count": len(self.orders)}]}
         if abs(self.pos) > 1e-9 or self.flat_row:
             rows.append({"market_id": M.market_id, "position": str(abs(round(self.pos, 6))),
                          "sign": 1 if self.pos >= 0 else -1, "avg_entry_price": "100.01"})
@@ -334,6 +345,29 @@ def test_an_expiry_lighter_does_not_act_on_fails_and_a_switch_the_next_request_f
     assert "refused (21122" in notes["a request after the scheduled time"]
     assert "now gone" in notes["a request after the scheduled time"]
     assert rep.clean and not v.orders
+
+
+def test_a_stop_lighter_drops_by_itself_and_an_account_read_that_trails_a_fill(cfg, tmp_path):
+    """Both seen on the venue on 2026-10-10: the stop was gone as soon as the position closed, and the account read
+    still said flat a second after the short was filled (the test then called a filled order "no fill")."""
+    t, v, _said = make(cfg, tmp_path, drops_stop=True, slow_account=2)
+    t.only = ("long", "short")
+    rep = asyncio.run(t.run())
+    notes = {s.name: s.detail for s in rep.steps}
+    assert not rep.failed, [(s.name, s.detail) for s in rep.failed]
+    assert "by itself when the position closed (it ended as canceled-reduce-only)" in notes[
+        "the stop goes when the position is closed"]
+    assert "position -0.11" in notes["sell short with a taker order"] and rep.clean and v.pos == 0
+    # a position the account read does not show yet must still be closed, not left behind as "flat"
+    t2, v2, _ = make(cfg, tmp_path / "b", slow_account=3)
+    v2.pos, t2.armed = 0.0, True
+    t2.rep.equity_start = 6.0
+
+    async def leftover() -> float:
+        v2._trade(77, True, 0.11, 100.02, maker=False)       # a fill the stream reports and the read does not yet
+        return await t2.flatten()
+
+    assert asyncio.run(leftover()) == 0.0 and v2.pos == 0
 
 
 def test_only_the_named_steps_run_and_the_leverage_is_left_alone(cfg, tmp_path):

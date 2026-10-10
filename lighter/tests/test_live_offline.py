@@ -265,3 +265,30 @@ def test_a_stop_that_fired_or_was_refused_or_went_with_a_cancel_all(ex):
     asyncio.run(ex.protect(122.0, 8.0))
     assert len(rec.sent) == 4 and ex.vstop is not None         # (the cancel-all itself was the third request)
 
+
+
+
+def test_an_account_read_that_trails_the_stream_does_not_undo_a_fresh_position(ex):
+    """Seen on the venue, 2026-10-10: a second after a fill the stream had reported, the account read still said
+    flat. A reconcile then would have made the bot flat in its books while it held a position."""
+    import asyncio
+
+    class Rest:
+        def __init__(self):
+            self.rows = []
+
+        async def account(self, index):
+            return {"accounts": [{"positions": self.rows, "total_asset_value": "100"}]}
+
+        async def active_orders(self, account, market=None):
+            return {"orders": []}
+
+    ex.rest = Rest()
+    ex.on_msg({"channel": f"account_all:{ACCT}", "type": "update/account_all",
+               "positions": {"1": {"position": "0.05", "sign": -1, "avg_entry_price": "84000"}}})
+    asyncio.run(ex.reconcile())                               # the read says nothing is held: it is behind
+    assert ex.acct.pos == -0.05 and ex.acct.equity == 100.0   # the position stays, the rest of the read is taken
+    assert time.time() - ex._last_reconcile > 280             # and another look comes in seconds, not in 5 minutes
+    ex._pos_stream_at -= 6                                    # the stream's word is no longer fresh
+    asyncio.run(ex.reconcile())
+    assert ex.acct.pos == 0.0                                 # now Lighter's read is the truth

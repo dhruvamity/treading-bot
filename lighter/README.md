@@ -235,8 +235,12 @@ wild in the last hour, its data fresh.
   as `INFO`. An order's own expiry does: the bot's quotes used to carry 28 days; they now carry 5.5 minutes and are replaced
   before that runs out, and the last run saw Lighter remove an order placed that way 31 s after its expiry. Those runs left
   SPY at 50x on the account (Lighter's default is 2x): `lighter leverage SPY 2` puts it back, and the test now does that itself.
-  Not yet seen on the venue: the replacement before an expiry and the bot's own stop (the `quote renewal` and `the bot's stop
-  on Lighter` lines of the next run).
+  **Run of 2026-10-10 (no cost, ended flat, leverage back at 2x):** the replacement before an expiry worked as the engine
+  decides it (one request: old order off the book, new one on it), the bot's own stop rested on Lighter beside the open
+  position, the reduce-only exit order was accepted and filled next to it, and Lighter dropped the stop by itself once the
+  position was closed. One line said `FAIL` wrongly: the short was filled, but Lighter's account read still said flat a
+  second later. The test now waits for that read, and the bot no longer lets an account read replace a position the stream
+  gave it in the last 5 seconds.
 - **Before the first quote,** the run cancels your orders on that market, sets the leverage (cross margin) and schedules the cancel-all.
   It treats every order on that market as its own: trade by hand on another market, or use a sub-account (`LIGHTER_ACCOUNT_INDEX`).
 - **Control** (CLI, or Telegram): `lighter pause` / `unpause` (no new orders; closing orders keep working), `close` (close the position, maker

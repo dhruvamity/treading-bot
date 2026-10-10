@@ -49,6 +49,8 @@ STOP_SLIP = 0.05             # its worst price past the trigger (what the live t
 STOP_MAX_AWAY = 0.10         # never further than this from the entry, however small the position
 RECONCILE_EVERY_S = 300.0
 UNACKED_S = 10.0
+STREAM_FRESH_S = 5.0         # a position the stream gave this recently is not replaced by the account read: on
+                             # 2026-10-10 that read still said flat a second after a fill the stream had reported
 
 
 async def resolve_account(rest: Rest, cfg: Config) -> int:
@@ -86,6 +88,8 @@ class LiveExchange(Exchange):
         self._last_reconcile = 0.0
         self.vstop: Order | None = None           # the stop-loss order resting on Lighter (px is its trigger)
         self.stop_cids: set[int] = set()         # every stop this run placed: their frames are not quotes
+        self.vstop_ended = ""                    # how Lighter ended the last one (its status), for the logs
+        self._pos_stream_at = 0.0                # when the stream last gave the position
         self._last_vstop = 0.0
         self.taker_in_flight_until = 0.0
         self.errors: list[tuple[float, str]] = []
@@ -332,6 +336,7 @@ class LiveExchange(Exchange):
             pos = (msg.get("positions") or {}).get(str(self.market.market_id))
             if pos is not None:
                 self._on_position(pos)
+                self._pos_stream_at = time.time()
             if not typ.startswith("subscribed"):     # the snapshot repeats old trades
                 for t in (msg.get("trades") or {}).get(str(self.market.market_id)) or []:
                     self._on_trade(t)
@@ -353,7 +358,7 @@ class LiveExchange(Exchange):
                 if status in C.OPEN_STATUSES:
                     s.state, s.oid = "open", int(od.get("order_index") or s.oid)
                 else:
-                    self.vstop, self._last_vstop = None, 0.0
+                    self.vstop, self._last_vstop, self.vstop_ended = None, 0.0, status
                     if status == "filled":
                         log.warn("stop_fired", side=s.side, qty=s.qty, trigger=s.px)
             return
@@ -412,6 +417,10 @@ class LiveExchange(Exchange):
             acc = (r.get("accounts") or [{}])[0]
             rows = acc.get("positions")
             mine = [p for p in rows or [] if int(p.get("market_id", -1)) == self.market.market_id]
+            if time.time() - self._pos_stream_at < STREAM_FRESH_S:
+                # the stream is newer than this read can be trusted to be: keep its position, and look again soon
+                mine, rows = [], None
+                self._last_reconcile = time.time() - RECONCILE_EVERY_S + 2 * STREAM_FRESH_S
             for p in mine:
                 self._on_position(p)
             if isinstance(rows, list) and not mine:
