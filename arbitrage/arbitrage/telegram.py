@@ -7,10 +7,12 @@ line and returns what it printed.
     /arb_status  /arb_scan  /arb_plan SPY  /arb_settings  /arb_feeds
     /arb_set max_hold_h 72   /arb_hold 72   /arb_minhold 24   /arb_sl 2   /arb_sl auto
     /arb_close  /arb_closenow  /arb_pause  /arb_resume  /arb_skip CASHCAT  /arb_unskip CASHCAT
+    /arb_lev max max SPY (leverage, margin a venue, market: SPY at the highest leverage with all the money;
+        ProFunding decides which venue is short)   /arb_lev max max (no market: ProFunding's best stock, index or
+        commodity)   /arb_lev 30 100 SPY (at most 30x and $100 of margin a venue)   /arb_lev 10 (the leverage alone)
     /arb_only SPY (that market and no other; /arb_only all = any)
     /arb_cycle 3 (close and reopen every 3 funding payments = 3 hours; /arb_cycle off)
     /arb_side profunding (ProFunding decides which venue is short; /arb_side venues = their own rates)
-    /arb_lev 10 (a lower leverage than the venues' highest; /arb_lev max = the highest again)
     /arb_start 120 120 (paper, with that much pretend money on Arcus and on Lighter)   /arb_start live   /arb_stop
 """
 
@@ -22,9 +24,9 @@ import io
 
 # /arb_hold 72 -> set max_hold_h 72, and the other short forms
 SHORT = {"hold": ["set", "max_hold_h"], "minhold": ["set", "min_hold_h"], "sl": ["set", "stop_pct"],
-         "lev": ["set", "max_leverage"], "closenow": ["close", "--now"]}
+         "closenow": ["close", "--now"]}
 READ = ("status", "scan", "plan", "settings", "feeds")                   # change nothing
-WRITE = ("set", "close", "pause", "resume", "skip", "unskip", "only", "cycle", "side")   # change the bot
+WRITE = ("set", "close", "pause", "resume", "skip", "unskip", "only", "cycle", "side", "lev")   # change the bot
 MODE_AWARE = ("status", "close", "pause", "resume")                      # act on the paper or on the live bot
 HELP = (__doc__ or "").split("\n\n")[2]
 

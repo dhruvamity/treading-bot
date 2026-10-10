@@ -60,6 +60,8 @@ class Settings:
     min_volume_24h: float = 100_000.0
     max_leverage: float = 50.0      # the owner's own ceiling: 50 = whatever the venues allow (it was 20)
     max_notional_usd: float = 0.0   # never more than this many dollars a leg (0 = no limit): for a first small run
+    max_margin_usd: float = 0.0     # never more than this many dollars of each venue's money as margin (0 = no
+                                    # limit: margin_use of the smaller balance). The position is this x leverage
     profunding_side: bool = False   # True: which venue is short is ProFunding's answer for the pair and nothing else;
                                     # a market it does not list, or a day it cannot be read, is not opened
     rwa_only: bool = True           # stocks, indices and commodities only: a market Arcus calls CRYPTO is never opened
@@ -214,6 +216,8 @@ def plan(arcus: Leg, lighter: Leg, hist_arcus: list[float], hist_lighter: list[f
     sign = 1.0 if short is arcus else -1.0            # the three differences below are in the plan's direction
     lev, stop, liq = max_leverage(arcus, lighter, sigma_day, s)
     usable = min(collateral.get("arcus", 0.0), collateral.get("lighter", 0.0)) * s.margin_use
+    if s.max_margin_usd > 0:
+        usable = min(usable, s.max_margin_usd)
     px = (arcus.mark + lighter.mark) / 2
     step = max(arcus.step, lighter.step)
     budget = usable * lev if s.max_notional_usd <= 0 else min(usable * lev, s.max_notional_usd)

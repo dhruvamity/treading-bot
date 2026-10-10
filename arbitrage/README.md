@@ -230,7 +230,7 @@ Nights and weekends are quieter (the stop, 0.83% away at the 33x allowed then, w
   with 3-hour cycles, 147 of them while the stock market was open. In 5 of them the price also reached the
   liquidation price within the hour, where the stop may not have filled first.
 - **30x is most of the volume at under half the cost**: the stop is 1.0% away instead of 0.33%, so there were 8
-  stops in 102 days instead of 155. `/arb_lev 30` sets it.
+  stops in 102 days instead of 155. `/arb_lev 30 max SPY` sets it.
 - Closing on a clock is a way to **buy volume**: $34 per million dollars traded on SPY at 30x and below, $47 to $55
   at the highest leverage, and $45 to $58 on QQQ, half of it on each venue. It does not earn.
 - QQQ at its highest (25x, 16.7x): 7.4 stops and 3.1 transfers a week, −$3.51 a day every 3 hours.
@@ -308,11 +308,11 @@ day (4a above) and a transfer by hand almost every working day (4.3 a week).
 
 | At $240, SPY, every 3 h | Volume a day | Cost a day | Closed at or near the stop, a week | Transfers a week |
 |---|---|---|---|---|
-| the highest leverage (the default) | $141,000 | $4.90 | 15.2 (0.6 of them with taker orders) | 4.3 |
+| `/arb_lev max max SPY` (the highest leverage) | $141,000 | $4.90 | 15.2 (0.6 of them with taker orders) | 4.3 |
 | the same with `stop_early 0` | $156,000 | $7.30 | 10.7, all with taker orders | 4.6 |
-| `/arb_lev 30` | $90,000 | $3.10 | 1.2 | 2.7 |
-| `/arb_lev 10` | $33,000 | $1.10 | 0.1 | 0.1 |
-| `/arb_lev 10` with $1,000 | $136,000 | $4.70 | 0.1 | 0.1 |
+| `/arb_lev 30 max SPY` | $90,000 | $3.10 | 1.2 | 2.7 |
+| `/arb_lev 10 max SPY` | $33,000 | $1.10 | 0.1 | 0.1 |
+| `/arb_lev 10 max SPY` with $1,000 | $136,000 | $4.70 | 0.1 | 0.1 |
 
 The cost follows the volume: $34 to $35 per million dollars traded at any leverage, so $1 a day is about $29,000 of
 volume. What the highest leverage adds is the closes near the stop and the transfers. More money at less leverage
@@ -351,6 +351,7 @@ arbitrage status                           # what it is doing, the last events
 arbitrage close      arbitrage close --now # close the position: as maker first, or with taker orders at once
 arbitrage pause      arbitrage resume      # open nothing new (an open position is kept) / look again
 arbitrage skip CASHCAT   arbitrage unskip CASHCAT   # markets it must never open
+arbitrage lev max max SPY                  # leverage, margin a venue, market, in one line (section 3a)
 arbitrage only SPY QQQ   arbitrage only all         # the markets it may open and no others / any market again
 arbitrage cycle 3        arbitrage cycle off        # close and reopen every 3 funding payments (hours) / stop that
 arbitrage side profunding   arbitrage side venues   # who decides which venue is short
@@ -367,24 +368,46 @@ arbitrage set max_hold_h 72                # change one; the running bot uses it
 ### 3a. SPY at the highest leverage, renewed every three funding payments
 
 ```
-arbitrage only SPY            # that market and no other
+arbitrage lev max max SPY     # leverage, margin a venue, market: SPY, the highest leverage, all the money
 arbitrage cycle 3             # close and reopen every 3 funding payments (3 hours)
-arbitrage side profunding     # ProFunding decides which venue is short
 arbitrage plan SPY --arcus 120 --lighter 120   # what it would open now: side, leverage, size, stop
 arbitrage start --arcus 120 --lighter 120      # PAPER first; `arbitrage status` shows it working
 ```
 
-In Telegram the same five are `/arb_only SPY`, `/arb_cycle 3`, `/arb_side profunding`, `/arb_plan SPY`,
-`/arb_start 120 120`. Live is `/arb_start live` (section 6), after `arbitrage livetest` has passed on the Arcus leg
-and on the executor: neither has run with real money yet.
+In Telegram: `/arb_lev max max SPY`, `/arb_cycle 3`, `/arb_plan SPY`, `/arb_start 120 120`. Live is
+`/arb_start live` (section 6), after `arbitrage livetest` has passed on the Arcus leg and on the executor: neither
+has run with real money yet.
+
+**`lev LEVERAGE MARGIN [MARKET]`** is the whole choice in one line, and the reply says back what is now set:
+
+| Command | What it sets |
+|---|---|
+| `/arb_lev max max SPY` | SPY only. The highest leverage both venues allow at that hour. All the money (90% of the smaller balance). ProFunding decides which venue is short |
+| `/arb_lev max max` | No market named: **ProFunding's best stock, index or commodity** for the Arcus / LighterRH pair (its highest net % a year that passes the volume floor), and its side. Looked up again at every opening |
+| `/arb_lev 30 100 SPY` | SPY, at most 30x, at most $100 of each venue's money as margin (a $3,000 leg) |
+| `/arb_lev 30 max QQQ` | QQQ, at most 30x (QQQ's own highest is 25x, so 25x), all the money |
+| `/arb_lev 10` | The leverage alone; market, margin and side stay as they are |
+| `/arb_lev` | What is set now |
+
+- The first word is the leverage (`max` or a number), the second the margin a venue in dollars (`max` = no limit),
+  and a market name can stand anywhere. With a margin or a market in the line, ProFunding is made the judge of the
+  side (`/arb_side venues` gives that back to the venues' own rates).
+- It does not start the bot and does not set the clock: `/arb_cycle 3` and `/arb_start` stay their own commands, so
+  that changing the leverage on a running bot cannot start or stop anything. A running bot uses the new line from
+  its next position.
+- **With no market named and the clock on, it opens ProFunding's best market at that market's highest leverage
+  whatever it pays.** Only SPY and QQQ were replayed that way. On a single stock the highest leverage is lower
+  (AAPL, NVDA 13x; META 6.7x while the stock market is closed) and so is the volume.
 
 What it then does by itself:
 - **Leverage.** Nothing sets it: the highest both venues allow at that hour, the same number on both. SPY is 50x
   while the stock market is open (Mon–Fri 04:00–20:00 New York) and 33x while it is closed, because Arcus allows
   less then; Lighter is set to the same 33x. A position open at the close is kept as it is until its renewal, at
   most 3 hours later. `/arb_lev 30` (or any number) asks for less, `/arb_lev max` for the highest again.
-- **Side.** ProFunding's `LighterRH` against `Arcus` row, read again at every renewal. If ProFunding cannot be read
-  or does not list SPY, nothing is opened and `/arb_status` says why.
+- **Size.** The smaller of the two balances × 90% × that leverage, the same number of units on both legs. A margin
+  in the line (`/arb_lev max 100 SPY`) caps what each venue puts up.
+- **Side.** ProFunding's `LighterRH` against `Arcus` row, read again at every renewal (at most every 30 minutes).
+  If ProFunding cannot be read or does not list the market, nothing is opened and `/arb_status` says why.
 - **Stop and take profit.** 0.33% from the entry at 50x and 0.83% at 33x, on both legs. From 80% of the way there
   the bot closes with limit orders (no fee); if the price gets to the stop first, the rest goes with taker orders
   at once. Both venues also hold a stop and a take profit of their own at the full distance, as market orders, for
@@ -394,7 +417,7 @@ What it then does by itself:
   the money has arrived.
 
 What it costs is in section 2a: about $4.90 a day at $240 for about $141,000 of volume, or $3.10 for $90,000 with
-`/arb_lev 30`. To go back to the usual way: `/arb_cycle off`, `/arb_side venues`, `/arb_only all`, and the three
+`/arb_lev 30 max SPY`. To go back to the usual way: `/arb_cycle off`, `/arb_side venues`, `/arb_only all`, and the three
 settings named in section 2 under "How much leverage".
 
 The same from the phone, in the one Telegram bot: `/arb_scan`, `/arb_status`, `/arb_hold 72`, `/arb_close`,
@@ -416,7 +439,8 @@ the market-making bots trade what you tell them.
 
 **How big.** Dynamic, from the accounts as they are at that moment:
 - the smaller of the two venues' free collateral × `margin_use` (0.9) × leverage, the same number of units on both
-  legs; `max_notional_usd` caps it (for a first small run);
+  legs; `max_margin_usd` caps the margin a venue puts up (the second word of `arbitrage lev`), `max_notional_usd`
+  the position itself (for a first small run);
 - leverage is the highest both venues allow at that hour: Arcus asks 1.5 times the margin while the stock market is
   closed (SPY: 50x open, 33x closed), and the same number is set on Lighter every time a position is opened, so the
   two never differ. A position opened while the market was open is kept through the close as it is (Arcus allows
@@ -466,7 +490,9 @@ to $55 per million dollars traded on SPY). `arbitrage cycle off` ends it; `arbit
 `/arb_side profunding`) takes ProFunding's answer for the pair instead, its `LighterRH` against `Arcus` row, and
 nothing else: a market it does not list, or an hour it cannot be read, is not opened. It is asked at most every 30
 minutes and needs `PROFUNDING_API_KEY`. Over the last 30 days its rates and the venues' own pointed to the same side
-of SPY in 94% of hours. `arbitrage side venues` goes back.
+of SPY in 94% of hours. `arbitrage side venues` goes back. **With ProFunding as the judge and no market named, it
+also decides which market:** the candidates are its Arcus / LighterRH pairs in its own order (net % a year), crypto
+left out, and the first that passes the rules is opened.
 
 **The money on the two venues.** The legs are the same size, so the position is neutral: what one leg gains the other
 loses, and the gain lands on one venue while the loss lands on the other. When a position is closed and one venue holds
@@ -555,7 +581,8 @@ the venues) arrive in the same chat.
 | `/arb_only SPY`, `/arb_only all` | The markets it may open and no others; any market again |
 | `/arb_cycle 3`, `/arb_cycle off` | Close and reopen every 3 funding payments (hours); stop doing so |
 | `/arb_side profunding`, `/arb_side venues` | ProFunding decides which venue is short; the venues' own rates do |
-| `/arb_lev 10`, `/arb_lev max` | A lower leverage than the venues' highest; the highest again |
+| `/arb_lev max max SPY` | Leverage, margin a venue, market, in one line; ProFunding decides the side. `/arb_lev max max` = ProFunding's best market; `/arb_lev 30 100 SPY` = at most 30x and $100 a venue |
+| `/arb_lev 10`, `/arb_lev max`, `/arb_lev` | The leverage alone: lower than the venues' highest; the highest again; what is set now |
 | `/arb_set name value` | Any setting of `/arb_settings` |
 | `/arb_pause`, `/arb_resume`, `/arb_skip CASHCAT`, `/arb_unskip CASHCAT` | Open nothing new (an open position is kept); markets it must never open |
 | `/arb_close`, `/arb_closenow` | Close both legs: as maker first, or with taker orders at once |

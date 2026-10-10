@@ -77,6 +77,8 @@ ADJUSTABLE: dict[str, tuple[float, float, str]] = {
     "max_leverage": (1, 50, "never use more leverage than this; 50 = the highest the venues allow at that hour"),
     "profunding_side": (0, 1, "1 = which venue is short is ProFunding's answer (its LighterRH / Arcus row) and "
                               "nothing else; 0 = the venues' own rates decide"),
+    "max_margin_usd": (0, 1e7, "never more than this many dollars of each venue's money as margin; 0 = no limit "
+                               "(margin_use of the smaller balance)"),
     "max_notional_usd": (0, 1e7, "never more than this many dollars a leg; 0 = no limit (use a small number for the "
                                  "first live run)"),
     "rwa_only": (0, 1, "1 = stocks, indices and commodities only (never a market Arcus calls crypto); 0 = every "

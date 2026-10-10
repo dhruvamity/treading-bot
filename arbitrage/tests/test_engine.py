@@ -593,6 +593,24 @@ def test_cycling_opens_whatever_the_funding_pays_and_closes_on_the_clock() -> No
     assert exit_reason(2.9, -1e-5, -1e-5, s) == ""         # not the funding: the clock
     assert "cycle" in exit_reason(3.0, 1e-5, 1e-5, s)
     assert plan(replace(a, category="CRYPTO"), b, thin, [4e-6] * 168, 0.0167, money, s).go is False   # still no crypto
+    # `lev max 50 SPY`: at most $50 of each venue's money as margin, whatever the balances are
+    capped = plan(a, b, thin, [4e-6] * 168, 0.0167, money, Settings(cycle_h=3, max_margin_usd=50.0))
+    assert capped.go and capped.leverage == cyc.leverage
+    assert capped.notional == pytest.approx(cyc.notional * 50.0 / (120.0 * 0.9), rel=0.02)
+    assert capped.notional < 51 * cyc.leverage
+
+
+def test_with_no_market_named_profundings_best_stock_is_looked_at_first() -> None:
+    from arbitrage.scan import candidates
+    a, b = legs()
+    la = {"SPY": a, "NVDA": replace(a, next_rate_h=9e-5), "BTC": replace(a, category="CRYPTO")}
+    ll = {"SPY": b, "NVDA": b, "BTC": b, "ONLYHERE": b}
+    pf = {"SPY": 6.0, "NVDA": 2.0, "BTC": 40.0}            # ProFunding's net % a year for the pair
+    assert candidates(la, ll, pf, Settings(profunding_side=True), 5) == ["SPY", "NVDA"]      # no crypto, its order
+    assert candidates(la, ll, pf, Settings(profunding_side=True, rwa_only=False), 5)[0] == "BTC"
+    assert candidates(la, ll, pf, Settings(profunding_side=True), 1) == ["SPY"]
+    assert candidates(la, ll, pf, Settings(), 5)[0] == "NVDA"                   # the venues' own widest difference
+    assert candidates(la, ll, {}, Settings(profunding_side=True), 5)[0] == "NVDA"   # ProFunding unreadable: as before
 
 
 async def test_only_the_listed_markets_are_looked_at(tmp_path: Any, monkeypatch: pytest.MonkeyPatch) -> None:

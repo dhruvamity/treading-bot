@@ -14,7 +14,7 @@ from pathlib import Path
 
 from arbitrage import feeds
 from arbitrage.config import STATE, Config
-from arbitrage.rank import Leg, Plan, plan
+from arbitrage.rank import CRYPTO_CLASSES, Leg, Plan, Settings, plan
 from arbitrage.venues import Arcus, Lighter, sigma_day
 
 HIST_H = 168
@@ -84,6 +84,17 @@ async def sigma_for(symbol: str, arcus: Arcus, root: Path, now: float) -> float:
     return s
 
 
+def candidates(la: dict[str, Leg], ll: dict[str, Leg], pf: dict[str, float], s: Settings, top: int) -> list[str]:
+    """The markets worth a closer look, best first. With `profunding_side` and ProFunding's list at hand that is
+    ProFunding's order (its net % a year for the Arcus / LighterRH pair), crypto left out when the bot does not trade
+    it; otherwise the widest difference between the two venues' next payments."""
+    common = sorted(set(la) & set(ll))
+    if s.profunding_side and pf:
+        ok = [x for x in common if x in pf and not (s.rwa_only and la[x].category.upper() in CRYPTO_CLASSES)]
+        return sorted(ok, key=lambda x: -pf[x])[:top]
+    return sorted(common, key=lambda x: -abs(la[x].next_rate_h - ll[x].next_rate_h))[:top]
+
+
 SIDE_AGE_S = 1800.0      # ProFunding's side is asked for again at most this often (its free key: 100 requests a day)
 
 
@@ -101,20 +112,22 @@ async def run(cfg: Config, *, symbols: list[str] | None = None, top: int = 10,
             if cfg.lighter_account is not None:
                 collateral["lighter"] = (await lighter.equity(cfg.lighter_account))[1]
         common = sorted(set(la) & set(ll))
-        want = [s.upper() for s in symbols] if symbols else sorted(
-            common, key=lambda s: -abs(la[s].next_rate_h - ll[s].next_rate_h))[:top]
         out = Scan(ts=now, collateral=collateral, common=len(common))
         # `profunding_side`: which venue is short is ProFunding's answer for the pair (its LighterRH / Arcus row)
         sides: dict[str, str] | None = None
+        pf: dict[str, float] = {}
         no_side = ""
         if cfg.settings.profunding_side:
             try:
                 rows = await feeds.profunding(cfg.profunding_key, root / "profunding.json", max_age_s=SIDE_AGE_S)
                 sides = {k: str(v["short"]) for k, v in rows.items()}
+                pf = {k: float(v.get("net_apr") or 0.0) for k, v in rows.items()}
                 if not rows and not cfg.profunding_key:
                     no_side = "PROFUNDING_API_KEY is not set, and profunding_side asks ProFunding for the side"
             except Exception as e:   # noqa: BLE001  whatever went wrong there, the side is not known
                 no_side = f"ProFunding could not be read ({str(e)[:80]}), and profunding_side asks it for the side"
+        # no market named: with `profunding_side` the best one is ProFunding's best, not the venues' own widest
+        want = [s.upper() for s in symbols] if symbols else candidates(la, ll, pf, cfg.settings, top)
         for sym in want:
             if sym not in la or sym not in ll:
                 continue
@@ -136,7 +149,7 @@ async def run(cfg: Config, *, symbols: list[str] | None = None, top: int = 10,
                                             "profunding_side asks it for the side")
             out.plans.append(p)
             out.legs[sym] = (la[sym], ll[sym])
-        out.plans.sort(key=lambda p: (not p.go, -p.income_day, -p.edge_h))
+        out.plans.sort(key=lambda p: (not p.go, -pf.get(p.symbol, -1e9) if pf else 0.0, -p.income_day, -p.edge_h))
         out.calls = {"arcus": arcus.http.calls, "lighter": lighter.http.calls}
         return out
     finally:

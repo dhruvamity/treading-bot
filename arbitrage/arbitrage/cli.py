@@ -251,6 +251,63 @@ def cmd_short(a: argparse.Namespace, cfg: Config) -> int:
     return cmd_settings(a, cfg)
 
 
+def _only(want: set[str] | None = None) -> set[str]:
+    """The markets it may open and no others (settings.json, "only"); written first when `want` is given."""
+    from arbitrage.exec.run import listed
+
+    if want is not None:
+        p = ROOT / "settings.json"
+        try:
+            d = json.loads(p.read_text())
+        except (OSError, ValueError):
+            d = {}
+        d["only"] = sorted(want)
+        p.write_text(json.dumps(d, indent=1) + "\n")
+    return listed("only", ROOT)
+
+
+def cmd_lev(a: argparse.Namespace, cfg: Config) -> int:
+    """`lev LEVERAGE [MARGIN] [MARKET]`: how the next positions are opened, in one line.
+        lev max max SPY     SPY, the venues' highest leverage, all the money; ProFunding says which venue is short
+        lev max max         no market named: ProFunding's best stock, index or commodity, and its side
+        lev 30 100 SPY      at most 30x and $100 of each venue's money as margin
+        lev 10              the leverage alone; the market, the margin and the side stay as they are"""
+    top = ("max", "highest", "all")
+    nums = [x for x in a.args if x.lower() in top or x.replace(".", "", 1).isdigit()]
+    syms = [x.upper() for x in a.args if x not in nums]
+    if len(nums) > 2 or (a.args and not nums):
+        print("lev LEVERAGE [MARGIN] [MARKET]: `lev max max SPY`, `lev 30 100 SPY`, `lev max max` (ProFunding's best "
+              "market), `lev 10` (the leverage alone)")
+        return 1
+    try:
+        if nums:
+            set_value("max_leverage", "max" if nums[0].lower() in top else nums[0])
+        if len(nums) == 2:
+            set_value("max_margin_usd", "0" if nums[1].lower() in top else nums[1])
+        if len(nums) == 2 or syms:               # the whole line: the market and who decides the side go with it
+            set_value("profunding_side", "1")
+            _only(set(syms))
+    except ValueError as e:
+        print(e)
+        return 1
+    s, only = load().settings, _only()
+    best = ("the best stock, index or commodity on ProFunding's list" if s.profunding_side
+            else "the best that passes the rules, by the venues' own rates")
+    print("\n".join([
+        "leverage: " + ("the highest both venues allow at that hour" if s.max_leverage >= ADJUSTABLE["max_leverage"][1]
+                        else f"at most {s.max_leverage:g}x") + ", the same on both venues",
+        "margin: " + (f"at most ${s.max_margin_usd:,.0f} of each venue's money" if s.max_margin_usd > 0
+                      else f"{s.margin_use * 100:.0f}% of the smaller of the two balances (no limit set)"),
+        "market: " + (", ".join(sorted(only)) if only else best),
+        "short venue: " + ("ProFunding decides" if s.profunding_side else "the venues' own funding rates decide"),
+        "renewed: " + (f"closed and reopened every {s.cycle_h:g} funding payments (hours)" if s.cycle_h
+                       else "not on a clock (`arbitrage cycle 3` closes and reopens every 3 funding payments)"),
+        "A running bot uses this from its next position." if a.args
+        else "`arbitrage lev max max SPY` sets leverage, margin and market in one line (no market = ProFunding's "
+             "best)"]))
+    return 0
+
+
 def _mode(a: argparse.Namespace) -> str:
     return "live" if getattr(a, "live", False) else "paper"
 
@@ -422,7 +479,7 @@ def cmd_service(a: argparse.Namespace, cfg: Config) -> int:
 
 def cmd_control(a: argparse.Namespace, cfg: Config) -> int:
     from arbitrage import ops
-    from arbitrage.exec.run import FileStore, allowed, skipped
+    from arbitrage.exec.run import FileStore, skipped
 
     mode = _mode(a)
     store = FileStore(STATE, mode, echo=None)
@@ -430,15 +487,7 @@ def cmd_control(a: argparse.Namespace, cfg: Config) -> int:
         want = {x.upper() for x in a.symbols}
         if want & {"ALL", "ANY", "NONE", "OFF"}:
             want = set()
-        p = ROOT / "settings.json"
-        try:
-            d = json.loads(p.read_text())
-        except (OSError, ValueError):
-            d = {}
-        if a.symbols:
-            d["only"] = sorted(want)
-            p.write_text(json.dumps(d, indent=1) + "\n")
-        cur = allowed()
+        cur = _only(want if a.symbols else None)
         print("opens only: " + ", ".join(sorted(cur)) if cur else
               "opens any market that passes the rules (`arbitrage only SPY QQQ` narrows it)")
         return 0
@@ -607,6 +656,9 @@ def main(argv: list[str] | None = None) -> None:
     for name in ("skip", "unskip"):
         p = sub.add_parser(name, help="a market the bot must not open" if name == "skip" else "allow it again")
         p.add_argument("symbol")
+    p = sub.add_parser("lev", help="leverage, margin a venue and market in one line: arbitrage lev max max SPY "
+                                    "(no market = ProFunding's best)")
+    p.add_argument("args", nargs="*")
     p = sub.add_parser("only", help="the markets it may open and no others: arbitrage only SPY QQQ (all = any)")
     p.add_argument("symbols", nargs="*")
     p = sub.add_parser("history", help="download both venues' funding and price history for the backtest")
@@ -680,7 +732,7 @@ def main(argv: list[str] | None = None) -> None:
         sys.exit(0)
     plain = {"settings": cmd_settings, "set": cmd_settings, "backtest": cmd_backtest, "run": cmd_run,
              "study": cmd_study, "cyclecost": cmd_cycle, "basis": cmd_basis, "fills": cmd_fills,
-             "cycle": cmd_short, "side": cmd_short,
+             "cycle": cmd_short, "side": cmd_short, "lev": cmd_lev,
              "status": cmd_control, "close": cmd_control, "pause": cmd_control, "resume": cmd_control,
              "skip": cmd_control, "unskip": cmd_control, "only": cmd_control, "start": cmd_service, "stop": cmd_service,
              "livetest": cmd_livetest}

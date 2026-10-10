@@ -566,13 +566,14 @@ It holds one position: short where funding pays more, long on the other venue, t
 and none of the recorders. It trades stocks, indices and commodities only, never crypto (`arbitrage set rwa_only 0` lifts that).
 Both venues pay funding every hour and a position needs about two days to pay for its fills, so it is held for days, until the
 difference is gone (`arbitrage study` shows the numbers; arbitrage README, section 2).
-Since 10 Oct 2026 it uses the highest leverage both venues allow at that hour unless you set less (`arbitrage set max_leverage 10`,
+Since 10 Oct 2026 it uses the highest leverage both venues allow at that hour unless you set less (`arbitrage lev 10`,
 Telegram `/arb_lev 10`): SPY is 50x while the stock market is open and 33x while it is closed, the same number on both venues.
 For anything but SPY and QQQ set `stop_sigmas 3` first (arbitrage README, section 2).
 
-**The owner's mode: SPY, highest leverage, renewed every three funding payments, side from ProFunding.** `only SPY`, `cycle 3`,
-`side profunding` below (Telegram `/arb_only SPY`, `/arb_cycle 3`, `/arb_side profunding`). It buys volume and open interest and
-costs money: at $240 about $141,000 of volume a day for about $4.90 a day, or $90,000 for $3.10 with `/arb_lev 30` (arbitrage
+**The owner's mode: SPY, highest leverage, renewed every three funding payments, side from ProFunding.** `lev max max SPY` and
+`cycle 3` below (Telegram `/arb_lev max max SPY`, `/arb_cycle 3`). The line is leverage, margin a venue, market; with no market
+(`/arb_lev max max`) ProFunding's best stock, index or commodity is opened instead. It buys volume and open interest and
+costs money: at $240 about $141,000 of volume a day for about $4.90 a day, or $90,000 for $3.10 with `/arb_lev 30 max SPY` (arbitrage
 README, sections 2a and 3a). Near its stop (from 80% of the way, `stop_early`) it closes with limit orders, which pay no fee; at
 the stop itself it uses taker orders.
 ```bash
@@ -585,6 +586,7 @@ the stop itself it uses taker orders.
 .venv/bin/arbitrage fills SPY QQQ                 # what its orders cost on recorded order books
 .venv/bin/arbitrage cyclecost SPY QQQ                 # the highest leverage, closed and reopened on a clock: what that costs
 .venv/bin/arbitrage basis SPY QQQ                 # Arcus's price against Lighter's, by the minute and over each weekend
+.venv/bin/arbitrage lev max max SPY              # leverage, margin a venue, market in one line; no market = ProFunding's best
 .venv/bin/arbitrage only SPY QQQ                  # the markets it may open and no others (`only all` lifts it)
 .venv/bin/arbitrage cycle 3                       # close and reopen every 3 funding payments (hours); `cycle off`
 .venv/bin/arbitrage side profunding               # ProFunding decides which venue is short (`side venues` = their own rates)

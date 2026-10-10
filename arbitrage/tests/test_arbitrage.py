@@ -215,7 +215,7 @@ async def test_telegram_messages_become_the_same_commands(tmp_path: Path, monkey
     assert "must be between" in await telegram.run_command(["set", "max_hold_h", "-5"])
     # the short ones of 10 Oct 2026
     assert t("/cycle 3", False) == ["cycle", "3"] and t("/side profunding", True) == ["side", "profunding"]
-    assert t("/lev max", False) == ["set", "max_leverage", "max"] and t("/only SPY", False) == ["only", "SPY"]
+    assert t("/lev max max SPY", False) == ["lev", "max", "max", "SPY"] and t("/only SPY", False) == ["only", "SPY"]
     assert telegram.changes_something(["cycle", "3"]) and telegram.changes_something(["side", "venues"])
     assert "cycle_h = 3" in await telegram.run_command(["cycle", "3"])
     assert "every 3 funding payments" in await telegram.run_command(["cycle"])
@@ -228,6 +228,24 @@ async def test_telegram_messages_become_the_same_commands(tmp_path: Path, monkey
     assert "max_leverage = 10" in await telegram.run_command(["set", "max_leverage", "10"])
     assert "max_leverage = 50" in await telegram.run_command(["set", "max_leverage", "max"])
     assert "unknown setting" in await telegram.run_command(["set", "nonsense", "1"])
+    # one line for the whole mode: leverage, margin a venue, market (11 Oct 2026)
+    assert telegram.changes_something(["lev", "max", "max", "SPY"])
+    said = await telegram.run_command(["lev", "30", "100", "spy"])
+    s = config.load({}).settings
+    assert (s.max_leverage, s.max_margin_usd, s.profunding_side) == (30.0, 100.0, True)
+    assert json.loads((tmp_path / "settings.json").read_text())["only"] == ["SPY"]
+    assert "at most 30x" in said and "at most $100 of each venue" in said and "market: SPY" in said
+    assert "ProFunding decides" in said
+    said = await telegram.run_command(["lev", "max", "max"])               # no market: ProFunding's best
+    s = config.load({}).settings
+    assert (s.max_leverage, s.max_margin_usd) == (50.0, 0.0)
+    assert json.loads((tmp_path / "settings.json").read_text())["only"] == []
+    assert "the highest both venues allow" in said and "no limit set" in said and "on ProFunding's list" in said
+    await telegram.run_command(["only", "QQQ"])
+    said = await telegram.run_command(["lev", "10"])                       # the leverage alone: the rest stays
+    assert config.load({}).settings.max_leverage == 10.0 and "market: QQQ" in said
+    assert "lev LEVERAGE [MARGIN] [MARKET]" in await telegram.run_command(["lev", "1", "2", "3"])
+    assert "market: QQQ" in await telegram.run_command(["lev"])
     assert config.set_value("stop_pct", "auto", tmp_path / "settings.json") == 0.0
 
 
