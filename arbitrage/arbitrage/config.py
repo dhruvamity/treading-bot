@@ -71,10 +71,14 @@ ADJUSTABLE: dict[str, tuple[float, float, str]] = {
     "exit_edge_apr": (-50, 500, "close (after min_hold_h) once the last 24 h and the next payment pay less than this "
                                 "% a year"),
     "stop_pct": (0, 50, "stop and take profit, % from the entry on both legs; 0 = dynamic (half the way to "
-                        "liquidation, at least 3 daily moves)"),
+                        "liquidation)"),
     "min_edge_apr": (0, 1000, "open only when the difference pays at least this % a year on the position"),
     "max_breakeven_h": (1, 720, "open only when this many hours of funding pay for getting in and out"),
-    "max_leverage": (1, 50, "never use more leverage than this, whatever the venues allow"),
+    "max_leverage": (1, 50, "never use more leverage than this; 50 = the highest the venues allow at that hour"),
+    "profunding_side": (0, 1, "1 = which venue is short is ProFunding's answer (its LighterRH / Arcus row) and "
+                              "nothing else; 0 = the venues' own rates decide"),
+    "max_margin_usd": (0, 1e7, "never more than this many dollars of each venue's money as margin; 0 = no limit "
+                               "(margin_use of the smaller balance)"),
     "max_notional_usd": (0, 1e7, "never more than this many dollars a leg; 0 = no limit (use a small number for the "
                                  "first live run)"),
     "rwa_only": (0, 1, "1 = stocks, indices and commodities only (never a market Arcus calls crypto); 0 = every "
@@ -83,16 +87,29 @@ ADJUSTABLE: dict[str, tuple[float, float, str]] = {
                                    "under 40%)"),
     "drift_close_share": (0, 0.5, "open, with one venue down to this share of the money: close after the next funding "
                                   "payment so it can be moved; 0 = off (the stop closes it instead)"),
+    "uneven_wait": (0, 1, "1 = flat with the money uneven (rebalance_share), open nothing until it has been moved; "
+                          "0 = go on, sized by the smaller balance"),
+    "uneven_remind_min": (1, 1440, "while waiting for that transfer, say how much to move again this often (minutes)"),
+    "cycle_h": (0, 720, "close every this many hours and open again on the side the funding points to, whatever it "
+                        "pays: volume, at the cost of the fills (`arbitrage cyclecost`); 0 = off"),
+    "hold_off_hours": (0, 1, "0 = sized by the margin of the hour it is opened in (more leverage while the stock "
+                             "market is open); 1 = always by Arcus's off-hours margin"),
+    "hedge_taker": (0, 1, "1 = Lighter's leg rests no order and follows Arcus's fills with (free) taker orders at "
+                          "once; 0 = both legs rest maker orders"),
     "margin_use": (0.1, 0.95, "share of the smaller venue's free collateral a position may use"),
     "min_volume_24h": (0, 1e9, "skip markets that traded less than this many dollars in 24 h on either venue"),
     "fill_cost_bp": (0, 50, "what one fill is assumed to cost, in bp"),
     "stop_frac": (0.1, 0.8, "dynamic stop: share of the distance to liquidation"),
-    "stop_sigmas": (1, 10, "dynamic stop: at least this many daily moves from the entry"),
+    "stop_early": (0, 0.95, "share of the way to the stop at which it starts closing with limit orders; the stop "
+                            "itself is always taker orders; 0 = off"),
+    "stop_sigmas": (0, 10, "dynamic stop: at least this many daily moves from the entry, which lowers the leverage "
+                           "on a market that moves a lot; 0 = off (the venues' highest leverage)"),
     "chase_s": (1, 600, "seconds an unfilled leg follows the price as maker after the other leg has filled"),
     "max_cross_bp": (0, 100, "then it crosses the spread if that costs no more than this many bp; dearer than that, "
                              "it keeps following until enter_timeout_s"),
     "requote_s": (1, 60, "an order off the best price is moved back at most this often, in seconds"),
-    "enter_timeout_s": (10, 3600, "seconds after which an unfinished entry or exit is completed by crossing or undone"),
+    "enter_timeout_s": (10, 7200, "seconds after which an unfinished entry is left as it is and an unfinished exit is "
+                                  "completed by crossing"),
 }
 
 
@@ -106,7 +123,8 @@ def set_value(name: str, text: str, path: Path | None = None) -> float:
         raise ValueError(f"unknown setting {name!r}: one of {', '.join(sorted(ADJUSTABLE))}")
     lo, hi, _ = ADJUSTABLE[name]
     try:
-        v = 0.0 if text.strip().lower() in ("auto", "dynamic", "none", "off") else float(text)
+        word = text.strip().lower()
+        v = 0.0 if word in ("auto", "dynamic", "none", "off") else hi if word in ("max", "highest") else float(text)
     except ValueError:
         raise ValueError(f"{name}: {text!r} is not a number") from None
     if not lo <= v <= hi:
