@@ -1,6 +1,6 @@
 """Is a process still running? `os.kill(pid, 0)` alone says yes for a zombie: a child that has exited but was never
 reaped by the process that started it. The Telegram process starts the guardian and the runs (subprocess.Popen) and
-lives on, so a guardian that stood down stayed "running" in `arcus status` for as long as Telegram ran (2026-10-03)."""
+lives on, so a guardian that stood down stayed "running" in `tbot status` for as long as Telegram ran (2026-10-03)."""
 
 from __future__ import annotations
 

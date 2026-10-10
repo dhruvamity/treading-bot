@@ -97,7 +97,7 @@ def report(root: Path, markets: list[str], lists: list[str], n: int, budget: flo
     a = _load(root / "data" / "scout" / "latest.json")
     lt = _load((lighter_root or root.parent / "lighter") / "data" / "scout" / "latest.json")
     if a is None and lt is None:
-        return ("No scan yet. With a tape on this machine: arcus recommend --scan. Otherwise arcus import first "
+        return ("No scan yet. With a tape on this machine: arcus recommend --scan. Otherwise tbot import first "
                 "(or arcus scout scan if the scout has recorded for 3 days).")
     for key in lists:
         out += ["", f"{TITLES[key]}"]

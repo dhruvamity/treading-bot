@@ -220,6 +220,9 @@ def run(series: dict[str, Series], capital: float, st: Settings | None = None, *
             else:
                 d24 = sign * sum(a - b for a, b in zip(m.ra[-24:], m.rl[-24:], strict=False)) / min(24, len(m.ra))
                 why = exit_reason((t - pos["opened"]) / H, diff, d24, st)
+                swing = pos["size"] * (abs(m.last[lv] - pos["entry"][lv]) + abs(m.last[sv] - pos["entry"][sv])) / 2
+                if not why and st.drift_close_share > 0 and swing / pos["money0"] >= 0.5 - st.drift_close_share:
+                    why = "drift: closed after the payment so the money can be moved"
                 if why:
                     pl = pos["size"] * (m.last[lv] - pos["entry"][lv])
                     ps = pos["size"] * (pos["entry"][sv] - m.last[sv])
@@ -250,7 +253,8 @@ def run(series: dict[str, Series], capital: float, st: Settings | None = None, *
                 eq["lighter"] -= cost_in / 2
                 pos = {"sym": best.symbol, "short": best.short_venue, "long": best.long_venue, "size": best.size,
                        "notional": best.notional, "lev": best.leverage, "stop": best.stop_dist, "opened": t,
-                       "entry": dict(m.last), "funding": 0.0, "cost_in": cost_in}
+                       "entry": dict(m.last), "funding": 0.0, "cost_in": cost_in,
+                       "money0": max(1e-9, eq["arcus"] + eq["lighter"])}
         # the money on both venues: what has been paid and closed. An open position's two legs are not marked: their
         # hourly prices come from different moments on each venue, and the gap would read as a loss that is not one.
         curve.append((t, eq["arcus"] + eq["lighter"]))

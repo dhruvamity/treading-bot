@@ -341,7 +341,7 @@ class BotRunner:
         self.decisions.record("resume", f"manual resume ({raw})", venue=venue.value if venue else None)
 
     async def _check_operator(self) -> None:
-        """Operator controls written to the state DB by `arcus telegram` (or any tool):
+        """Operator controls written to the state DB by `tbot telegram` (or any tool):
         kv "paused"  = JSON {BASE or "*": reason}: persistent; quoting stops for those markets and the strategy's
                        reduce-only exit book works inventory off. Survives restarts because it lives in the DB.
         kv "control" = JSON {"cmd": "stop", "by": ...}: one-shot graceful stop (cancel quotes, keep positions);
@@ -537,7 +537,7 @@ class BotRunner:
             try:
                 self.state.kv_set("status", orjson.dumps(self.snapshot(), default=str,
                                                           option=orjson.OPT_NON_STR_KEYS).decode())
-            except Exception as e:  # a status screen must never take the arcus down
+            except Exception as e:  # a status screen must never take the tbot down
                 log.warning("status_publish_failed", reason=type(e).__name__, data={"err": str(e)[:200]})
             await asyncio.sleep(5)
 

@@ -135,7 +135,7 @@ def stale_note(scan: dict[str, Any] | None, now: float | None = None) -> str:
     age = (now or time.time()) - scan["ts_us"] / 1e6
     if age <= MAX_SCAN_AGE_S:
         return ""
-    return (f"The lists are from a scan {age / 3600:.1f} h old: is the scout running (arcus status)? A long scan at a "
+    return (f"The lists are from a scan {age / 3600:.1f} h old: is the scout running (tbot status)? A long scan at a "
             "new capital keeps the last one up until it ends. You can still run.")
 
 
@@ -376,7 +376,7 @@ class Pilot:
 
             if roles.role() == "trader":   # ... but never sized by another machine's scan: this one sizes its runs
                 raise ValueError(f"{market}: this machine has no market list yet (it reads it from Arcus every 10 "
-                                 "minutes; `arcus status` shows the scout service). Try again in a minute")
+                                 "minutes; `tbot status` shows the scout service). Try again in a minute")
             return self._scan_row(market, setting, lev, rows)
         if meta.get("status") not in (None, "ONLINE"):
             raise ValueError(f"{market} is not an online Arcus market")
@@ -505,7 +505,7 @@ class Pilot:
                 raise RuntimeError(f"the {m} bot did not stop within {wait_close_s / 60:.0f} min; check it (/status)")
         # A new run is the owner's go: a pause from before it (/pauseneworders, or the scout's on the last setup) must
         # not hold it. 2026-09-26: a BTC run sat at 0% quoting behind an old "all markets" pause. A restart of the same
-        # run (`arcus up`) keeps its pauses.
+        # run (`tbot up`) keeps its pauses.
         cleared = self.control.paused(mode)
         if cleared:
             self.control.clear_pause(mode, None)

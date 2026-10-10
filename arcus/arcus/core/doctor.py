@@ -161,7 +161,7 @@ async def run_doctor(sessions: list[MMSession], *, mode: RunMode, app: AppConfig
                                                  "before this one starts")
             else:
                 r.add("FAIL", "already running", f"a {mode.value} bot wrote a heartbeat {hb:.0f} s ago",
-                      "stop it first (/stop, or arcus down); two bots on one account fight each other")
+                      "stop it first (/stop, or tbot down); two bots on one account fight each other")
 
     # ---- environment
     try:

@@ -343,6 +343,7 @@ class TelegramBot:
         return read, write
 
     async def dispatch(self, ctx: Ctx, cmd: str, args: list[str]) -> None:
+        cmd, args = others.arcus_spelling(cmd, args)      # /arcus_status, /a_status: Arcus, spelled like the others
         part = others.part_of(cmd)
         if part is not None:      # /l_status, /l status, /arb_hold 72 ...: Lighter or the funding arbitrage
             name, rest = (part[1], args) if part[1] else ((args[0].lower(), args[1:]) if args else ("", []))
@@ -442,7 +443,7 @@ class TelegramBot:
         if mode == "live":
             if not self.arb.live_allowed():
                 await self.reply(ctx, card("🔒", "FUNDING ARB · LIVE IS OFF", codes(
-                    "Put ARB_LIVE=1 in arcus/.env, then arcus down and arcus up", "Nothing was started")))
+                    "Put ARB_LIVE=1 in arcus/.env, then tbot down and tbot up", "Nothing was started")))
                 return
             await self._ask(ctx, "arb_start", {"mode": "live"}, card(
                 "🔴", "FUNDING ARB · START LIVE",
@@ -534,7 +535,7 @@ class TelegramBot:
                 trigger.touch()                 # the follow service takes its next turn now
                 return ("This machine does not scan: its lists come from the other machine · fetching now"
                         if os.environ.get("BOT_SYNC_FROM") else
-                        "This machine does not scan and no other machine is set to send lists (arcus sync status) · "
+                        "This machine does not scan and no other machine is set to send lists (tbot sync status) · "
                         "/run works without them")
         if st.get("running"):
             started = float(st.get("started") or now)
@@ -570,7 +571,7 @@ class TelegramBot:
                                     keyboard=profile_keyboard(w["profile"], self.pilot.top(w["profile"])))
             elif not busy and waited > SCAN_WAIT_S:
                 await self.api.send(w["chat"], card("⌛", "NO SCAN FINISHED",
-                                                    codes(f"Waited {ago(waited)} · is the scout running?", "arcus status")))
+                                                    codes(f"Waited {ago(waited)} · is the scout running?", "tbot status")))
             elif waited < SCAN_GIVE_UP_S:
                 keep.append(w)
         self.scan_waiters = keep
@@ -1253,7 +1254,7 @@ class TelegramBot:
             p.pnl_alerts = args[1] == "on"
         p.save(self.prefs_path)
         muted = f"Muted until {dt.datetime.fromtimestamp(p.mute_until, dt.UTC):%H:%M} UTC" if p.muted() else "On"
-        text = card("🔔", "Alerts", codes(muted, "Critical alerts (arcus down, safe mode, loss limit) always come"),
+        text = card("🔔", "Alerts", codes(muted, "Critical alerts (tbot down, safe mode, loss limit) always come"),
                     codes(f"Fills {p.fills} · PnL warnings {'on' if p.pnl_alerts else 'off'} · daily digest "
                           f"{'on' if p.digest else 'off'}"))
         kb: Keyboard = [

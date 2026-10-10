@@ -8,7 +8,7 @@
 #   2. installs the three bots into arcus/.venv (make install: Arcus, Lighter, the funding arbitrage);
 #   3. creates .env from the template if there is none (mode 600), and never changes one that exists;
 #   4. closes the firewall to everything but SSH (the port this session came in on);
-#   5. makes `arcus up` run after every reboot (a line in this user's crontab).
+#   5. makes `tbot up` run after every reboot (a line in this user's crontab).
 # It starts nothing and places no orders. Running it again is safe.
 set -euo pipefail
 
@@ -45,8 +45,8 @@ sudo ufw allow "${SSH_PORT:-22}/tcp"
 sudo ufw --force enable
 
 echo "[5/5] start after a reboot"
-LINE="@reboot cd $BOT && .venv/bin/arcus up >> logs/boot.out 2>&1"
-( crontab -l 2>/dev/null | grep -vF ".venv/bin/bot up" | grep -vF ".venv/bin/arcus up" || true; echo "$LINE" ) | crontab -
+LINE="@reboot cd $BOT && .venv/bin/tbot up >> logs/boot.out 2>&1"
+( crontab -l 2>/dev/null | grep -vF ".venv/bin/bot up" | grep -vF ".venv/bin/arcus up" | grep -vF ".venv/bin/tbot up" || true; echo "$LINE" ) | crontab -
 
 cat <<EOF
 
@@ -60,9 +60,9 @@ Done. Next, from $BOT, one line at a time:
   3. Credentials, account and clock (reads only):
        .venv/bin/arcus doctor
   4. Start what this machine is for (everything, or what its BOT_ROLE says):
-       .venv/bin/arcus up
+       .venv/bin/tbot up
   5. One screen:
-       .venv/bin/arcus status
+       .venv/bin/tbot status
   6. Later, one file with everything recorded and traded, to bring home:
-       .venv/bin/arcus export
+       .venv/bin/tbot export
 EOF

@@ -77,6 +77,12 @@ ADJUSTABLE: dict[str, tuple[float, float, str]] = {
     "max_leverage": (1, 50, "never use more leverage than this, whatever the venues allow"),
     "max_notional_usd": (0, 1e7, "never more than this many dollars a leg; 0 = no limit (use a small number for the "
                                  "first live run)"),
+    "rwa_only": (0, 1, "1 = stocks, indices and commodities only (never a market Arcus calls crypto); 0 = every "
+                       "market"),
+    "rebalance_share": (0.05, 0.5, "flat, with one venue under this share of the money: say how much to move (0.4 = "
+                                   "under 40%)"),
+    "drift_close_share": (0, 0.5, "open, with one venue down to this share of the money: close after the next funding "
+                                  "payment so it can be moved; 0 = off (the stop closes it instead)"),
     "margin_use": (0.1, 0.95, "share of the smaller venue's free collateral a position may use"),
     "min_volume_24h": (0, 1e9, "skip markets that traded less than this many dollars in 24 h on either venue"),
     "fill_cost_bp": (0, 50, "what one fill is assumed to cost, in bp"),

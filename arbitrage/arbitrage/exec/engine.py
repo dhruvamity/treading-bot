@@ -37,8 +37,8 @@ RULE_EVERY_S = 300.0      # how often an open position is checked against the ho
 SCAN_EVERY_S = 300.0      # how often a flat bot looks for a position to open
 ORDER_LOST_S = 15.0       # an order the venue does not know after this long never arrived
 CONFIRM_S = 10.0          # a position that differs from the bot's count must still differ this much later
-REBALANCE_BELOW = 0.4     # flat, with one venue under this share of the money: tell the owner to move some
-HINT_EVERY_S = 6 * 3600.0
+HINT_EVERY_S = 6 * 3600.0  # flat with the money uneven (Settings.rebalance_share): the owner is told again this often
+AFTER_PAYMENT_S = 900.0    # both venues pay funding on the hour: a close that can wait starts in the 15 minutes after
 
 
 @dataclass
@@ -267,16 +267,8 @@ class Engine:
             if c is None:
                 return
             money[name] = c
-        total = sum(money.values())
-        if total > 0 and min(money.values()) / total < REBALANCE_BELOW and now - st.last_hint > HINT_EVERY_S:
-            # a closed position leaves its gain on one venue and its loss on the other; the smaller balance sets
-            # the next position, and only the owner can move money between the venues
-            low = min(money, key=lambda v: money[v])
-            high = max(money, key=lambda v: money[v])
+        if now - st.last_hint > HINT_EVERY_S and self._tell_transfer(money):
             st.last_hint = now
-            self._say("rebalance", f"{low} has ${money[low]:,.2f}, {high} ${money[high]:,.2f}: the next position is "
-                                   f"sized by the smaller. Moving ${(money[high] - money[low]) / 2:,.2f} from {high} "
-                                   f"to {low} makes them equal")
         p = await self.planner.best(money)
         if p is None or not p.go:
             return
@@ -308,6 +300,25 @@ class Engine:
         self._say("entering", f"{p.symbol}: long {p.long_venue}, short {p.short_venue}, {size:g} a leg "
                               f"(${p.notional:,.0f}) at {p.leverage:.1f}x; pays about ${p.income_day:.2f} a day",
                   plan=st.plan)
+
+    def _tell_transfer(self, money: dict[str, float]) -> bool:
+        """Say exactly how much to move between the venues when one holds less than `rebalance_share` of the money.
+        A closed position leaves its gain on one venue and its loss on the other; the smaller balance sizes the next
+        position, and only the owner can move money (the venues cannot send to each other). True when it was said."""
+        total = sum(money.values())
+        if total <= 0 or len(money) < 2:
+            return False
+        low = min(money, key=lambda v: money[v])
+        high = max(money, key=lambda v: money[v])
+        share = money[low] / total
+        if share >= self.settings().rebalance_share:
+            return False
+        move = (money[high] - money[low]) / 2
+        self._say("rebalance", f"MOVE ${move:,.2f} from {high} to {low}. {high} has ${money[high]:,.2f}, {low} "
+                               f"${money[low]:,.2f} ({share * 100:.0f}% of ${total:,.2f}); after it each has "
+                               f"${total / 2:,.2f}. Until then the next position is sized by the smaller",
+                  move=round(move, 2), src=high, dst=low, money=dict(money))
+        return True
 
     def _begin_exit(self, why: str, *, urgent: bool) -> None:
         st = self.st
@@ -472,6 +483,8 @@ class Engine:
         self._say("closed", f"{st.symbol}: closed ({st.why}); result ${sum(parts.values()):+.2f} ("
                   + ", ".join(f"{v} ${x:+.2f}" for v, x in parts.items()) + f") after {hours:.1f} h",
                   result=sum(parts.values()), parts=parts, hours=hours, money=money, symbol=st.symbol)
+        if self._tell_transfer(money):       # at once, with the exact amount: the next position waits for nobody
+            st.last_hint = now
         self._flat_now()
 
     # ------------------------------------------------------------------------------------------ open
@@ -514,6 +527,18 @@ class Engine:
             move = t.mid / st.entry[name] - 1
             if abs(move) >= st.stop_dist:
                 self._begin_exit(f"stop: {name} moved {move * 100:+.2f}% from the entry", urgent=True)
+                return
+        if s.drift_close_share > 0 and now % 3600 < AFTER_PAYMENT_S:
+            # what this position has moved from one venue to the other so far: one leg's loss is the other's gain
+            total = sum(st.money0.values())
+            moved = {n: (1.0 if n == st.long_venue else -1.0) * st.size * (t.mid - st.entry[n])
+                     for n, t in tops.items()}
+            low = min(moved, key=lambda n: moved[n])
+            high = max(moved, key=lambda n: moved[n])
+            swing = (moved[high] - moved[low]) / 2
+            if total > 0 and swing / total >= 0.5 - s.drift_close_share:
+                self._begin_exit(f"${swing:,.2f} has moved from {low} to {high} ({swing / total * 100:.0f}% of the "
+                                 f"money): closing after the funding payment so it can be moved back", urgent=False)
                 return
         for name, v in self.venues.items():
             if not st.stops_ok.get(name):

@@ -76,7 +76,8 @@ def arcus_leg(m: dict[str, Any]) -> Leg | None:
                min_notional=float(m.get("minOrderNotional") or 0), min_size=float(m.get("minOrderSize") or 0),
                step=float(m.get("stepSize") or 0), tick=float(m.get("tickSize") or 0),
                volume_24h=float(m.get("volume24hNotional") or 0), oi_usd=float(m.get("openInterest") or 0) * mark,
-               online=m.get("status") == "ONLINE", off_hours=bool(m.get("isOutsideRth")))
+               online=m.get("status") == "ONLINE", off_hours=bool(m.get("isOutsideRth")),
+               category=str(m.get("category") or ""))
 
 
 def lighter_leg(d: dict[str, Any], rate_8h: float | None, now_s: float) -> Leg | None:

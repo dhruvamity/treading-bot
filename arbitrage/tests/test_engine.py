@@ -378,7 +378,7 @@ async def test_stops_refused_pause_the_bot_and_unequal_money_is_said() -> None:
     r2.arcus.collateral, r2.lighter.collateral = 30.0, 210.0
     await r2.step()
     hint = [t for k, t in r2.store.events if k == "rebalance"]
-    assert hint and "Moving $90.00 from lighter to arcus" in hint[0]
+    assert hint and hint[0].startswith("MOVE $90.00 from lighter to arcus") and "each has $120.00" in hint[0]
     assert r2.e.st.phase == "entering" and r2.e.st.plan["notional"] < 30 * 10    # sized by the smaller balance
 
 
@@ -387,3 +387,57 @@ async def test_a_cap_on_the_position_size_for_a_first_small_run() -> None:
     await r.step()
     assert r.e.st.size * 106.41 == pytest.approx(50.0, abs=0.02)
 
+
+
+async def test_a_closed_position_that_left_the_money_uneven_says_at_once_how_much_to_move() -> None:
+    r = Rig(Settings(rebalance_share=0.45))
+    await r.to_open()
+    for v in (r.arcus, r.lighter):
+        v.set_top(SYM, 109.60, 109.62)                     # +3%: the long venue gains what the short one loses
+    r.store.cmd = {"close": True, "now": True}
+    await r.step(n=4)
+    assert r.e.st.phase == "flat", r.store.events
+    kinds = r.store.kinds()
+    assert kinds.index("rebalance") == kinds.index("closed") + 1          # the same step, not five minutes later
+    text = next(t for k, t in r.store.events if k == "rebalance")
+    a, b = await r.arcus.free_collateral(), await r.lighter.free_collateral()
+    assert a is not None and b is not None
+    assert text.startswith(f"MOVE ${abs(a - b) / 2:,.2f} from lighter to arcus")    # the long leg (Lighter) gained
+    assert f"${(a + b) / 2:,.2f}" in text                                 # what each holds after the transfer
+
+
+async def test_a_position_that_moved_too_much_money_is_closed_after_the_funding_payment() -> None:
+    r = Rig()
+    await r.to_open()
+    st = r.e.st
+    move = st.entry["arcus"] * st.stop_dist * 0.9                         # not as far as the stop
+    swing = st.size * move
+    r.s = replace(r.s, drift_close_share=0.5 - swing / 240 * 0.9)         # ... but past the drift limit
+    for v in (r.arcus, r.lighter):
+        v.set_top(SYM, 106.40 + move, 106.42 + move)
+    r.clock.t = (r.clock.t // 3600) * 3600 + 1800                         # half past: the next payment is still due
+    await r.step(dt=0)
+    assert r.e.st.phase == "open"
+    r.clock.t = (r.clock.t // 3600 + 1) * 3600 + 5                        # just after it
+    await r.step(dt=0)
+    assert r.e.st.phase == "exiting" and "closing after the funding payment" in r.e.st.why and not r.e.st.urgent
+    assert "has moved from" in r.e.st.why
+
+    off = Rig()                                                           # the default: the stop does it, not this
+    await off.to_open()
+    for v in (off.arcus, off.lighter):
+        v.set_top(SYM, 106.40 + move, 106.42 + move)
+    off.clock.t = (off.clock.t // 3600 + 1) * 3600 + 5
+    await off.step(dt=0)
+    assert off.e.st.phase == "open"
+
+
+def test_a_crypto_market_is_never_planned_unless_the_owner_allows_it() -> None:
+    a, b = legs()
+    money = {"arcus": 120.0, "lighter": 120.0}
+    hist = ([1.7e-5] * 168, [4e-6] * 168)
+    stock = plan(replace(a, category="EQUITIES"), b, *hist, 0.0167, money, Settings())
+    crypto = plan(replace(a, category="CRYPTO"), b, *hist, 0.0167, money, Settings())
+    allowed = plan(replace(a, category="CRYPTO"), b, *hist, 0.0167, money, Settings(rwa_only=False))
+    assert stock.go and allowed.go
+    assert not crypto.go and "crypto" in crypto.reasons[0]

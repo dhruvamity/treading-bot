@@ -1,4 +1,4 @@
-"""`arbitrage start` and `stop`: the executor as a background process, so the one Telegram bot (and `arcus up`)
+"""`arbitrage start` and `stop`: the executor as a background process, so the one Telegram bot (and `tbot up`)
 can run it without a terminal that stays open.
 
     state/run-<mode>.pid     the process, while it runs

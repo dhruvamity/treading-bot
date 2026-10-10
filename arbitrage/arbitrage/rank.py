@@ -18,6 +18,7 @@ import math
 from dataclasses import dataclass, field
 
 HOURS_YEAR = 8760.0
+CRYPTO_CLASSES = ("CRYPTO", "CRYPTOCURRENCY", "MEME")
 
 
 @dataclass(frozen=True)
@@ -40,6 +41,7 @@ class Leg:
     oi_usd: float
     online: bool = True
     off_hours: bool = False
+    category: str = ""          # the venue's own asset class: "EQUITIES", "INDICES", "COMMODITIES", "CRYPTO" (Arcus)
 
 
 @dataclass(frozen=True)
@@ -54,6 +56,11 @@ class Settings:
     min_volume_24h: float = 100_000.0
     max_leverage: float = 20.0      # the owner's own ceiling, whatever the venues allow
     max_notional_usd: float = 0.0   # never more than this many dollars a leg (0 = no limit): for a first small run
+    rwa_only: bool = True           # stocks, indices and commodities only: a market Arcus calls CRYPTO is never opened
+    # ---- the money on the two venues (a position's gain lands on one venue and its loss on the other)
+    rebalance_share: float = 0.40   # flat, one venue under this share of the money: say how much to move
+    drift_close_share: float = 0.0  # open, one venue down to this share (its leg's loss counted): close after the
+                                    # next funding payment so the money can be moved. 0 = off: the stop does it
     # ---- holding: the owner changes these at any time (`arbitrage set`); the running bot reads them every loop
     min_hold_h: float = 24.0        # keep a position at least this long (a stop still closes it)
     max_hold_h: float = 0.0         # close it after this many hours whatever it pays (0 = no limit)
@@ -192,6 +199,8 @@ def plan(arcus: Leg, lighter: Leg, hist_arcus: list[float], hist_lighter: list[f
         p.prices[leg.venue] = {"side": side, "entry": leg.mark, "stop": leg.mark * (1 - side * stop),
                                "take": leg.mark * (1 + side * stop), "liq": leg.mark * (1 - side * liq)}
     r = p.reasons
+    if s.rwa_only and arcus.category.upper() in CRYPTO_CLASSES:
+        r.append("a crypto market: the arbitrage trades stocks, indices and commodities only (rwa_only)")
     if not (arcus.online and lighter.online):
         r.append("a market is not open for trading")
     if len(diffs) < 24:
