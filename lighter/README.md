@@ -254,6 +254,14 @@ wild in the last hour, its data fresh.
   closed (maker, then taker) instead of kept. It asks for `LIVE` like any live start. The same command without `--live` is
   the paper rehearsal. What to read afterwards: `lighter/logs/run-live-<day>.jsonl`, `lighter/state/fills-live.jsonl` and
   `status-live.json`.
+
+
+  **That run, 2026-10-10:** ten minutes, 70 fills (69 as maker), $1,045 traded, +$0.003, ended flat with no orders. No
+  refusal while it quoted; the stop on Lighter followed the position 53 times and never fired. What it found: at the end
+  it held $9 of SPY, under Lighter's $10 minimum, and Lighter refused the maker order to close it (40 times in 20 s) until
+  the taker order did. A position under the minimum is now closed with a taker order at once, quotes under the minimum
+  are not sent even to reduce, and after a refused request the bot waits 2 s before it asks for orders again. Paper and
+  the backtest follow the same rules.
 - **Before the first quote,** the run cancels your orders on that market, sets the leverage (cross margin) and withdraws a scheduled cancel-all an older version may have left.
   It treats every order on that market as its own: trade by hand on another market, or use a sub-account (`LIGHTER_ACCOUNT_INDEX`).
 - **Control** (CLI, or Telegram): `lighter pause` / `unpause` (no new orders; closing orders keep working), `close` (close the position, maker

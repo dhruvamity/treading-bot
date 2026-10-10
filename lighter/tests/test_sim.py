@@ -86,6 +86,19 @@ def test_a_resting_order_is_replaced_before_its_expiry_and_goes_to_the_back_of_t
     assert run(tape(flat_book(), trades), "touch 0").maker_fills == 0
 
 
+def test_a_stopped_position_under_the_minimum_order_is_closed_with_a_taker_order():
+    # Touch 0 joins the bid with 5 ahead; a print of 5.05 at our price leaves us 0.05 ($5, under the $10 minimum).
+    # The bid then falls 3 cents: past a position stop of a tenth of a cent. No maker order can rest for $5.
+    from lighter_bot.trade.strategy import parse
+    rows = [(T0 + s * US, 100.0 if s < 20 else 99.97, 100.02 if s < 20 else 99.99, 5.0, 5.0) for s in range(120)]
+    t = tape(rows, [(T0 + 10 * US, 100.00, 5.05, 0, 1)])
+    s = parse("touch 0")
+    cfg = SimCfg(warmup_s=0)
+    r = Sim(s.params(), sizes(100.0, 10.0, Stops(0.001, 90, 99)), MR, cfg, s.name).run(Window(t, T0, T0 + 120 * US, cfg))
+    assert r.pos_stops == 1 and r.taker_fills == 1 and r.taker_usd == pytest.approx(0.05 * 99.97, rel=1e-3)
+    assert r.end_pos_usd == 0
+
+
 def test_tape_round_trip_and_dedupe(tmp_path):
     tp = Tape(tmp_path)
     cols = {"ts": np.array([1, 2], np.int64), "bid": np.array([1.0, 1.0]), "ask": np.array([2.0, 2.0]),

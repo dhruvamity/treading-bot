@@ -442,8 +442,11 @@ class Sim:
                         taker(plan.taker, t)
                     else:
                         want = [(q.side, q.px, q.qty, q.tag, q.reduce_only) for q in plan.quotes
-                                if q.qty * q.px >= mr.min_usd(mid) or q.reduce_only]
+                                if q.qty * q.px >= mr.min_usd(mid)]      # under the minimum Lighter takes no maker order
                         res.quoting_s += w.step / US
+                elif d.action == G.EXIT and abs(pos) * mid < mr.min_usd(mid):
+                    cancel_all(t)           # too small to rest, even to close: a taker order (lighter_bot/trade/engine.py)
+                    taker(-pos, t)
                 elif d.action == G.EXIT:
                     side = SELL if pos > 0 else BUY
                     want = [(side, ASK[i] if side == SELL else BID[i], abs(pos), "exit", True)]

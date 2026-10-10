@@ -280,10 +280,18 @@ class Engine:
                 await self._cancel_quotes()
                 await ex.taker(plan.taker)
                 return
-            want = [q for q in plan.quotes if q.reduce_only or q.qty * q.px >= self.m.min_order_usd(mid)]
+            # Lighter refuses a resting order under its minimum, reduce-only or not (21706, first live run)
+            want = [q for q in plan.quotes if q.qty * q.px >= self.m.min_order_usd(mid)]
             kind = "quote"
             self.why = ""
         elif d.action in (G.EXIT, G.QUOTE) and pos:     # an exit, or paused: work the position off at the touch
+            if abs(pos) * mid < self.m.min_order_usd(mid):
+                # Too small to rest: Lighter refuses a maker order under its minimum even to close (the first live
+                # run, 2026-10-10, asked 40 times in 20 s for a $9 position). A reduce-only taker order is taken.
+                await self._cancel_quotes()
+                await ex.taker(-pos)
+                self.why = d.why or "paused by you: closing orders only"
+                return
             side = SELL if pos > 0 else BUY
             want = [Quote(side, ask if side == SELL else bid, abs(pos), "exit", True)]
             self.why = d.why or "paused by you: closing orders only"
@@ -299,7 +307,7 @@ class Engine:
         if g.state == "done" and not pos:
             self.run.done = self.run.done or g.why
         changes = self.diff(want, orders, now)
-        if changes:
+        if changes and now >= getattr(ex, "hold_until", 0.0):      # live: a short wait after a refused request
             await ex.send(changes, kind)
         dt = self.period
         self.total_s += dt

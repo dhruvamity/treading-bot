@@ -150,6 +150,37 @@ def test_a_run_with_a_time_limit_keeps_its_position_unless_told_to_end_flat(tmp_
     assert eng.stop_after_close and ex.acct.pos == 0 and time.time() - t0 < 5      # closed first, then stopped
 
 
+def test_a_position_too_small_for_a_resting_order_is_closed_with_a_taker_order(tmp_path):
+    """The first live run (2026-10-10) ended with $9 of SPY: under Lighter's $10 minimum. The maker exit was refused
+    40 times in 20 s before the taker order closed it."""
+    ex = paper(tmp_path)
+    eng = Engine(ex, RunState(RunSpec("X", "Mid 0", 10.0, capital=100.0)), tmp_path)
+    now = time.time()
+    asyncio.run(eng.step(now))
+    ex.orders.clear()
+    ex._book_fill(BUY, 100.01, 0.05)                         # $5: under the market's $10 minimum
+    ex.cash -= 0.05 * 100.01
+    eng.ask_close("closing: asked")
+    asyncio.run(eng.step(now + 1))
+    assert [q for _, q in ex.pending_takers] == [-0.05] and not [o for o in ex.live_orders() if o.tag == "exit"]
+    ex.pending_takers.clear()
+    ex._book_fill(BUY, 100.01, 0.45)                         # $50 now: a maker order at the touch, as before
+    ex.cash -= 0.45 * 100.01
+    asyncio.run(eng.step(now + 5))
+    assert [(o.tag, o.qty, o.reduce_only) for o in ex.live_orders()] == [("exit", 0.5, True)] and not ex.pending_takers
+
+
+def test_the_engine_holds_its_order_changes_after_a_refused_request(tmp_path):
+    ex = paper(tmp_path)
+    eng = Engine(ex, RunState(RunSpec("X", "Mid 0", 10.0, capital=100.0)), tmp_path)
+    now = time.time()
+    ex.hold_until = now + 2.0                                # what the live exchange sets when Lighter refuses a request
+    asyncio.run(eng.step(now))
+    assert not ex.live_orders()
+    asyncio.run(eng.step(now + 2.5))
+    assert {o.side for o in ex.live_orders()} == {BUY, SELL}
+
+
 def test_engine_quotes_and_obeys_controls(tmp_path):
     ex = paper(tmp_path)
     run = RunState(RunSpec("X", "Mid 0", 10.0, capital=100.0))

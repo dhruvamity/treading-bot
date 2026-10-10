@@ -47,6 +47,7 @@ STOP_SLIP = 0.05             # its worst price past the trigger (what the live t
 STOP_MAX_AWAY = 0.10         # never further than this from the entry, however small the position
 RECONCILE_EVERY_S = 300.0
 UNACKED_S = 10.0
+REFUSED_HOLD_S = 2.0         # after a refused request the engine waits this long before it asks for orders again
 STREAM_FRESH_S = 5.0         # a position the stream gave this recently is not replaced by the account read: on
                              # 2026-10-10 that read still said flat a second after a fill the stream had reported
 
@@ -87,6 +88,7 @@ class LiveExchange(Exchange):
         self.stop_cids: set[int] = set()         # every stop this run placed: their frames are not quotes
         self.vstop_ended = ""                    # how Lighter ended the last one (its status), for the logs
         self._pos_stream_at = 0.0                # when the stream last gave the position
+        self.hold_until = 0.0                    # the engine sends no order changes before this (after a refusal)
         self._last_vstop = 0.0
         self.taker_in_flight_until = 0.0
         self.errors: list[tuple[float, str]] = []
@@ -168,6 +170,10 @@ class LiveExchange(Exchange):
             log.warn("send_refused", code=e.code, msg=e.message, n=len(txs))
             if e.code in (C.ERR_NOT_ENOUGH_MARGIN, C.ERR_BELOW_INITIAL_MARGIN):
                 self.budget.block(5.0)
+            # The engine wants the same thing half a second later and would ask again: it holds its order changes
+            # until then, so that one refused order cannot use up the minute's requests (40 in 20 s, first live run).
+            # Cancels, the taker exit and the stop are not held.
+            self.hold_until = time.time() + REFUSED_HOLD_S
             return False
         except (TimeoutError, OSError) as e:
             undo()
