@@ -1,4 +1,4 @@
-"""The Lighter controls as a panel of the trading bot's ONE Telegram bot (treading-bot/arcus, `arcus telegram`).
+"""The Lighter controls as a panel of the trading bot's ONE Telegram bot (treading-bot/arcus, `tbot telegram`).
 
 There is no Lighter Telegram bot of its own any more: the one bot receives every message and hands this panel the
 Lighter ones. So that nothing can be mistaken for an Arcus command:

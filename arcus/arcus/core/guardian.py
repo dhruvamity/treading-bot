@@ -2,7 +2,7 @@
 
 - Watches the bot heartbeat (written every 5 s). Stale for 60 s -> cancel-all + CRIT alert. (The Arcus dead man's
   switch fires on its own too; the guardian covers its 10-fires/day cap and a bot that hangs with the switch armed.)
-- A bot stopped on purpose (Telegram /stop, close, `arcus down --all`) writes a last heartbeat saying so after it has
+- A bot stopped on purpose (Telegram /stop, close, `tbot down --all`) writes a last heartbeat saying so after it has
   pulled its quotes: the guardian then exits quietly instead of alarming.
 - Watches account equity from public reads; drawdown beyond the hard limit -> cancel-all and flatten:
   reduce-only maker orders first, IOC reduce-only after 30 s.

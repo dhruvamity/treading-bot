@@ -6,7 +6,7 @@ the stock perps' earnings dates (arcus/core/earnings.py) and adds the finished d
 (arcus/scout/playbook.py); the autopilot (arcus/scout/autopilot.py) looks every minute and acts when the owner turned it
 on (/auto).
 
-Those are three jobs, and a machine does the ones its role gives it (arcus/common/role.py; `arcus up` picks):
+Those are three jobs, and a machine does the ones its role gives it (arcus/common/role.py; `tbot up` picks):
 
     record      the tape                                         all, recorder, scout
     rank        scans, the playbook, the markets' usual levels   all, scout

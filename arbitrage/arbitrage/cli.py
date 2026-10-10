@@ -257,6 +257,24 @@ def cmd_run(a: argparse.Namespace, cfg: Config) -> int:
     return 0
 
 
+def cmd_study(a: argparse.Namespace, cfg: Config) -> int:
+    """How long to hold: the funding history replayed for every holding time (arbitrage/study.py). Reads only."""
+    from arbitrage import backtest as bt
+    from arbitrage import study
+
+    data = Path(a.data) if a.data else ROOT / "data" / "history"
+    series = bt.load(data, [s.upper() for s in a.symbols] if a.symbols else None) if data.exists() else {}
+    if not a.all_markets:
+        series = study.rwa(series)
+    if not series:
+        print(f"no history under {data}: `arbitrage history` downloads it (about an hour; `--update` after that)")
+        return 1
+    st = replace(cfg.settings, rwa_only=not a.all_markets)
+    print(study.report(series, a.capital, st, title=" (every market)" if a.all_markets else
+                       " (stocks, indices, commodities)"))
+    return 0
+
+
 def cmd_livetest(a: argparse.Namespace, cfg: Config) -> int:
     """The live tests, once, on the real venues at the smallest size: the Lighter leg, the Arcus leg, then the
     executor itself on both (arbitrage/exec/legtest.py, drill.py). Real money: ARB_LIVE=1 and LIVE typed here once.
@@ -514,6 +532,13 @@ def main(argv: list[str] | None = None) -> None:
     p = sub.add_parser("history", help="download both venues' funding and price history for the backtest")
     p.add_argument("--venue", choices=("lighter", "arcus", "both"), default="both")
     p.add_argument("--symbols", nargs="*")
+    p.add_argument("--update", action="store_true",
+                   help="keep what is there and fetch only the hours since (minutes instead of an hour)")
+    p = sub.add_parser("study", help="how long to hold a position: the history replayed for every holding time")
+    p.add_argument("--capital", type=float, default=240.0)
+    p.add_argument("--symbols", nargs="*")
+    p.add_argument("--data", help="another history folder")
+    p.add_argument("--all-markets", action="store_true", help="crypto too (the bot itself trades no crypto)")
     p = sub.add_parser("start", help="the executor in the background: paper unless --live")
     p.add_argument("--live", action="store_true")
     p.add_argument("--yes", action="store_true", help="--live without the typed confirmation")
@@ -544,9 +569,10 @@ def main(argv: list[str] | None = None) -> None:
 
         tape = ROOT.parent / "arcus" / "data" / "scout" / "tape"
         history.download(ROOT / "data" / "history", venues=("lighter", "arcus") if a.venue == "both" else (a.venue,),
-                         symbols=a.symbols, tape_root=tape if tape.is_dir() else None)
+                         symbols=a.symbols, tape_root=tape if tape.is_dir() else None, update=a.update)
         sys.exit(0)
     plain = {"settings": cmd_settings, "set": cmd_settings, "backtest": cmd_backtest, "run": cmd_run,
+             "study": cmd_study,
              "status": cmd_control, "close": cmd_control, "pause": cmd_control, "resume": cmd_control,
              "skip": cmd_control, "unskip": cmd_control, "start": cmd_service, "stop": cmd_service,
              "livetest": cmd_livetest}

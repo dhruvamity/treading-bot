@@ -276,7 +276,7 @@ class Bot:
         elif cmd == "auto":
             await self.cmd_auto(chat, arg)
         elif cmd == "scannow":
-            if not self.cfg.ranks:      # a trader: the lists are made on another machine and fetched (arcus sync)
+            if not self.cfg.ranks:      # a trader: the lists are made on another machine and fetched (tbot sync)
                 await self.api.send(chat, card("🔄", "No scans here", lines(
                     "This machine does not scan: its lists come from the other machine.", "/status shows their age")))
                 return

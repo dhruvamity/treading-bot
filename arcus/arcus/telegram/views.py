@@ -269,6 +269,9 @@ def cannot_start(what: str, rep: str) -> str:
 
 HELP = f"""❔ {b("Commands")}
 
+{b("Arcus")} · the commands below; each also with {code("arcus_")} in front, like the other two
+{code("/arcus_status")} · {code("/arcus_run SPY smart 0 50x paper")} · {code("/arcus_closeall")}
+
 {b("Pick and run")}
 /top3 (most volume) · /cheapest · /maxvolume
 /run · the run form: market, Mid, Grid or Smart, spread, bias, leverage
@@ -316,7 +319,7 @@ COMMANDS: list[tuple[str, str]] = [
     ("account", "All-time volume, fees paid and earned, fee tier"),
     ("positions", "What you hold"), ("orders", "Orders on the book"),
     ("pauseneworders", "Stop new orders"), ("unpause", "Quote again"),
-    ("stop", "Shut the arcus down (position kept)"), ("closeall", "Close every position"),
+    ("stop", "Shut the tbot down (position kept)"), ("closeall", "Close every position"),
     ("cancelall", "Cancel every order"), ("resumeaftersl", "Trade again after a safety stop"),
     ("yesterdayreport", "Yesterday's report"), ("settings", "Settings"),
     ("set", "/set name value"), ("scannow", "Scan now"),
@@ -445,7 +448,7 @@ def profile_text(scan: dict[str, Any] | None, profile: str, budget: float, now: 
 
     p = P.profile_of(profile)
     if not scan:
-        return card("🔎", "NO SCAN YET", codes("On the server: arcus up"))
+        return card("🔎", "NO SCAN YET", codes("On the server: tbot up"))
     top = P.top(scan, p, budget)
     cap = (scan.get("capital") or {}).get("usd")
     head = " · ".join(x for x in (f"Capital {money(float(cap))}" if cap else "",

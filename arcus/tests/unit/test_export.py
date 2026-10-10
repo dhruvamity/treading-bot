@@ -251,7 +251,7 @@ def test_an_incremental_export_says_when_the_one_before_it_was_never_imported(tm
     second = run(src, now=t0 + 120)
     said: list[str] = []
     got = ex.run_import(empty(tmp_path / "mac"), second.path, say=said.append)
-    assert not got["chain_ok"] and any("arcus export --full" in s for s in said)
+    assert not got["chain_ok"] and any("tbot export --full" in s for s in said)
 
 
 def test_secrets_are_found_by_name_and_indexes_are_not(tmp_path: Path) -> None:

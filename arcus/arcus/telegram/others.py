@@ -24,7 +24,18 @@ from arcus.common.tgfmt import card, codes
 
 log = Log("telegram_parts")
 LIGHTER, ARB = "l", "arb"
-INSTALL_HINT = "In treading-bot/arcus: make install, then arcus down and arcus up"
+INSTALL_HINT = "In treading-bot/arcus: make install, then tbot down and tbot up"
+
+
+def arcus_spelling(cmd: str, args: list[str]) -> tuple[str, list[str]]:
+    """Arcus is spelled like the other two: /arcus_status, /a_status, /arcus status all mean the bare /status. Anything
+    else comes back as it was."""
+    if cmd in ("a", "arcus"):
+        return (args[0].lower(), args[1:]) if args else ("menu", [])
+    for prefix in ("arcus_", "a_"):
+        if cmd.startswith(prefix) and len(cmd) > len(prefix):
+            return cmd[len(prefix):], args
+    return cmd, args
 
 
 def part_of(cmd: str) -> tuple[str, str] | None:

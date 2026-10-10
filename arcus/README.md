@@ -1,8 +1,8 @@
 # Arcus
 
 The Arcus bot: maker (limit-order) trading on [Arcus](https://arcus.xyz) perpetuals, with the scout that records and
-backtests every market, the pilot and autopilot that run setups, and the services the other two bots share: `arcus up`,
-the one Telegram bot, `arcus export` and `arcus import`. Install, credentials, servers and export are in the
+backtests every market, the pilot and autopilot that run setups, and the services the other two bots share: `tbot up`,
+the one Telegram bot, `tbot export` and `tbot import`. Install, credentials, servers and export are in the
 [main README](../README.md); operations (daily checks, emergencies, kill switches) are in the [RUNBOOK](RUNBOOK.md).
 
 Commands run from `treading-bot/arcus`; `arcus` is `.venv/bin/arcus`. Paths such as `data/scout/` are inside `arcus/`.
@@ -46,10 +46,10 @@ Arcus WebSocket ──► scout recorder ──► data/scout/tape/<MARKET>/<day
 
 ## 2. Tutorial: zero to a live run
 
-**Step 1. Start it.** `.venv/bin/arcus up` starts both scouts and the Telegram bot. The first lists appear after about 3 days
+**Step 1. Start it.** `.venv/bin/tbot up` starts both scouts and the Telegram bot. The first lists appear after about 3 days
 of recording; `/run` works at once and never waits for a scan.
 
-**Step 2. Look.** `.venv/bin/arcus status` is one screen for all three bots; `cat data/scout/report.txt` is the latest
+**Step 2. Look.** `.venv/bin/tbot status` is one screen for all three bots; `cat data/scout/report.txt` is the latest
 ranking. On the phone: `/status`, `/top3`.
 
 **Step 3. Run the best setup on paper.** `.venv/bin/arcus pilot approve 1`, or your own pick from Telegram:
@@ -63,13 +63,13 @@ and keep the position.
 1. `.venv/bin/arcus selftest` while the account is still empty: every line must say PASS or INFO.
 2. Deposit USDG into the Arcus subaccount your key is bound to. Use a subaccount the bot has to itself: it treats every
    order and position there as its own.
-3. Put `BOT_PILOT_LIVE=1` in `.env`, then `arcus down` and `arcus up`.
+3. Put `BOT_PILOT_LIVE=1` in `.env`, then `tbot down` and `tbot up`.
 4. `.venv/bin/arcus doctor pilot` must end in **READY**.
 5. `.venv/bin/arcus pilot approve 1 --live`, and type `LIVE` when asked. From Telegram: `/run SPY smart 0 50x live sl=10`, then
    type back the 6-digit code. `sl=10` means the run may lose $10 in all.
 
 **Step 6. The other two bots** work the same way: [lighter/README.md](../lighter/README.md), [arbitrage/README.md](../arbitrage/README.md).
-**Step 7. Bring the data home** for analysis: `arcus export` (main README, section 4).
+**Step 7. Bring the data home** for analysis: `tbot export` (main README, section 4).
 
 ---
 
@@ -260,7 +260,7 @@ The same BTC Mid 0 costs 0.6 bp in a calm weekend hour and 2.7 bp in a wild week
 
 ## 7. Telegram
 
-One Telegram bot controls all three bots: set it up once ([main README](../README.md), section 2). It reads the runner's state,
+One Telegram bot controls all three bots (it is started by `tbot up telegram` or `tbot telegram`, not by any one bot): set it up once ([main README](../README.md), section 2). It reads the runner's state,
 writes flags the runner applies on its next tick, and holds no trading state, so restarting it never touches a run. Every message
 has the same layout (an emoji and a bold title, then short monospace lines; `arcus/common/tgfmt.py`). Replies from Lighter start
 with **LIGHTER** and the arbitrage's with **FUNDING ARB**; an unlabelled one is Arcus. `/menu` shows buttons; `bot telegram
@@ -341,9 +341,11 @@ message mentions is written `/l_…`, so tapping it stays on Lighter: `/closeall
 | Command | What it does |
 |---|---|
 | **Run the machine** | |
-| `arcus up` | Start both scouts, the Telegram bot, and the guardian while a live bot runs |
-| `arcus down [--all]` | Stop them. `--all` also stops every run (quotes cancelled, positions kept) |
-| `arcus status [--json]` | One screen: services, runs, last scan, balance, Lighter, arbitrage |
+| `arcus up` / `arcus scout` | Start the Arcus part: its scout, and the guardian while a live bot runs. Only Arcus |
+| `arcus down [--all]` / `arcus scout stop` | Stop it. `--all` also stops the Arcus runs (quotes cancelled, positions kept) |
+| `arcus status [--json]` | The Arcus part on one screen: services, runs, last scan, balance |
+| `tbot up [arcus] [lighter] [telegram]` | The whole machine (`BOT_ROLE` decides): all three, or only the parts named; `tbot up scouts` or `tbot scout` = both scouts |
+| `tbot down [parts] [--all]` / `tbot status` | Stop them / one screen for all three bots, the Telegram bot, Lighter and the arbitrage |
 | `arcus dashboard [--once]` | Live screen every 10 s: today's volume, PnL, position |
 | **Trade** | |
 | `arcus pilot status` / `approve N [--live] [--list cheapest\|max] [--max-lev]` / `close` | What is deployed and the top 3; run a list's pick on paper (or live); close the position and stop |
@@ -358,13 +360,13 @@ message mentions is written `/l_…`, so tapping it stays on Lighter: `/closeall
 | `arcus report [--date D] [--mode M]` | The daily report: Net = spread capture + inventory PnL + funding − fees − liquidation loss |
 | `arcus diagnose [--hours N \| --since … --until …] [--market M] [--replay]` | Why a run filled what it filled: orders, acks, rejects, how long quotes rested, what blocked quoting. `--replay` backtests the same minutes beside the run. Read-only |
 | **Scout** | |
-| `arcus scout run [--workers auto\|N] [--every-min M] [--depth] [--ladder] [--capital auto\|USD] [--record-only \| --follow]` | The recorder + scanner daemon (`arcus up` runs it). `--record-only`: the tape and no scans; `--follow`: neither, the lists come from another machine. With no flag the machine's `BOT_ROLE` decides |
-| `arcus scout scan [--markets …] [--full] [--as-of now\|tape]` / `limits` / `playbook [--capital USD]` | One scan now, printed (`--as-of tape`: as of the end of a tape brought home with `arcus import`); the least and most capital each market can use; the autopilot's table |
+| `arcus scout run [--workers auto\|N] [--every-min M] [--depth] [--ladder] [--capital auto\|USD] [--record-only \| --follow]` | The recorder + scanner daemon (`tbot up` runs it). `--record-only`: the tape and no scans; `--follow`: neither, the lists come from another machine. With no flag the machine's `BOT_ROLE` decides |
+| `arcus scout scan [--markets …] [--full] [--as-of now\|tape]` / `limits` / `playbook [--capital USD]` | One scan now, printed (`--as-of tape`: as of the end of a tape brought home with `tbot import`); the least and most capital each market can use; the autopilot's table |
 | `arcus recommend [MARKET …] [--list all\|volume\|cheapest\|max] [-n 3] [--scan [--capital USD]]` | The best setups of each list for Arcus and Lighter, as the `/run` and `/l_run` lines to paste; `--scan` scans both first, as of the tape's end. Reads only |
 | **Data** | |
-| `arcus export …` / `import [FILE]` | One file with everything new since the last export / take such a file in (main README, section 4) |
-| `arcus sync [status\|key\|allow KEY\|pull\|push USER@TRADER]` | Two machines: a trader takes the lists from the machine that makes them (main README, section 3) |
-| `arcus telegram [--read-only]` / `guardian` / `secrets …` | The Telegram bot / the independent guardian / an encrypted secrets store (alternative to `.env`) |
+| `tbot export …` / `import [FILE]` | One file with everything new since the last export / take such a file in (main README, section 4) |
+| `tbot sync [status\|key\|allow KEY\|pull\|push USER@TRADER]` | Two machines: a trader takes the lists from the machine that makes them (main README, section 3) |
+| `tbot telegram [--read-only]` / `guardian` / `secrets …` | The Telegram bot / the independent guardian / an encrypted secrets store (alternative to `.env`) |
 
 `arcus --help` lists every option. One-off tools in `scripts/`: `arcus_register_key.py` (register or rotate an API key; run it on your own
 machine, it asks for the wallet key and never stores it), `arcus_transfer.py` (move collateral between your subaccounts),

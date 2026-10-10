@@ -1,10 +1,10 @@
 """The scout daemon (`lighter scout run`): the recorder around the clock, a scan every `scan_every` minutes, the pilot's
 review after each scan. A scan runs in a thread next to the recorder; its workers run at the lowest CPU priority.
 
-Three jobs, and a machine does the ones its role gives it (BOT_ROLE, lighter_bot/config.py; `arcus up` picks):
+Three jobs, and a machine does the ones its role gives it (BOT_ROLE, lighter_bot/config.py; `tbot up` picks):
 record (the tape), rank (the scans) and supervise (the pilot's review, the autopilot). A recorder machine only
 records. A trader machine neither records nor ranks: it follows, reviewing its run each time a new scan arrives from
-the machine that made it (the one `arcus sync` fetches Arcus's and Lighter's lists together), and keeps its own
+the machine that made it (the one `tbot sync` fetches Arcus's and Lighter's lists together), and keeps its own
 market list for the run form.
 """
 

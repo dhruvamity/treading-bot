@@ -54,7 +54,8 @@ def cmd_up(a: argparse.Namespace) -> None:
     cfg = _cfg()
     print(f"scout: pid {ops.start(cfg, 'scout', ['scout', 'run', *ROLE_FLAG[cfg.role]])}"
           + ("" if cfg.role == "all" else f" (this machine is a {cfg.role}: BOT_ROLE in arcus/.env)"))
-    print("telegram: the trading bot's one Telegram bot shows Lighter too (`arcus up` in treading-bot/arcus; /l there)")
+    print("only the Lighter scout was started. The Telegram bot (it shows Lighter as /l_...) is `tbot up telegram`; "
+          "everything is `tbot up`.")
 
 
 def cmd_down(a: argparse.Namespace) -> None:
@@ -126,6 +127,12 @@ def cmd_record(a: argparse.Namespace) -> None:
 def cmd_scout(a: argparse.Namespace) -> None:
     from lighter_bot.scout import service
     cfg = _cfg()
+    if a.what == "start":
+        cmd_up(a)
+        return
+    if a.what == "stop":
+        print("scout: " + ("stopped" if ops.stop(cfg, "scout") else "was not running"))
+        return
     if a.what == "run":
         log_setup(cfg.logs_dir, "scout", echo="warn")
         # the three jobs (lighter_bot/scout/service.py): a flag decides, else the machine's role
@@ -141,7 +148,7 @@ def cmd_scout(a: argparse.Namespace) -> None:
     if a.as_of == "tape":
         as_of = tape_end_us(cfg.data_dir)
         if as_of is None:
-            sys.exit("scan: no tape under lighter/data/tape (arcus import first)")
+            sys.exit("scan: no tape under lighter/data/tape (tbot import first)")
         print(f"scanning as of the end of the tape: {dt.datetime.fromtimestamp(as_of / 1e6, dt.UTC):%Y-%m-%d %H:%M} UTC")
     Scanner(cfg).scan(cap, markets=a.markets.split(",") if a.markets else None, stops=settings.stops(cfg),
                       volume_cost=float(eff["volume_cost"]), lev_cap=settings.lev_cap(cfg), full24=a.full,
@@ -492,14 +499,15 @@ def main(argv: list[str] | None = None) -> None:
     p.add_argument("--markets")
     p.add_argument("--no-depth", action="store_true")
     p.set_defaults(fn=cmd_record)
-    p = sub.add_parser("scout", help="run: record + scan every N minutes; scan: one scan now")
-    p.add_argument("what", choices=("run", "scan"))
+    p = sub.add_parser("scout", help="start (default) or stop the scout in the background; run: record + scan every N "
+                                     "minutes in this terminal; scan: one scan now")
+    p.add_argument("what", nargs="?", default="start", choices=("start", "stop", "run", "scan"))
     p.add_argument("--capital")
     p.add_argument("--markets")
     p.add_argument("--full", action="store_true", help="re-run the last 24 h for every setup")
     p.add_argument("--as-of", choices=("now", "tape"), default="now",
                    help="scan: judge the markets as of now (default) or as of the end of the tape (a tape brought "
-                        "here with `arcus import`)")
+                        "here with `tbot import`)")
     p.add_argument("--no-record", action="store_true")
     g = p.add_mutually_exclusive_group()
     g.add_argument("--record-only", action="store_true", help="run: the tape and nothing else (a recorder machine)")

@@ -1,6 +1,6 @@
-"""What `arcus export` writes about the machine and the trading, next to the raw files (arcus/export.py):
+"""What `tbot export` writes about the machine and the trading, next to the raw files (arcus/export.py):
 
-    system/status.txt         `arcus status` at that moment
+    system/status.txt         `tbot status` at that moment
     system/host.txt           machine, load, memory, disk, clock
     system/network.txt        how long a request takes to each venue and back, and the clock against theirs
     system/processes.txt      the bot's processes
@@ -506,7 +506,7 @@ def summary(rec: Path, meta: dict[str, Any], coverage: str, warnings: list[str])
            if meta.get("changed") else "") + ".", "",
         f"**Holds:** {meta['contents']}."
         + (f" The export before it was `{meta['prev']}`." if meta.get("prev") else ""), "",
-        "Take it in on another machine with `arcus import <this file>` (from `treading-bot/arcus`): the tape is merged "
+        "Take it in on another machine with `tbot import <this file>` (from `treading-bot/arcus`): the tape is merged "
         "into the tape folders, everything else lands in `arcus/data/server-export/" + meta["name"] + "/`.", "",
         "## 1. The bot at that moment", "", "```", text("status.txt"), "```", "",
         "## 2. The machine", "", "```", text("host.txt"), "", text("network.txt"), "```", "",
@@ -517,7 +517,7 @@ def summary(rec: Path, meta: dict[str, Any], coverage: str, warnings: list[str])
         "## 5. The recording", "", *recorder_lines(rec, now), "",
         "Tape in this export, counted before packing (`coverage.csv` has every market, day and kind):", "",
         "```", coverage, "```", "",
-        "## 6. Where things are (after `arcus import`)", "",
+        "## 6. Where things are (after `tbot import`)", "",
         *_table(["Folder under records/", "What"], [
             ["`arcus/state/`", "`live.sqlite` and `paper.sqlite` (orders, fills, events, funding), balances, the pilot's "
                                "and autopilot's state, your settings"],

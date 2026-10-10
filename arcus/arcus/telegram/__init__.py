@@ -1,1 +1,1 @@
-"""Telegram operator bot: `arcus telegram` (status, controls, live alerts)."""
+"""Telegram operator bot: `tbot telegram` (status, controls, live alerts)."""

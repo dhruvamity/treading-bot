@@ -4,7 +4,7 @@ Maker (limit-order) trading on **Lighter perps on Robinhood Chain**, built from 
 Lighter: the same setups (**Mid**, **Grid**, **Smart**, a directional **bias**, run limits `sl=` `tp=` `vol=`, plus **Touch**, a
 Lighter-only mode) and the same scout (record, backtest, rank into three lists), pilot and autopilot.
 
-It is one of three bots in the [repository](../README.md): installed by `make install`, started by `arcus up`, its keys in the one
+It is one of three bots in the [repository](../README.md): installed by `make install`, started by `tbot up`, its keys in the one
 `.env`, and controlled from the one Telegram bot, where a Lighter command is the Arcus command with `l_` in front (`/l_status`,
 `/l_run`, `/l_closeall`). What stays its own is what must: its engine (Lighter's orders, fees and limits are not Arcus's), its data
 (`lighter/data`), its settings and its state.
@@ -13,7 +13,7 @@ It is one of three bots in the [repository](../README.md): installed by `make in
 
 On two machines (`BOT_ROLE` in `arcus/.env`, [main README](../README.md#two-machines-one-records-one-trades)) the Lighter scout does
 what the role says: a `recorder` records only, a `trader` neither records nor scans and follows the lists the other machine makes
-(the same `arcus sync` fetches Arcus's and Lighter's together), and neither a `recorder` nor a `scout` machine starts a run.
+(the same `tbot sync` fetches Arcus's and Lighter's together), and neither a `recorder` nor a `scout` machine starts a run.
 
 A standard Lighter account pays **0% maker and 0% taker**. The backtests on Lighter's recorded books put the best setups at **−0.1 to
 0.3 bp per dollar traded**, against 0.8–1.7 bp for the best Arcus ones. Only a few recorded days back that: it has never sent a live order.
@@ -26,12 +26,13 @@ A standard Lighter account pays **0% maker and 0% taker**. The backtests on Ligh
 | Command | What it does |
 |---|---|
 | `make install` | One time, in the repository root: all three bots into `arcus/.venv` |
-| `arcus up` | Everything in the background: the Arcus services, the Lighter scout (records every Lighter perp, scans every 30 min, runs the Lighter autopilot) and the one Telegram bot |
-| `arcus status` | One screen; its LIGHTER lines show the scout, the recorder and the run. `lighter status` has the lists too |
+| `lighter up` / `lighter scout` | The Lighter scout alone, in the background: records every Lighter perp, scans every 30 min, runs the Lighter autopilot |
+| `tbot up` | Everything this machine is for: the Arcus scout, this scout and the one Telegram bot (`tbot up lighter` = this scout, `tbot up telegram` = the bot) |
+| `lighter status` | This bot on one screen: the scout, the recorder, the run and the lists. `tbot status` shows all three bots |
 | `lighter run SPY "smart +1"` | Paper run in this terminal (Ctrl-C stops it; `--bg` in the background) |
 | `lighter pilot approve 1` | Run the Most Volume list's #1 in paper (`--list cheapest`/`max`, `--live`) |
 | `lighter close` / `lighter stop` | Close the position and stop / stop with the position kept |
-| `arcus down` | Stop the scouts and Telegram (`--all`: the runs too, positions kept) |
+| `lighter down` | Stop the scout (`--all`: the run too, position kept). `tbot down` stops everything |
 
 From the phone: `/l` (the Lighter menu), `/l_top3`, `/l_run`, `/l_status`, `/l_dashboard`, `/l_auto`, `/l_closeall`.
 
@@ -49,7 +50,7 @@ From the phone: `/l` (the Lighter menu), `/l_top3`, `/l_run`, `/l_status`, `/l_d
 10. [How it differs from the Arcus bot](#10-how-it-differs-from-the-arcus-bot)
 11. [Layout and troubleshooting](#11-layout-and-troubleshooting)
 
-Install, servers, the Docker recorder and `arcus export`/`import` are in the [main README](../README.md).
+Install, servers, the Docker recorder and `tbot export`/`import` are in the [main README](../README.md).
 
 ## 1. How it works
 
@@ -168,7 +169,7 @@ series. `/set capital 250` fixes it.
 
 ## 5. The scout: record, backtest, lists
 
-`lighter scout run` (started by `arcus up`):
+`lighter scout run` (started by `tbot up`):
 
 **Records** every active perp over two WebSockets into `data/tape/<MARKET>/<UTC day>/`: the best bid and offer on every change; every trade,
 with its taker transaction and both accounts; the top 20 levels of each side, once a second; mark, index and funding, once a second. About
@@ -320,8 +321,8 @@ starts, stops and ends.
 
 | Command | What |
 |---|---|
-| `arcus up` / `down [--all]` / `status` | The repository's services, this scout among them; one status screen |
-| `lighter up` / `down [--all]` / `status [--json]` | This scout alone; its own status screen with the lists |
+| `tbot up` / `down [--all]` / `status` | The whole machine's services, this scout among them (`tbot up lighter`: this one) |
+| `lighter up` / `scout [stop]` / `down [--all]` / `status [--json]` | This scout alone; `scout run` is the same daemon in this terminal; its own status screen with the lists |
 | `lighter markets` | Every Lighter perp: max leverage, tick, minimum order, 24 h volume |
 | `lighter record [--seconds N] [--markets A,B] [--no-depth]` | Record by hand (the scout does it) |
 | `lighter scout run [--record-only \| --follow]` / `scout scan [--capital 250] [--markets A,B] [--full] [--as-of now\|tape]` | The scout daemon (with no flag the machine's `BOT_ROLE` decides what it does) / one scan now |

@@ -1,11 +1,11 @@
-"""`arcus export` and `arcus import`: carry one machine's recordings, trades and state to another in ONE file.
+"""`tbot export` and `tbot import`: carry one machine's recordings, trades and state to another in ONE file.
 
-    arcus export                     everything new since the last export (the first time: everything)
-    arcus export --full              everything again
-    arcus export --days 2            a small one: all state and trades, the logs and tape of the last 2 UTC days
-    arcus export --since 2026-10-01  the same, from that UTC day on
-    arcus export --no-tape           state, trades and logs only (a quick error report)
-    arcus import [FILE]              on the other machine: check it, merge the tape, unpack the rest
+    tbot export                     everything new since the last export (the first time: everything)
+    tbot export --full              everything again
+    tbot export --days 2            a small one: all state and trades, the logs and tape of the last 2 UTC days
+    tbot export --since 2026-10-01  the same, from that UTC day on
+    tbot export --no-tape           state, trades and logs only (a quick error report)
+    tbot import [FILE]              on the other machine: check it, merge the tape, unpack the rest
 
 The file is treading-bot/exports/tb-<YYYYMMDD>-<HHMM>Z.tar (UTC). Inside it, under one folder of the same name:
 
@@ -20,9 +20,9 @@ every text file and database copy, in case a log line ever carried one.
 
 The live folders are only read: databases through SQLite's backup, each tape file through one open handle (the
 recorder replaces its current part every few minutes; a handle keeps the version it opened). So an export is safe
-while the bot trades and records. Only a plain `arcus export` or `--full` moves the "since the last export" mark.
+while the bot trades and records. Only a plain `tbot export` or `--full` moves the "since the last export" mark.
 
-`arcus import` never touches this machine's own state or logs: the tape is merged into the tape folders (a file
+`tbot import` never touches this machine's own state or logs: the tape is merged into the tape folders (a file
 already here is kept, unless the incoming one is the same recorder part with more rows), everything else goes to
 arcus/data/server-export/<name>/.
 """
@@ -521,7 +521,7 @@ def run_export(r: Roots, out_dir: Path | None = None, *, full: bool = False, day
             for i, (venue, market, day, p) in enumerate(parts, 1):
                 rel = f"tape/{venue}/{market}/{day}/{p.name}"
                 if not TAPE_RE.match(rel):
-                    warnings.append(f"{rel}: a name `arcus import` would refuse; left out")
+                    warnings.append(f"{rel}: a name `tbot import` would refuse; left out")
                     continue
                 try:
                     files.append((rel, *_add_file(tar, f"{name}/{rel}", p)))
@@ -603,7 +603,7 @@ def run_import(r: Roots, path: Path, *, say: Say = print) -> dict[str, Any]:
             raise ExportError(f"{path.name} is incomplete: the copy was cut off; copy it again") from None
         tops = {n.split("/", 1)[0] for n in members}
         if len(tops) != 1 or not NAME_RE.match(next(iter(tops))):
-            raise ExportError(f"{path.name} is not an export made by `arcus export`")
+            raise ExportError(f"{path.name} is not an export made by `tbot export`")
         name = next(iter(tops))
 
         def read(rel: str) -> bytes:
@@ -696,7 +696,7 @@ def run_import(r: Roots, path: Path, *, say: Say = print) -> dict[str, Any]:
     chain_ok = not (manifest.get("mode") == "new" and prev) or (out.parent / prev).is_dir()
     if not chain_ok:
         say(f"  NOTE: this export holds only what was new since {prev}, which was never imported here. Import that "
-            "one too, or make a complete one on the sender: arcus export --full")
+            "one too, or make a complete one on the sender: tbot export --full")
     (out.parent / "LATEST").write_text(name + "\n")
     say(f"  records, logs and scans: {out}")
     say(f"  read first: {out / 'SUMMARY.md'}")

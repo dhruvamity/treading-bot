@@ -1,4 +1,4 @@
-"""Background processes: the scout and a run, each with a pid file in state/ and a log in logs/. (`arcus up` in
+"""Background processes: the scout and a run, each with a pid file in state/ and a log in logs/. (`tbot up` in
 treading-bot/arcus starts this scout with everything else; the Telegram controls are in that one bot.)
 
     lighter up          the scout: recorder and scans

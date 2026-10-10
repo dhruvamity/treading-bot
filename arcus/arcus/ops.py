@@ -1,22 +1,22 @@
-"""`arcus up`, `arcus down`, `arcus status`: run everything a machine needs with one command.
+"""`tbot up`, `tbot down`, `tbot status`: run everything a machine needs with one command.
 
 Background services (each a normal `bot` command, detached, logging to logs/<name>.out, pid in state/<name>.pid):
 - scout:    `arcus scout run --depth` records every Arcus market and ranks setups (always);
-- telegram: `arcus telegram`, the phone control bot (when TELEGRAM_BOT_TOKEN and TELEGRAM_CHAT_ID are in .env);
+- telegram: `tbot telegram`, the phone control bot (when TELEGRAM_BOT_TOKEN and TELEGRAM_CHAT_ID are in .env);
 - guardian: `arcus guardian`, which cancels everything if the LIVE bot goes silent (only while a live bot runs:
             with no live bot it would fire at once).
 What "everything a machine needs" is depends on its role (BOT_ROLE in .env, arcus/common/role.py): a recorder runs
 the scout with --record-only and no Telegram bot, a trader runs it with --follow (no recording, no scans: it takes
 the lists from the other machine), a scout machine records and ranks without Telegram. The service keeps its name
-in every role, so `arcus down` and `arcus status` are the same everywhere.
+in every role, so `tbot down` and `tbot status` are the same everywhere.
 The trading bot itself is started by the pilot (`arcus pilot approve 1 [--live]`, or Telegram's /top3 -> Run) and is
-not a service here; `arcus down --all` stops it too (quotes cancelled, positions kept).
+not a service here; `tbot down --all` stops it too (quotes cancelled, positions kept).
 
 The bot's other two parts run under the same three commands:
-- Lighter (treading-bot/lighter): `arcus up` starts its scout too (it records every Lighter market and ranks setups;
+- Lighter (treading-bot/lighter): `tbot up` starts its scout too (it records every Lighter market and ranks setups;
   no keys, no orders). Its runs are started from Telegram (/l_run) or `lighter run ...`.
 - The funding arbitrage (treading-bot/arbitrage): its executor is started on request (/arb_start, `arbitrage start`).
-`arcus down --all` stops their runs too; positions are kept, with the venues' own stop orders.
+`tbot down --all` stops their runs too; positions are kept, with the venues' own stop orders.
 """
 
 from __future__ import annotations
@@ -161,6 +161,10 @@ def stop(app: AppConfig, name: str) -> tuple[bool, str]:
                    "current work is done")
 
 
+class _Skip(Exception):
+    pass
+
+
 # ------------------------------------------------------------------ the bot's other two parts
 def lighter_up(role: str = "all") -> str:
     """Start the Lighter scout unless it runs: recorder and scans (no keys, no orders), or what this machine's role
@@ -178,10 +182,12 @@ def lighter_up(role: str = "all") -> str:
             f"log {cfg.logs_dir / 'scout.out'}")
 
 
-def others_down(everything: bool) -> list[str]:
+def others_down(everything: bool, *, lighter: bool = True, arbitrage: bool = True) -> list[str]:
     """Stop the Lighter scout; with `everything` also the Lighter runs and the arbitrage executors (positions kept)."""
     out: list[str] = []
     try:
+        if not lighter:
+            raise _Skip
         from lighter_bot import ops as lops
         from lighter_bot.config import load
 
@@ -189,9 +195,11 @@ def others_down(everything: bool) -> list[str]:
         for name in ("scout",) + (("run-paper", "run-live") if everything else ()):
             if lops.stop(cfg, name):
                 out.append(f"lighter {name.replace('run-', '') + ' run' if name != 'scout' else 'scout'}: stopped")
+    except _Skip:
+        pass
     except Exception as e:
         out.append(f"lighter: {type(e).__name__}: {e}")
-    if everything:
+    if everything and arbitrage:
         try:
             from arbitrage import ops as aops
 
@@ -204,7 +212,7 @@ def others_down(everything: bool) -> list[str]:
 
 
 def others_status(role: str = "all") -> list[str]:
-    """The Lighter and funding-arbitrage lines of `arcus status`."""
+    """The Lighter and funding-arbitrage lines of `tbot status`."""
     lines = ["", "LIGHTER"]
     does = {"all": "records every Lighter market, ranks setups", "scout": "records every Lighter market, ranks setups",
             "recorder": "records every Lighter market", "trader": "follows the other machine's Lighter lists"}[role]
@@ -216,7 +224,7 @@ def others_status(role: str = "all") -> list[str]:
         pid = st["services"].get("scout")
         rec = st.get("recorder") or {}
         age = time.time() - float(rec.get("t") or 0) if rec else None
-        lines.append(f"  scout     {'running (pid ' + str(pid) + ')' if pid else 'STOPPED (arcus up starts it)':<46} "
+        lines.append(f"  scout     {'running (pid ' + str(pid) + ')' if pid else 'STOPPED (lighter up starts it)':<46} "
                      f"{does}")
         if rec:
             lines.append(f"  recorder  {rec.get('markets', 0)} markets · {int(rec.get('rows_total') or 0):,} rows · last "
@@ -250,6 +258,54 @@ def others_status(role: str = "all") -> list[str]:
     return lines
 
 
+PARTS = ("arcus", "lighter", "telegram")
+HINT = {"scout": "arcus up", "telegram": "tbot up telegram", "guardian": "arcus up"}
+PART_WHAT = {"arcus": "the Arcus scout (and the guardian while a live Arcus run exists)",
+             "lighter": "the Lighter scout", "telegram": "the one Telegram bot (all three bots)"}
+
+
+def up_parts(app: AppConfig, env: dict[str, str], live_running: bool, parts: tuple[str, ...]) -> list[str]:
+    """Start what these parts are, as far as this machine's role allows. Returns the lines to print."""
+    r = roles.role(env)
+    out: list[str] = []
+    want = wanted(app, env, live_running)
+    skip = skipped(env, live_running)
+    if "arcus" in parts:
+        for name in ("scout", "guardian"):
+            if name in want:
+                out.append(f"{start(app, name, r)[1]}  [{want[name]}]")
+            elif name in skip:
+                out.append(f"{name}: not started ({skip[name]})")
+    if "lighter" in parts:
+        out.append(lighter_up(r) + {"trader": "  [it follows the other machine's lists; no recording here]",
+                                    "recorder": "  [it records, with no keys and no orders; no scans here]"
+                                    }.get(r, "  [it records, with no keys and no orders]"))
+    if "telegram" in parts:
+        if "telegram" in want:
+            out.append(f"{start(app, 'telegram', r)[1]}  [{want['telegram']}]")
+        else:
+            out.append(f"telegram: not started ({skip.get('telegram', 'not set up')})")
+    return out
+
+
+def down_parts(app: AppConfig, parts: tuple[str, ...], *, everything: bool, live_running: bool) -> list[str]:
+    """Stop these parts. `everything` also stops the runs of the parts named (positions kept); the arbitrage's executors
+    stop only when all three parts are named."""
+    out: list[str] = []
+    if "telegram" in parts:
+        out.append(stop(app, "telegram")[1])
+    if "arcus" in parts:
+        out.append(stop(app, "scout")[1])
+        if everything or not live_running:
+            out.append(stop(app, "guardian")[1])
+        else:
+            out.append("guardian: left running, it watches the live bot (`--all` stops both)")
+    if "lighter" in parts:
+        out += others_down(everything and "lighter" in parts, lighter="lighter" in parts,
+                           arbitrage=everything and set(parts) >= set(PARTS))
+    return out
+
+
 def ago(seconds: float | None) -> str:
     if seconds is None:
         return "-"
@@ -258,8 +314,9 @@ def ago(seconds: float | None) -> str:
         if s >= 3600 else f"{s // 60}m {s % 60}s"
 
 
-def dashboard(app: AppConfig, env: dict[str, str], root: Path) -> str:
-    """One screen: the services, the trading bot, what is deployed, the last scan, the balance."""
+def dashboard(app: AppConfig, env: dict[str, str], root: Path, scope: str = "all") -> str:
+    """One screen: the services, the trading bot, what is deployed, the last scan, the balance. scope "arcus": the Arcus
+    part only (`tbot status`); "all": plus the Telegram bot, Lighter and the arbitrage (`tbot status`)."""
     from arcus.core.balances import BalanceLog, pnl
     from arcus.telegram.control import Control
 
@@ -270,15 +327,17 @@ def dashboard(app: AppConfig, env: dict[str, str], root: Path) -> str:
     lines.append("SERVICES")
     skip = skipped(env, live)
     for base in SERVICES:
+        if scope == "arcus" and base.name == "telegram":
+            continue            # the Telegram bot belongs to no one bot: `tbot status` shows it
         s = service(base.name, r)
         pid = pid_of(app, s.name)
         state = f"running {ago(uptime_s(app, s.name))} (pid {pid})" if pid else \
-            f"off: {skip[s.name]}" if s.name in skip else "STOPPED (arcus up starts it)"
+            f"off: {skip[s.name]}" if s.name in skip else f"STOPPED ({HINT.get(s.name, 'tbot up')} starts it)"
         lines.append(f"  {s.name:<9} {state:<46} {s.what}")
     if r == "trader":
         from arcus import handoff
 
-        lines += ["", "THE OTHER MACHINE (arcus sync)"] + ["  " + x for x in handoff.status_lines(app.state_dir, env)]
+        lines += ["", "THE OTHER MACHINE (tbot sync)"] + ["  " + x for x in handoff.status_lines(app.state_dir, env)]
     lines += ["", "TRADING BOT"]
     modes = [m for m in ("live", "paper") if ctl.is_running(m)]
     if not modes:
@@ -319,7 +378,7 @@ def dashboard(app: AppConfig, env: dict[str, str], root: Path) -> str:
             lines.append("   nothing within the budget (/top3 in Telegram shows the closest)")
     except (OSError, ValueError, KeyError):
         lines.append({"recorder": "  this machine does not scan (it records; scan where the tape is brought to)",
-                      "trader": "  no scan here yet: the lists come from the other machine (arcus sync status)"
+                      "trader": "  no scan here yet: the lists come from the other machine (tbot sync status)"
                       }.get(r, "  no scan yet"))
     lines += ["", "BALANCE"]
     last = BalanceLog(Path(app.state_dir) / "balances.jsonl").latest()
@@ -329,4 +388,4 @@ def dashboard(app: AppConfig, env: dict[str, str], root: Path) -> str:
                      + (f" · trading PnL ${p:+,.2f}" if p is not None else ""))
     else:
         lines.append("  no reading yet (the scout reads it before each scan once ARCUS_ADDRESS is in .env)")
-    return "\n".join(lines + others_status(r))
+    return "\n".join(lines + (others_status(r) if scope == "all" else []))

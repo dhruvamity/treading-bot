@@ -92,7 +92,7 @@ class Watcher:
                                       last_fill_ts=self.control.last_fill_ts(mode), summary_start=now)
             return
         name = mode.upper()
-        # ---- arcus up / down
+        # ---- tbot up / down
         if m.running and not v.running:
             # a stop on purpose: /stop here, a close or a replace by the pilot (up to 10 min of closing), or a bot
             # whose last heartbeat says it pulled its quotes and stopped (2026-09-26: a replace said "LIVE DOWN")

@@ -20,35 +20,60 @@ Both venues charge funding every hour: rate × position value; a positive rate m
 market **short on the venue with the higher rate and long on the other**, the same size on both: the price moves
 cancel, and each hour pays the difference between the two rates on the size of one leg. No directional bet.
 
-## 2. What 99 days of history say
+## 2. What the history says: how long to hold
 
-`arbitrage backtest` replays every hour both venues have published (26 Jun – 3 Oct 2026, 36 markets) with the rules the
-live bot uses. At $240 in all, half on each venue, one position at a time (`arbitrage backtest --capital 240` prints it):
+`arbitrage study` replays every hour both venues have published for the stocks, indices and commodities they share
+(25 markets, 26 Jun – 10 Oct 2026, 106 days; `arbitrage history --update` adds new hours in minutes). **Both venues pay
+funding every hour**, so there is no "next settlement in three hours" to wait for: a payment is always less than an hour
+away, and one payment is small.
 
-| Markets | $ a day | A year on the capital | Positions | Closed by a stop | Money moved between venues |
+**After the bot's entry rule says go, what the next H hours paid** (funding on one leg, in bp of the position; every
+hour of every market is a sample):
+
+| Held | Funding collected | After fills of 4 bp | 8 bp | 16 bp | Share that beat 8 bp |
 |---|---|---|---|---|---|
-| All 36 | $0.39 | 59% | 28 | 16 | 17 times |
-| Without CASHCAT | $0.07 | 11% | 23 | 8 | 10 times |
-| Without the small tokens | $0.09 | 13% | 21 | 7 | 8 times |
-| Stocks and ETFs only | $0.05 | 7% | 10 | 1 | 4 times |
-| BTC, ETH, SOL, XRP, HYPE, ZEC | $0.00 | 0% | 11 | 4 | 4 times |
+| 1 h (one payment) | 0.5 bp | −3.5 | −7.5 | −15.5 | 0% |
+| 3 h | 1.3 | −2.7 | −6.7 | −14.7 | 1% |
+| 12 h | 3.2 | −0.8 | −4.8 | −12.8 | 8% |
+| 24 h | 5.4 | +1.4 | −2.6 | −10.6 | 20% |
+| 48 h | 8.3 | +4.3 | +0.3 | −7.7 | 43% |
+| 72 h | 11.2 | +7.2 | +3.2 | −4.8 | 60% |
+| 5 days | 16.7 | +12.7 | +8.7 | +0.7 | 77% |
+| 7 days | 21.9 | +17.9 | +13.9 | +5.9 | 86% |
+| 14 days | 41.2 | +37.2 | +33.2 | +25.2 | 93% |
 
-- **Four fifths of the result is one token.** CASHCAT paid about 195% a year more on Arcus than on Lighter. It also
-  moves 10% a day, so it is held at 1x with a 40% stop, and 15 of its 22 positions ended at that stop.
-- **On stocks Arcus pays about 7% a year more than Lighter on weekdays and nothing more at weekends** (Arcus locks
-  its rate while the underlying is closed). That is the steady part: about 5 cents a day at $240.
-- **It scales with the money** ($1.61 a day at $1,000 on the same rules), except the CASHCAT part, which a thin
-  market limits.
-- **Holding beats timing single payments.** Opening before a payment and closing after it, whenever the last payment
-  covered the four fills, made $0.06 a day against $0.39.
-- **The money has to be moved by hand.** A closed position leaves its gain on one venue and its loss on the other.
-  The smaller balance sets the next position, so without moving money back the result halves ($0.19 a day).
-- **What the replay cannot know:** real fills against the mid (1 bp a fill is assumed), the gap between the two
-  venues' prices at the moment of a stop, and margin rules or volumes other than today's.
-- **The fill cost matters less than it looks:** at 4 bp a fill the replay still makes $0.39 a day, because the
-  opening rule then leaves out the large positions that pay little. The one paper round trip so far (PONS, 4 Oct,
-  $149 a leg, all four fills as maker) cost $0.25: about 4 bp a fill, where the plan had read 2 bp from the two
-  books. On the small tokens, count on the dearer figure.
+Getting in and out is four fills. At 1 bp a fill that is 4 bp, at the 2 bp the books usually show 8 bp, and the one paper
+round trip so far cost 16 bp. The two halves of the history agree (one payment 0.6 and 0.45 bp; three days 10.4 and 11.3 bp).
+
+- **Closing after the next payment never pays.** One payment is half a basis point against 4 to 16 for the fills: it
+  lost in more than 99% of 6,784 cases. The same holds for 3, 6 and 12 hours.
+- **It breaks even after about one day at the best fills, two days at usual ones, five days at poor ones,** and keeps
+  improving the longer it is held, because the fills are paid once.
+- **Hold it until the difference is gone, which is what the bot does.** In the full replay (one position at a time, sizes,
+  stops) the rule "keep it at least a day, then leave when the last 24 hours and the next payment pay nothing" earned
+  funding less every fill and stop of $0.07 to $0.20 a day at $240 (fills at 4 to 1 bp), with positions held four to
+  seven days on average. That was the best, or within 4 cents a day of the best, at every fill cost. Closing on a
+  weekly clock or holding at least three days came out about the same; closing every 24 hours earned a third as much
+  or lost; every 1 to 6 hours lost $0.16 to $1.47 a day.
+- **Weekends pay almost nothing.** Arcus's stock funding stops while the underlying is closed: the difference is 5 to 13%
+  a year on weekdays and about 1% at weekends. A position opened on a Friday collected 7 bp over its next three days,
+  one opened on Tuesday or Wednesday 13 to 15. Holding through a weekend costs nothing; closing for it costs the fills.
+- **The venues' maximum leverage is not the most profitable.** The stop sits half the way to liquidation, so more
+  leverage means a nearer stop. With the stop 3 daily moves away (the default, 2.9x on average) the replay had no stop
+  in 106 days; at 2 daily moves (4.3x) 5 stops and 6 transfers of money between the venues; at the maximum the venues
+  allow (9.3x) 50 stops and 31 transfers, and the fills ate the extra funding ($0.086 a day against $0.136 at 2 moves).
+  `arbitrage set stop_sigmas 2` is the step the history supports; the replay also does not know the gap between the two
+  venues' prices at the moment of a stop, which makes near stops look better than they are.
+- **Closing early to keep the money even did not help.** Closing at 40% / 60% earned the same as letting the stop do it
+  (at about 30% / 70%) with more than twice the transfers; at 45% / 55% it earned less.
+- **How sure:** the first table rests on thousands of hours and both halves agree. The full replay has 12 to 20 positions,
+  and each choice changes every later one, so a week of new data reorders its rows; its "prices" column (the two legs'
+  closing prices against their opening ones) is noise at that count. Trust the direction, not the cents.
+
+What the replay cannot know: real fills against the mid, the gap between the venues at a stop, and margin rules or
+volumes other than today's. Money has to be moved by hand between the venues after a stop (section 6a). An earlier
+replay that included crypto made four fifths of its result from one token (CASHCAT) at a 40% stop; the bot no longer
+trades crypto.
 
 ## 3. Commands
 
@@ -58,7 +83,9 @@ arbitrage scan               # rank the markets, with the accounts' own free col
 arbitrage scan --arcus 120 --lighter 120 --feeds
 arbitrage plan BABA --arcus 120 --lighter 120
 arbitrage history            # download both venues' funding and price history (about an hour; arbitrage/data/history)
+arbitrage history --update   # after that: only the hours since (minutes)
 arbitrage backtest --capital 240   # the rules replayed on all of it
+arbitrage study --capital 240      # how long to hold: every holding time, the stop's distance, by weekday (section 2)
 
 arbitrage run --arcus 120 --lighter 120    # the executor on PAPER, in this terminal: real prices and funding,
                                            # simulated orders
@@ -83,6 +110,10 @@ The same from the phone, in the one Telegram bot: `/arb_scan`, `/arb_status`, `/
 `status`, `close`, `pause` and `resume` act on the paper bot; add `--live` for the live one.
 
 ## 4. The rules
+
+**Which markets.** Stocks, indices and commodities only. A market Arcus classes as crypto is never opened
+(`rwa_only`, on by default; `arbitrage set rwa_only 0` allows every market again). This rule is the arbitrage's alone:
+the market-making bots trade what you tell them.
 
 **When it opens.** A market is opened only when all of these hold (`arbitrage scan` lists it under "Worth holding now"):
 - the next payment, the last 24 hours and the last 7 days agree on which venue pays more;
@@ -115,6 +146,16 @@ would cost more, it keeps following, and after `enter_timeout_s` (180 s) it cros
 cost. Exits work the same way with reduce-only orders. A stop, a vanished leg or `arbitrage close --now` uses taker orders
 on both legs at once.
 
+**The money on the two venues.** The legs are the same size, so the position is neutral: what one leg gains the other
+loses, and the gain lands on one venue while the loss lands on the other. When a position is closed and one venue holds
+less than `rebalance_share` of the money (0.40 = under 40%), the bot says at once, in Telegram, the exact amount to move
+and in which direction (`MOVE $50.00 from lighter to arcus ... after it each has $100.00`), and repeats it every 6 hours
+while it stays uneven. It keeps trading meanwhile, sized by the smaller balance. `arbitrage set drift_close_share 0.35`
+adds a close before the stop: once an open position has moved that much of the money to one venue (35% / 65%), it is
+closed with maker orders in the 15 minutes after the next funding payment, and the same message follows. It is off by
+default because in the history it cost more than it saved (section 2): the stop already closes a position at about
+30% / 70%. The bot cannot move the money itself (section 6a).
+
 **What it never does.** Hold one leg without the other beyond those limits; open over a position it did not make;
 keep a position the venues will not take stop orders for (it closes, pauses and says so); move money between venues.
 
@@ -132,7 +173,7 @@ Not started by anyone yet. Before the first run:
 1. **Money on both venues.** `arbitrage scan` shows each venue's free collateral; the smaller one sets the size.
 2. **An account of its own on each venue, or the market-making bots stopped.** Two programs trading one market on
    one account each treat the other's position as theirs. On Lighter also use an API key of its own.
-3. `ARB_LIVE=1` in `arcus/.env`, then `arcus down` and `arcus up` so the Telegram bot sees it.
+3. `ARB_LIVE=1` in `arcus/.env`, then `tbot down` and `tbot up` so the Telegram bot sees it.
 4. **Small first:** `arbitrage set max_notional_usd 30`, then `/arb_start live` in Telegram and type back the code it
    shows (or `arbitrage start --live` in a terminal and type LIVE). Watch `/arb_status`.
 
@@ -151,6 +192,26 @@ What the first live run will prove or disprove, because nothing could be sent wh
 
 If a venue refuses the stop orders the bot closes the position, pauses and says so, instead of holding it unprotected
 or opening it again.
+
+## 6a. Moving money between the venues
+
+Neither venue can send to the other, and neither bot does it. Both settle on the same chain (Robinhood Chain, id
+4663) in the same token (USDG), so a move is two steps through your own wallet, with no bridge:
+
+| Step | How | What must sign |
+|---|---|---|
+| Lighter → your wallet | "secure" withdrawal (`withdraw` in Lighter's SDK); about 5.5 minutes (`withdrawalDelay` 328 s) | the Lighter API key is enough; it can only go to the wallet that owns the account |
+| Lighter → your wallet, fast | `fastwithdraw`, 1 USDG minimum | your wallet's private key as well |
+| Your wallet → Lighter | call `deposit` on Lighter's contract, or send USDG to your Lighter "intent address"; 1 USDG minimum | your wallet (an on-chain transaction, gas) |
+| Arcus → your wallet | `POST /v1/withdraw`, to the owning wallet only | your wallet (a typed-data signature); an ordinary API key is trade-only |
+| Your wallet → Arcus | deposit into Arcus's vault contract (the web app's Deposit button) | your wallet (an on-chain transaction, gas) |
+
+So a transfer could be scripted, but only by a program that holds **the wallet's private key**: that key can move
+everything you own on both venues to any address, which is why it is not on the server and why the bot only tells you
+the amount. If you want it automatic, the safe shape is a wallet used for nothing else, holding only the arbitrage's
+money, with the script on your own computer. That script is not written: Arcus's deposit contract is not in the API
+documentation, and nothing here has moved a dollar between the venues. Do the first transfer by hand with the smallest
+amount (1 USDG) each way and note how long each step takes.
 
 ## 7. Telegram
 

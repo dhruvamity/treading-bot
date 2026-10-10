@@ -1,16 +1,18 @@
-"""Bot command line (`bot <command>`). Run `bot -h` for the list.
+"""The Arcus command line (`arcus <command>`; `arcus -h` lists them). What belongs to the whole machine (all three
+bots, the Telegram bot, export, import) is `tbot` (main_tbot below).
 
-    arcus up                        start everything this machine should run (scout, Telegram, guardian)
-    arcus status                    one screen: services, trading bot, what is deployed, last scan, balance
+    arcus up                        start the Arcus part: its scout, and the guardian while a live run exists
+    arcus scout [stop]              start (or stop) the Arcus scout alone; `scout run|scan|limits|playbook` as before
+    arcus status                    the Arcus part on one screen: services, trading bot, what is deployed, last scan
     arcus dashboard                 live screen, every 10 s: today's volume and PnL, the capital's profit or loss
     arcus pilot approve 1 [--live]  trade the scout's #1 setup (paper, or real money)
         [--list volume|cheapest|max] [--max-lev]   from another top 3, or at the market's maximum leverage
     arcus pilot close               close the position and stop trading
-    arcus down [--all]              stop the services (--all: the trading bot too, positions kept)
+    arcus down [--all]              stop the Arcus part (--all: its runs too, positions kept)
     arcus doctor pilot              is everything ready for live? (reads only)
-    arcus export                    one file with everything recorded and traded since the last export (no keys)
-    arcus import [FILE]             take such a file in on another machine
-    arcus sync status               two machines: a trader takes the lists from the machine that makes them
+    tbot export                    one file with everything recorded and traded since the last export (no keys)
+    tbot import [FILE]             take such a file in on another machine
+    tbot sync status               two machines: a trader takes the lists from the machine that makes them
 
 Commands that touch a real account (cancel-all, flatten) ask for CONFIRM.
 """
@@ -190,47 +192,98 @@ def cmd_run(a: argparse.Namespace) -> None:
         sys.exit(2)
 
 
-def cmd_up(a: argparse.Namespace) -> None:
-    """Start, in the background, every service this machine should run (arcus/ops.py); then show the status."""
+def _stop_runs(app: Any, label: str) -> None:
+    """Ask every Arcus run to stop (quotes cancelled, positions kept) and wait up to 30 s."""
+    from arcus.telegram.control import Control
+
+    ctl = Control(app)
+    for mode in ctl.running_modes():
+        ctl.request_stop(mode, f"{label} --all")
+        print(f"{mode} trading bot: stop requested (quotes cancelled, positions kept)")
+    t0 = time.time()
+    while ctl.running_modes() and time.time() - t0 < 30:
+        time.sleep(1)
+    for mode in ctl.running_modes():
+        print(f"{mode} trading bot: still running after 30 s; check `arcus status`")
+
+
+def _up(parts: tuple[str, ...], show: bool = True) -> None:
     from arcus import ops
     from arcus.telegram.control import Control
 
     app = load_app()
-    r = _role()
+    _role()
     live = Control(app).is_running("live")
-    for name, why in ops.wanted(app, dict(os.environ), live).items():
-        print(f"{ops.start(app, name, r)[1]}  [{why}]")
-    for name, why in ops.skipped(dict(os.environ), live).items():
-        print(f"{name}: not started ({why})")
-    print(ops.lighter_up(r) + {"trader": "  [it follows the other machine's lists; no recording here]",
-                               "recorder": "  [it records, with no keys and no orders; no scans here]"
-                               }.get(r, "  [always: it records, with no keys and no orders]"))
-    print("\n" + ops.dashboard(app, dict(os.environ), Path.cwd()))
+    for line in ops.up_parts(app, dict(os.environ), live, parts):
+        print(line)
+    if show:
+        print("\n" + ops.dashboard(app, dict(os.environ), Path.cwd(), "all" if len(parts) > 1 or "arcus" not in parts
+                                   else "arcus"))
+
+
+def _down(parts: tuple[str, ...], everything: bool, label: str) -> None:
+    from arcus import ops
+    from arcus.telegram.control import Control
+
+    app = load_app()
+    if everything and "arcus" in parts:
+        _stop_runs(app, label)
+    for line in ops.down_parts(app, parts, everything=everything, live_running=Control(app).is_running("live")):
+        print(line)
+
+
+def cmd_up(a: argparse.Namespace) -> None:
+    """`arcus up`: the Arcus part only (its scout, and the guardian while a live run exists). `tbot up` starts all."""
+    _up(("arcus",))
+    print("\nOnly Arcus was started. The Lighter scout is `lighter up`, the Telegram bot `tbot up telegram`, "
+          "everything `tbot up`.")
 
 
 def cmd_down(a: argparse.Namespace) -> None:
-    """Stop the services; --all also stops the trading bot (quotes cancelled, positions kept) and its guardian."""
-    from arcus import ops
-    from arcus.telegram.control import Control
+    """`arcus down [--all]`: stop the Arcus part; --all also stops its runs (quotes cancelled, positions kept)."""
+    _down(("arcus",), bool(a.all), "arcus down")
 
-    app = load_app()
-    ctl = Control(app)
-    if a.all:
-        for mode in ctl.running_modes():
-            ctl.request_stop(mode, "arcus down --all")
-            print(f"{mode} trading bot: stop requested (quotes cancelled, positions kept)")
-        t0 = time.time()
-        while ctl.running_modes() and time.time() - t0 < 30:
-            time.sleep(1)
-        for mode in ctl.running_modes():
-            print(f"{mode} trading bot: still running after 30 s; check `arcus status`")
-    names = ["telegram", "scout"] + (["guardian"] if a.all or not ctl.is_running("live") else [])
-    for name in names:
-        print(ops.stop(app, name)[1])
-    if "guardian" not in names:
-        print("guardian: left running, it watches the live bot (arcus down --all stops both)")
-    for line in ops.others_down(bool(a.all)):
-        print(line)
+
+def _parts(names: list[str]) -> tuple[str, ...]:
+    from arcus import ops
+
+    if not names:
+        return ops.PARTS
+    bad = [n for n in names if n not in (*ops.PARTS, "scouts", "both", "all")]
+    if bad:
+        sys.exit(f"tbot: unknown part {bad[0]!r}: arcus, lighter, telegram, scouts (= arcus and lighter), or nothing "
+                 "for all of them")
+    out: list[str] = []
+    for n in names:
+        out += ["arcus", "lighter"] if n in ("scouts", "both") else list(ops.PARTS) if n == "all" else [n]
+    return tuple(dict.fromkeys(out))
+
+
+def cmd_tbot_up(a: argparse.Namespace) -> None:
+    """`tbot up [arcus] [lighter] [telegram] [scouts]`: start those parts (none named: all of them)."""
+    _up(_parts(a.parts))
+
+
+def cmd_tbot_down(a: argparse.Namespace) -> None:
+    """`tbot down [parts] [--all]`: stop those parts; --all also stops the runs of those parts (positions kept)."""
+    _down(_parts(a.parts), bool(a.all), "tbot down")
+
+
+def cmd_tbot_status(a: argparse.Namespace) -> None:
+    """`tbot status`: one screen for the whole machine."""
+    from arcus import ops
+
+    _role()
+    print(ops.dashboard(load_app(), dict(os.environ), Path.cwd(), "all"))
+
+
+def cmd_tbot_scout(a: argparse.Namespace) -> None:
+    """`tbot scout [arcus|lighter|both] [--stop]`: start (or stop) the scouts."""
+    which = {"arcus": ("arcus",), "lighter": ("lighter",), "both": ("arcus", "lighter")}[a.which]
+    if a.stop:
+        _down(which, False, "tbot scout")
+    else:
+        _up(which, show=False)
 
 
 def cmd_dashboard(a: argparse.Namespace) -> None:
@@ -274,7 +327,8 @@ def cmd_status(a: argparse.Namespace) -> None:
         from arcus import ops
 
         _role()      # a word in BOT_ROLE that is not a role: say so instead of a traceback
-        print(ops.dashboard(app, dict(os.environ), Path.cwd()))
+        print(ops.dashboard(app, dict(os.environ), Path.cwd(), "arcus"))
+        print("\n(the Arcus part only: `tbot status` shows the whole machine)")
         return
     modes = [a.mode] if a.mode else ["live", "testnet", "paper"]
     out: dict[str, Any] = {}
@@ -581,6 +635,9 @@ def cmd_scout(a: argparse.Namespace) -> None:
     from arcus.scout.scan import scan, table
     from arcus.scout.service import run_service, save_scan
 
+    if a.action in ("start", "stop"):
+        (_up(("arcus",), show=False) if a.action == "start" else _down(("arcus",), False, "arcus scout"))
+        return
     app = load_app()
     setup_logging(app.logs_dir)
     root = Path.cwd()
@@ -636,7 +693,7 @@ def cmd_scout(a: argparse.Namespace) -> None:
 
             as_of = tape_end_us(root / "data" / "scout")
             if as_of is None:
-                sys.exit("scan: no tape under data/scout/tape (arcus import first)")
+                sys.exit("scan: no tape under data/scout/tape (tbot import first)")
             print(f"scanning as of the end of the tape: {dt.datetime.fromtimestamp(as_of / 1e6, dt.UTC):%Y-%m-%d %H:%M} UTC")
         res = scan(root / "data" / "scout", now_us=as_of, workers=n, markets=a.markets or None, ladder=a.ladder,
                    capital=cap, pct=z.pct(), capital_source=src, shortlist=not a.full,
@@ -805,15 +862,15 @@ def cmd_export(a: argparse.Namespace) -> None:
           + (f"; {len(res.warnings)} files not copied whole (listed in its SUMMARY.md)" if res.warnings else ""))
     for name in res.removed:
         print(f"removed the older {name} (--keep {a.keep}; its data is still in the live folders)")
-    print("the next `arcus export` sends what is new since this one" if res.cut.moves_mark else
-          "the next plain `arcus export` still sends everything since the last full or plain one")
+    print("the next `tbot export` sends what is new since this one" if res.cut.moves_mark else
+          "the next plain `tbot export` still sends everything since the last full or plain one")
     print("\nCopy it to the other machine, for example from there:\n"
           f"  scp {getpass.getuser()}@THIS-SERVER:{res.path} ~/Downloads/\n"
-          "then, in treading-bot/arcus there:\n  .venv/bin/arcus import")
+          "then, in treading-bot/arcus there:\n  .venv/bin/tbot import")
 
 
 def cmd_import(a: argparse.Namespace) -> None:
-    """Take in a file made by `arcus export` on another machine: check it, merge the tape, unpack the rest."""
+    """Take in a file made by `tbot export` on another machine: check it, merge the tape, unpack the rest."""
     from arcus.export import ExportError, Roots, find_export, run_import
 
     roots = Roots.find(Path.cwd())
@@ -835,7 +892,7 @@ def cmd_sync(a: argparse.Namespace) -> None:
     where = handoff.roots(Path.cwd())
     state = Path(app.state_dir)
     try:
-        if a.action == "serve":       # the other end of a pull: only ever run by sshd, through `arcus sync allow`
+        if a.action == "serve":       # the other end of a pull: only ever run by sshd, through `tbot sync allow`
             sys.stdout.buffer.write(handoff.pack(where, handoff.since_of(os.environ.get("SSH_ORIGINAL_COMMAND"))))
             sys.stdout.buffer.flush()
         elif a.action == "receive":   # the other end of a push
@@ -848,14 +905,14 @@ def cmd_sync(a: argparse.Namespace) -> None:
         elif a.action == "key":
             pub = handoff.make_key(handoff.key_path())
             print(f"{pub}\n\nOn the OTHER machine (the one that records), in treading-bot/arcus, paste that line "
-                  f"in quotes:\n  .venv/bin/arcus sync allow '{pub}'\n\nThen here, put its address in .env "
-                  f"({handoff.FROM}=user@its-address) and try:\n  .venv/bin/arcus sync pull")
+                  f"in quotes:\n  .venv/bin/tbot sync allow '{pub}'\n\nThen here, put its address in .env "
+                  f"({handoff.FROM}=user@its-address) and try:\n  .venv/bin/tbot sync pull")
         elif a.action == "allow":
             if not a.arg:
-                raise handoff.SyncError("give the public key `arcus sync key` printed on the trader, in quotes")
+                raise handoff.SyncError("give the public key `tbot sync key` printed on the trader, in quotes")
             line, added = handoff.allow(a.arg, Path.cwd())
             print(("Added to ~/.ssh/authorized_keys:" if added else "Already in ~/.ssh/authorized_keys:") + f"\n  {line}"
-                  "\nThat key can now run `arcus sync serve` here and nothing else: no shell, no other file.")
+                  "\nThat key can now run `tbot sync serve` here and nothing else: no shell, no other file.")
         elif a.action == "pull":
             why = handoff.may_receive()
             if why:
@@ -872,10 +929,10 @@ def cmd_sync(a: argparse.Namespace) -> None:
             r = _role()
             print(f"this machine: {r} ({roles.WHAT[r]})")
             print("\n".join(handoff.status_lines(state)) if r == "trader" else
-                  "it makes its own lists: nothing to fetch. A trader fetches from it once `arcus sync allow` is done "
+                  "it makes its own lists: nothing to fetch. A trader fetches from it once `tbot sync allow` is done "
                   "here." if roles.ranks(r) else
                   "it records only: it has no lists to hand over (scan where the tape is brought to, then "
-                  "`arcus sync push user@trader` from there).")
+                  "`tbot sync push user@trader` from there).")
     except (handoff.SyncError, ValueError) as e:
         print(f"sync: {e}", file=sys.stderr)
         sys.exit(2)
@@ -970,11 +1027,13 @@ def build_parser() -> argparse.ArgumentParser:
     sp.add_argument("--adopt-positions", action="store_true", help="an existing position is the bot's to manage")
     sp.add_argument("--seconds", type=float, help="stop after this long")
     sp.add_argument("--state-db", help=argparse.SUPPRESS)
-    sp = add("up", cmd_up, "start everything this machine should run (BOT_ROLE in .env): both scouts, the "
-             "Telegram bot, guardian")
-    sp = add("down", cmd_down, "stop the scouts and the Telegram bot; --all also stops every run (positions kept)")
+    sp = add("up", cmd_up, "start the Arcus part (its scout, and the guardian while a live run exists); `tbot up` "
+             "starts everything")
+    sp = add("down", cmd_down, "stop the Arcus part; --all also stops its runs (positions kept); `tbot down` stops "
+             "everything")
     sp.add_argument("--all", action="store_true")
-    sp = add("status", cmd_status, "one screen: services, trading bot, what is deployed, last scan, balance")
+    sp = add("status", cmd_status, "the Arcus part on one screen: services, run, what is deployed, last scan, balance "
+             "(`tbot status`: the whole machine)")
     sp.add_argument("--mode", choices=["live", "testnet", "paper"])
     sp.add_argument("--json", action="store_true", help="the per-mode details as JSON (heartbeat, orders, positions)")
     sp = add("dashboard", cmd_dashboard, "live screen, every 10 s: today's volume and PnL, the capital's profit or loss")
@@ -999,8 +1058,10 @@ def build_parser() -> argparse.ArgumentParser:
     sp = add("telegram", cmd_telegram, "Telegram control bot: status, pause/stop/run, cancel/flatten, live alerts")
     sp.add_argument("--read-only", action="store_true", help="status and alerts only; every control is refused")
     sp = add("scout", cmd_scout, "record all Arcus perps, backtest every strategy on each, rank what to run now")
-    sp.add_argument("action", choices=["run", "scan", "limits", "playbook"],
-                    help="run: record + scan every N min (the daemon); scan: one scan now; limits: the least and the "
+    sp.add_argument("action", nargs="?", default="start",
+                    choices=["start", "stop", "run", "scan", "limits", "playbook"],
+                    help="start (the default): the scout in the background, like `arcus up` but for it alone; stop: "
+                         "stop it; run: record + scan every N min in this terminal (the daemon); scan: one scan now; limits: the least and the "
                          "most capital each market can use; playbook: build and print the autopilot's table (cost "
                          "per session and market state)")
     sp.add_argument("--every-min", type=float, default=30)
@@ -1010,7 +1071,7 @@ def build_parser() -> argparse.ArgumentParser:
                     help="scan: re-run the last 24 h for every setting, not only those passing on their full days")
     sp.add_argument("--as-of", choices=["now", "tape"], default="now",
                     help="scan: judge the markets as of now (default) or as of the end of the tape, for a tape recorded "
-                         "elsewhere and brought here with `arcus import`")
+                         "elsewhere and brought here with `tbot import`")
     sp.add_argument("--markets", nargs="*")
     sp.add_argument("--limit", type=int, default=25)
     sp.add_argument("--ladder", action="store_true",
@@ -1032,7 +1093,7 @@ def build_parser() -> argparse.ArgumentParser:
     sp.add_argument("--list", choices=["all", "volume", "cheapest", "max"], default="all")
     sp.add_argument("-n", type=int, default=3, help="how many per list (default 3)")
     sp.add_argument("--scan", action="store_true",
-                    help="scan both bots first, as of the end of the tape (the tape brought home with `arcus import`)")
+                    help="scan both bots first, as of the end of the tape (the tape brought home with `tbot import`)")
     sp.add_argument("--capital", help="with --scan: the capital to rank for (default: the settings' capital, "
                                       "$100 without a funded account)")
     sp = add("pilot", cmd_pilot, "one deployment at a time: status, approve N [--live], close")
@@ -1082,7 +1143,7 @@ def build_parser() -> argparse.ArgumentParser:
                     help="the drawdown limit is a %% of this (default 0: the account's equity when the guardian starts)")
     sp.add_argument("--testnet", action="store_true")
     sp = add("export", cmd_export, "one file with everything new since the last export: tape, trades, state, logs "
-             "(no keys); for `arcus import` on another machine")
+             "(no keys); for `tbot import` on another machine")
     sp.add_argument("--full", action="store_true", help="everything, not only what is new since the last export")
     sp.add_argument("--days", type=int, help="a small one: all state and trades, logs and tape of the last N UTC days")
     sp.add_argument("--since", help="the same from a UTC day on: 2026-10-01")
@@ -1092,7 +1153,7 @@ def build_parser() -> argparse.ArgumentParser:
     sp.add_argument("--tag", help="a word for the file name, e.g. tokyo -> tb-tokyo-20261006-1612Z.tar")
     sp.add_argument("--no-probe", action="store_true", help="skip timing the connection to the venues")
     sp.add_argument("--force", action="store_true", help="export even if it leaves under 6 GB of free disk")
-    sp = add("import", cmd_import, "take in a file made by `arcus export`: check it, merge the tape, unpack the rest")
+    sp = add("import", cmd_import, "take in a file made by `tbot export`: check it, merge the tape, unpack the rest")
     sp.add_argument("path", nargs="?", help="the tb-*.tar file or its folder (default: the newest in "
                                             "treading-bot/exports or ~/Downloads)")
     sp = add("sync", cmd_sync, "two machines: a trader takes the lists from the machine that makes them")
@@ -1111,6 +1172,50 @@ def build_parser() -> argparse.ArgumentParser:
     sp.add_argument("--testnet", action="store_true")
     add("region-check", cmd_region_check, "may this server's IP trade Arcus perps? (reads only)")
     return p
+
+
+TBOT_DELEGATED = ("telegram", "export", "import", "sync", "recommend")
+TBOT_HELP = """tbot: the commands that belong to no single bot (one install, three bots, one Telegram bot)
+
+  tbot up [arcus] [lighter] [telegram]   start those parts; with none named, all of them (BOT_ROLE decides what a part is)
+  tbot down [parts] [--all]              stop them; --all also stops their runs (quotes cancelled, positions kept)
+  tbot status                            one screen for the whole machine
+  tbot scout [arcus|lighter|both]        start the scouts (--stop stops them)
+  tbot telegram [--read-only]            the one Telegram bot for Arcus, Lighter and the arbitrage, in this terminal
+  tbot recommend [MARKET ...] [--scan]   the best setups of each list, as the Telegram lines to paste
+  tbot export / import / sync            one file with everything recorded and traded / take it in / two machines
+
+parts: arcus = its scout (and the guardian while a live run exists), lighter = its scout, telegram = the bot, scouts =
+arcus + lighter. Each bot also has its own: `arcus up|down|status|scout`, `lighter up|down|status|scout`, `arbitrage start|stop|status`.
+"""
+
+
+def main_tbot(argv: list[str] | None = None) -> None:
+    """`tbot`: what belongs to the whole machine, not to one bot. The commands that already exist (telegram, export,
+    import, sync, recommend, doctor, region-check) are the same ones `arcus` has, under a name that does not claim they
+    are Arcus's."""
+    args = list(sys.argv[1:] if argv is None else argv)
+    if args and args[0] in TBOT_DELEGATED:
+        main(args)
+        return
+    p = argparse.ArgumentParser(prog="tbot", description=TBOT_HELP, formatter_class=argparse.RawDescriptionHelpFormatter)
+    sub = p.add_subparsers(dest="cmd", required=True, metavar="up|down|status|scout|telegram|recommend|export|import|sync")
+    sp = sub.add_parser("up", help="start parts")
+    sp.add_argument("parts", nargs="*", help="arcus, lighter, telegram, scouts; none = all")
+    sp.set_defaults(fn=cmd_tbot_up)
+    sp = sub.add_parser("down", help="stop parts")
+    sp.add_argument("parts", nargs="*")
+    sp.add_argument("--all", action="store_true", help="also stop the runs of those parts (positions kept)")
+    sp.set_defaults(fn=cmd_tbot_down)
+    sub.add_parser("status", help="the whole machine on one screen").set_defaults(fn=cmd_tbot_status)
+    sp = sub.add_parser("scout", help="start or stop the scouts")
+    sp.add_argument("which", nargs="?", choices=["arcus", "lighter", "both"], default="both")
+    sp.add_argument("--stop", action="store_true")
+    sp.set_defaults(fn=cmd_tbot_scout)
+    os.chdir(os.environ.get("BOT_HOME", os.getcwd()))
+    load_dotenv(".env")
+    a = p.parse_args(args)
+    a.fn(a)
 
 
 def main(argv: list[str] | None = None) -> None:
