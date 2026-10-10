@@ -370,7 +370,10 @@ class LiveExchange(Exchange):
             o.qty = float(od.get("remaining_base_amount") or o.qty)
         else:
             o.state, o.why_done = "done", status
-            if status.startswith("canceled-") and status not in ("canceled-expired",):
+            if status == "canceled-expired":       # the engine replaces an order 2 minutes before this: it was late
+                self.expired += 1
+                log.warn("order_expired", cid=cid, tag=o.tag, side=o.side)
+            elif status.startswith("canceled-"):
                 self.rejects.append((time.time(), status))
 
     def _on_position(self, p: dict[str, Any]) -> None:

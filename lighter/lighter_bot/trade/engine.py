@@ -132,6 +132,7 @@ class Engine:
         self.guard: G.Guard | None = None
         self.paused = False
         self.stop_after_close = False
+        self.renewals = 0                  # orders replaced before their expiry in this process
         self._stop = asyncio.Event()
         self.why = "starting"
         self.quote_s = 0.0
@@ -308,7 +309,14 @@ class Engine:
             self.run.done = self.run.done or g.why
         changes = self.diff(want, orders, now)
         if changes and now >= getattr(ex, "hold_until", 0.0):      # live: a short wait after a refused request
-            await ex.send(changes, kind)
+            news = {(c.quote.side, c.quote.tag) for c in changes if c.kind == "new" and c.quote is not None}
+            cancels = {c.cid for c in changes if c.kind == "cancel"}
+            due = [o for o in orders if o.state == "open" and o.expires and o.expires - now < C.QUOTE_RENEW_S
+                   and o.cid in cancels and (o.side, o.tag) in news]
+            if await ex.send(changes, kind) and due:       # replaced before Lighter would drop them by itself
+                self.renewals += len(due)
+                log.info("renewed", n=len(due), tags=[o.tag for o in due], cids=[o.cid for o in due],
+                         left_s=round(min(o.expires - now for o in due)))
         dt = self.period
         self.total_s += dt
         if self.why:
@@ -340,7 +348,9 @@ class Engine:
             "limits": {"sl": self.spec.sl, "tp": self.spec.tp, "vol": self.spec.vol}, "done": r.done,
             "sizes": asdict(sz) if sz else None,
             "orders": [{"side": "buy" if o.side == BUY else "sell", "px": o.px, "qty": o.qty, "state": o.state,
-                        "tag": o.tag} for o in ex.live_orders()],
+                        "tag": o.tag, "left_s": round(o.expires - now) if o.expires else None}
+                       for o in ex.live_orders()],
+            "renewals": self.renewals, "expired": getattr(ex, "expired", 0),
             "quoting_pct": round(100 * self.quote_s / self.total_s, 1) if self.total_s else 0.0,
             "blocked": {k: round(v) for k, v in self.blocked.items()},
             "requests_last_min": ex.budget.used(), "rejects_10m": sum(1 for t, _ in ex.rejects if t > now - 600),

@@ -181,6 +181,34 @@ def test_the_engine_holds_its_order_changes_after_a_refused_request(tmp_path):
     assert {o.side for o in ex.live_orders()} == {BUY, SELL}
 
 
+def test_the_running_engine_replaces_its_quotes_before_they_expire_and_counts_it(tmp_path, monkeypatch):
+    from lighter_bot.venue import consts
+
+    monkeypatch.setattr(consts, "QUOTE_EXPIRY_S", 1.0)       # an order lives one second here, and is replaced
+    monkeypatch.setattr(consts, "QUOTE_RENEW_S", 0.6)        # once it has 0.6 s left
+    ex = paper(tmp_path)
+    eng = Engine(ex, RunState(RunSpec("X", "Mid 0", 10.0, capital=100.0)), tmp_path)
+
+    def step() -> set[int]:
+        asyncio.run(eng.step(time.time()))
+        return {o.cid for o in ex.live_orders() if o.state == "open"}
+
+    step()
+    first = step()
+    assert len(first) == 2 and eng.renewals == 0
+    time.sleep(0.2)
+    assert step() == first and eng.renewals == 0             # 0.8 s left: they rest
+    time.sleep(0.3)
+    step()                                                   # 0.5 s left: replaced, both sides in one request
+    second = step()
+    st = eng.status(time.time())
+    assert len(second) == 2 and not second & first and eng.renewals == 2
+    assert st["renewals"] == 2 and st["expired"] == 0 and all(o["left_s"] is not None for o in st["orders"])
+    time.sleep(1.05)
+    ex.tick(time.time())                                     # nobody replaced these: Lighter drops them, and it is counted
+    assert ex.expired == 2
+
+
 def test_engine_quotes_and_obeys_controls(tmp_path):
     ex = paper(tmp_path)
     run = RunState(RunSpec("X", "Mid 0", 10.0, capital=100.0))

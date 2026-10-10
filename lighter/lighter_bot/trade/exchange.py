@@ -96,6 +96,7 @@ class Exchange:
         self.acct = Account()
         self.fill_cbs: list[Callable[[Fill], None]] = []
         self.rejects: list[tuple[float, str]] = []
+        self.expired = 0                   # our orders Lighter dropped at their expiry: the engine was late to replace
 
     def live_orders(self) -> list[Order]:
         return [o for o in self.orders.values() if o.state != "done"]
@@ -159,6 +160,7 @@ class PaperExchange(Exchange):
                 o.state = "done"
             elif o.state == "open" and o.expires and now >= o.expires:
                 o.state, o.why_done = "done", "canceled-expired"
+                self.expired += 1
             elif o.state == "open":
                 o.ahead = min(o.ahead, self._shown(o.side, o.px))
         for due, q in list(self.pending_takers):
