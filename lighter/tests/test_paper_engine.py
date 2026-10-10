@@ -70,6 +70,19 @@ def test_paper_rejects_a_crossing_post_only(tmp_path):
     assert not ex.live_orders() and ex.rejects
 
 
+def test_paper_orders_expire_as_live_ones_do(tmp_path):
+    ex = paper(tmp_path)
+    t0 = time.time()
+    asyncio.run(ex.send([Change("new", Quote(BUY, 100.00, 1.0, "b"))], "quote"))
+    ex.tick(t0 + 1)
+    o = ex.live_orders()[0]
+    assert o.state == "open" and o.expires == pytest.approx(t0 + 330, abs=2)
+    ex.tick(t0 + 329)
+    assert ex.live_orders()                                  # the engine replaces it long before this
+    ex.tick(t0 + 332)
+    assert not ex.live_orders() and o.why_done == "canceled-expired" and not ex.rejects
+
+
 def test_engine_diff_keeps_modifies_and_cancels(tmp_path):
     ex = paper(tmp_path)
     run = RunState(RunSpec("X", "Mid 0", 10.0))
@@ -90,6 +103,110 @@ def test_engine_diff_replaces_a_live_order_close_to_its_expiry(tmp_path):
     ch = eng.diff([Quote(BUY, 100.00, 1.0, "b"), Quote(SELL, 100.02, 1.0, "a"), Quote(BUY, 100.00, 1.0, "c")], live, now)
     assert [(c.kind, c.cid) for c in ch] == [("cancel", 1), ("new", 0)] and ch[1].quote.tag == "b"
     assert eng.diff([Quote(SELL, 100.02, 1.0, "a")], live[1:2], now + 181)[0].kind == "cancel"   # 119 s left by then
+
+
+def test_the_engine_keeps_the_stop_on_the_venue_at_twice_its_own_position_stop(tmp_path):
+    ex = paper(tmp_path)
+    eng = Engine(ex, RunState(RunSpec("X", "Mid 0", 10.0, capital=100.0)), tmp_path)
+    asked: list[tuple[float, float]] = []
+
+    async def protect(now: float, loss_usd: float) -> None:
+        asked.append((now, loss_usd))
+
+    ex.protect = protect                                     # the live exchange has one; paper has none
+    now = time.time()
+    asyncio.run(eng.step(now))
+    assert asked == [(now, pytest.approx(2 * eng.sizes.pos_stop_usd))] and eng.sizes.pos_stop_usd > 0
+
+
+def test_a_run_with_a_time_limit_keeps_its_position_unless_told_to_end_flat(tmp_path):
+    def held(sub: str) -> tuple[PaperExchange, Engine]:
+        ex = paper(tmp_path / sub)
+        eng = Engine(ex, RunState(RunSpec("X", "Mid 0", 10.0, capital=100.0)), tmp_path / sub)
+        eng.period = 0.02
+        ex._book_fill(BUY, 100.01, 0.5)                       # the bot is long when its time is up
+        ex.cash -= 0.5 * 100.01
+        return ex, eng
+
+    ex, eng = held("a")
+    asyncio.run(eng.run_loop(0.1))
+    assert ex.acct.pos == 0.5 and not eng.stop_after_close and not [o for o in ex.live_orders() if o.state == "open"]
+    ex, eng = held("b")
+    t0 = time.time()
+
+    async def go() -> None:
+        task = asyncio.create_task(eng.run_loop(0.1, True))
+        while not task.done() and time.time() - t0 < 5:
+            await asyncio.sleep(0.05)
+            if eng.stop_after_close:
+                want = [o for o in ex.live_orders() if o.tag == "exit" and o.state == "open"]
+                if want and ex.acct.pos:                      # the maker exit at the touch: let it fill
+                    ex.cash += ex.acct.pos * want[0].px
+                    ex._book_fill(SELL, want[0].px, ex.acct.pos)
+                    want[0].state = "done"
+        await task
+
+    asyncio.run(go())
+    assert eng.stop_after_close and ex.acct.pos == 0 and time.time() - t0 < 5      # closed first, then stopped
+
+
+def test_a_position_too_small_for_a_resting_order_is_closed_with_a_taker_order(tmp_path):
+    """The first live run (2026-10-10) ended with $9 of SPY: under Lighter's $10 minimum. The maker exit was refused
+    40 times in 20 s before the taker order closed it."""
+    ex = paper(tmp_path)
+    eng = Engine(ex, RunState(RunSpec("X", "Mid 0", 10.0, capital=100.0)), tmp_path)
+    now = time.time()
+    asyncio.run(eng.step(now))
+    ex.orders.clear()
+    ex._book_fill(BUY, 100.01, 0.05)                         # $5: under the market's $10 minimum
+    ex.cash -= 0.05 * 100.01
+    eng.ask_close("closing: asked")
+    asyncio.run(eng.step(now + 1))
+    assert [q for _, q in ex.pending_takers] == [-0.05] and not [o for o in ex.live_orders() if o.tag == "exit"]
+    ex.pending_takers.clear()
+    ex._book_fill(BUY, 100.01, 0.45)                         # $50 now: a maker order at the touch, as before
+    ex.cash -= 0.45 * 100.01
+    asyncio.run(eng.step(now + 5))
+    assert [(o.tag, o.qty, o.reduce_only) for o in ex.live_orders()] == [("exit", 0.5, True)] and not ex.pending_takers
+
+
+def test_the_engine_holds_its_order_changes_after_a_refused_request(tmp_path):
+    ex = paper(tmp_path)
+    eng = Engine(ex, RunState(RunSpec("X", "Mid 0", 10.0, capital=100.0)), tmp_path)
+    now = time.time()
+    ex.hold_until = now + 2.0                                # what the live exchange sets when Lighter refuses a request
+    asyncio.run(eng.step(now))
+    assert not ex.live_orders()
+    asyncio.run(eng.step(now + 2.5))
+    assert {o.side for o in ex.live_orders()} == {BUY, SELL}
+
+
+def test_the_running_engine_replaces_its_quotes_before_they_expire_and_counts_it(tmp_path, monkeypatch):
+    from lighter_bot.venue import consts
+
+    monkeypatch.setattr(consts, "QUOTE_EXPIRY_S", 1.0)       # an order lives one second here, and is replaced
+    monkeypatch.setattr(consts, "QUOTE_RENEW_S", 0.6)        # once it has 0.6 s left
+    ex = paper(tmp_path)
+    eng = Engine(ex, RunState(RunSpec("X", "Mid 0", 10.0, capital=100.0)), tmp_path)
+
+    def step() -> set[int]:
+        asyncio.run(eng.step(time.time()))
+        return {o.cid for o in ex.live_orders() if o.state == "open"}
+
+    step()
+    first = step()
+    assert len(first) == 2 and eng.renewals == 0
+    time.sleep(0.2)
+    assert step() == first and eng.renewals == 0             # 0.8 s left: they rest
+    time.sleep(0.3)
+    step()                                                   # 0.5 s left: replaced, both sides in one request
+    second = step()
+    st = eng.status(time.time())
+    assert len(second) == 2 and not second & first and eng.renewals == 2
+    assert st["renewals"] == 2 and st["expired"] == 0 and all(o["left_s"] is not None for o in st["orders"])
+    time.sleep(1.05)
+    ex.tick(time.time())                                     # nobody replaced these: Lighter drops them, and it is counted
+    assert ex.expired == 2
 
 
 def test_engine_quotes_and_obeys_controls(tmp_path):

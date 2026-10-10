@@ -163,6 +163,19 @@ async def test_an_entry_nobody_fills_ends_flat_with_nothing_left_on_the_book() -
     assert r.arcus.pos.get(SYM, 0) == 0 == r.lighter.pos.get(SYM, 0) and "not_opened" in r.store.kinds()
 
 
+async def test_a_maker_order_is_replaced_before_it_would_expire_on_a_venue_where_orders_expire() -> None:
+    r = Rig(Settings(enter_timeout_s=900))
+    r.lighter.maker_life_s = 210.0             # Lighter: an order drops off by itself 5.5 minutes after it is placed
+    await r.step(n=2)
+    (a0,), (l0,) = r.open_orders(r.arcus), r.open_orders(r.lighter)
+    await r.step(dt=100)
+    assert r.open_orders(r.lighter) == [l0]                               # the price has not moved: it rests
+    await r.step(dt=111)                                                  # 211 s old
+    await r.step(n=2)
+    (l1,) = r.open_orders(r.lighter)
+    assert l1.id != l0.id and l1.price == l0.price and r.open_orders(r.arcus) == [a0]    # Arcus cancels by itself
+
+
 async def test_a_venues_own_stop_firing_closes_the_other_leg_at_once() -> None:
     r = Rig()
     await r.to_open()

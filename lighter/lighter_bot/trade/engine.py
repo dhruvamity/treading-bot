@@ -29,10 +29,41 @@ from lighter_bot.trade import guard as G
 from lighter_bot.trade.exchange import Change, Exchange, Fill, Order
 from lighter_bot.trade.sizing import Sizes, Stops, sizes, target_capital
 from lighter_bot.trade.strategy import BUY, SELL, Quote, Quoter, Rules, Setup, View
+from lighter_bot.venue import consts as C
 
 log = Log("engine")
 US = 1_000_000
-RENEW_S = 120.0      # a live quote is replaced this long before its expiry (lighter_bot/trade/live.py: QUOTE_EXPIRY_MS)
+FLAT_GRACE_S = 90.0      # a run with a time limit and --flat may take this long over it to close its position
+
+
+def plan(want: list[Quote], orders: list[Order], tol: float, now: float) -> list[Change]:
+    """The order diff. Keep a live order within the tolerance (and 20% of its size); modify it otherwise; cancel what
+    is not wanted (and anything the bot did not place); leave orders still in flight alone. An order close to its
+    expiry is replaced, wanted price or not: Lighter drops it by itself at the expiry, and a modify cannot move that
+    (lighter_bot/venue/consts.py: QUOTE_EXPIRY_S)."""
+    live = [o for o in orders if o.state in ("open", "sent")]
+    used: set[int] = set()
+    out: list[Change] = []
+    for q in want:
+        match = next((o for o in live if o.cid not in used and o.side == q.side and o.tag == q.tag), None)
+        if match is None:
+            out.append(Change("new", q))
+            continue
+        used.add(match.cid)
+        if match.state == "sent":
+            continue            # not acknowledged yet: never modify an order Lighter has not confirmed
+        renew = bool(match.expires) and match.expires - now < C.QUOTE_RENEW_S
+        if abs(match.px - q.px) <= tol and abs(match.qty - q.qty) <= 0.2 * q.qty and \
+                match.reduce_only == q.reduce_only and not renew:
+            continue
+        if match.reduce_only != q.reduce_only or renew:
+            out += [Change("cancel", cid=match.cid), Change("new", q)]
+        else:
+            out.append(Change("modify", q, match.cid))
+    for o in live:
+        if o.cid not in used and o.state == "open":
+            out.append(Change("cancel", cid=o.cid))
+    return out
 
 
 @dataclass
@@ -101,6 +132,7 @@ class Engine:
         self.guard: G.Guard | None = None
         self.paused = False
         self.stop_after_close = False
+        self.renewals = 0                  # orders replaced before their expiry in this process
         self._stop = asyncio.Event()
         self.why = "starting"
         self.quote_s = 0.0
@@ -168,37 +200,18 @@ class Engine:
 
     # ---------------------------------------------------------------- the order diff
     def diff(self, want: list[Quote], orders: list[Order], now: float | None = None) -> list[Change]:
-        """Keep a live order within the tolerance (and 20% of its size); modify it otherwise; cancel what is not wanted
-        (and anything the bot did not place); leave orders still in flight alone. A live order close to its expiry is
-        replaced, wanted price or not: Lighter drops it by itself at the expiry, and a modify cannot move that."""
-        now = time.time() if now is None else now
         mid = (self.ex.feed.bbo() or (0, 0, 0, 0))
         tol = max(2 * self.m.tick, self.params.tol_bps * 1e-4 * (mid[0] + mid[1]) / 2)
-        live = [o for o in orders if o.state in ("open", "sent")]
-        used: set[int] = set()
-        out: list[Change] = []
-        for q in want:
-            match = next((o for o in live if o.cid not in used and o.side == q.side and o.tag == q.tag), None)
-            if match is None:
-                out.append(Change("new", q))
-                continue
-            used.add(match.cid)
-            if match.state == "sent":
-                continue            # not acknowledged yet: never modify an order Lighter has not confirmed
-            renew = bool(match.expires) and match.expires - now < RENEW_S
-            if abs(match.px - q.px) <= tol and abs(match.qty - q.qty) <= 0.2 * q.qty and \
-                    match.reduce_only == q.reduce_only and not renew:
-                continue
-            if match.reduce_only != q.reduce_only or renew:
-                out += [Change("cancel", cid=match.cid), Change("new", q)]
-            else:
-                out.append(Change("modify", q, match.cid))
-        for o in live:
-            if o.cid not in used and o.state == "open":
-                out.append(Change("cancel", cid=o.cid))
-        return out
+        return plan(want, orders, tol, time.time() if now is None else now)
 
     # ---------------------------------------------------------------- control
+    def ask_close(self, why: str) -> None:
+        """Close the position (a maker order at the touch, then a taker order) and stop once flat."""
+        self.stop_after_close = True
+        if self.guard:
+            self.guard.state, self.guard.exit_since = "exit_run", int(time.time() * US)
+            self.guard.why = why
+
     def read_control(self) -> None:
         p = self.path("control")
         if not p.exists():
@@ -214,10 +227,7 @@ class Engine:
             if cmd == "stop":
                 self._stop.set()
             elif cmd == "close":
-                self.stop_after_close = True
-                if self.guard:
-                    self.guard.state, self.guard.exit_since = "exit_run", int(time.time() * US)
-                    self.guard.why = "closing: asked from Telegram or the CLI"
+                self.ask_close("closing: asked from Telegram or the CLI")
             elif cmd == "pause":
                 self.paused = True
             elif cmd == "unpause":
@@ -254,6 +264,9 @@ class Engine:
         run_pnl = eq - self.run.start_equity
         d = g.step(int(now * US), eq, pos, entry, mid, run_pnl=run_pnl, run_vol=self.run.volume)
         self.day_eq = g.day_eq
+        protect = getattr(ex, "protect", None)      # live: the stop that rests on Lighter for an open position
+        if protect is not None:
+            await protect(now, C.VENUE_STOP_X * self.sizes.pos_stop_usd)
         orders = ex.live_orders()
         own_b = sum(o.qty for o in orders if o.side == BUY and abs(o.px - bid) < self.m.tick / 2)
         own_a = sum(o.qty for o in orders if o.side == SELL and abs(o.px - ask) < self.m.tick / 2)
@@ -268,10 +281,18 @@ class Engine:
                 await self._cancel_quotes()
                 await ex.taker(plan.taker)
                 return
-            want = [q for q in plan.quotes if q.reduce_only or q.qty * q.px >= self.m.min_order_usd(mid)]
+            # Lighter refuses a resting order under its minimum, reduce-only or not (21706, first live run)
+            want = [q for q in plan.quotes if q.qty * q.px >= self.m.min_order_usd(mid)]
             kind = "quote"
             self.why = ""
         elif d.action in (G.EXIT, G.QUOTE) and pos:     # an exit, or paused: work the position off at the touch
+            if abs(pos) * mid < self.m.min_order_usd(mid):
+                # Too small to rest: Lighter refuses a maker order under its minimum even to close (the first live
+                # run, 2026-10-10, asked 40 times in 20 s for a $9 position). A reduce-only taker order is taken.
+                await self._cancel_quotes()
+                await ex.taker(-pos)
+                self.why = d.why or "paused by you: closing orders only"
+                return
             side = SELL if pos > 0 else BUY
             want = [Quote(side, ask if side == SELL else bid, abs(pos), "exit", True)]
             self.why = d.why or "paused by you: closing orders only"
@@ -287,8 +308,15 @@ class Engine:
         if g.state == "done" and not pos:
             self.run.done = self.run.done or g.why
         changes = self.diff(want, orders, now)
-        if changes:
-            await ex.send(changes, kind)
+        if changes and now >= getattr(ex, "hold_until", 0.0):      # live: a short wait after a refused request
+            news = {(c.quote.side, c.quote.tag) for c in changes if c.kind == "new" and c.quote is not None}
+            cancels = {c.cid for c in changes if c.kind == "cancel"}
+            due = [o for o in orders if o.state == "open" and o.expires and o.expires - now < C.QUOTE_RENEW_S
+                   and o.cid in cancels and (o.side, o.tag) in news]
+            if await ex.send(changes, kind) and due:       # replaced before Lighter would drop them by itself
+                self.renewals += len(due)
+                log.info("renewed", n=len(due), tags=[o.tag for o in due], cids=[o.cid for o in due],
+                         left_s=round(min(o.expires - now for o in due)))
         dt = self.period
         self.total_s += dt
         if self.why:
@@ -320,7 +348,9 @@ class Engine:
             "limits": {"sl": self.spec.sl, "tp": self.spec.tp, "vol": self.spec.vol}, "done": r.done,
             "sizes": asdict(sz) if sz else None,
             "orders": [{"side": "buy" if o.side == BUY else "sell", "px": o.px, "qty": o.qty, "state": o.state,
-                        "tag": o.tag} for o in ex.live_orders()],
+                        "tag": o.tag, "left_s": round(o.expires - now) if o.expires else None}
+                       for o in ex.live_orders()],
+            "renewals": self.renewals, "expired": getattr(ex, "expired", 0),
             "quoting_pct": round(100 * self.quote_s / self.total_s, 1) if self.total_s else 0.0,
             "blocked": {k: round(v) for k, v in self.blocked.items()},
             "requests_last_min": ex.budget.used(), "rejects_10m": sum(1 for t, _ in ex.rejects if t > now - 600),
@@ -340,7 +370,9 @@ class Engine:
         (self.dir / f"heartbeat-{self.mode}").write_text(str(now))
 
     # ---------------------------------------------------------------- the loop
-    async def run_loop(self, seconds: float | None = None) -> None:
+    async def run_loop(self, seconds: float | None = None, flat_at_end: bool = False) -> None:
+        """Until stopped, or for `seconds`. At the time limit the quotes are cancelled and the position is kept; with
+        `flat_at_end` the position is closed first (as `lighter close` does), within FLAT_GRACE_S."""
         self.dir.mkdir(parents=True, exist_ok=True)
         loop = asyncio.get_running_loop()
         for s in (signal.SIGINT, signal.SIGTERM):
@@ -365,7 +397,12 @@ class Engine:
                     self.save(now)
                     self._last_status = now
                 if end and now >= end:
-                    break
+                    if not flat_at_end or now >= end + FLAT_GRACE_S:
+                        if flat_at_end:
+                            log.warn("time_up_not_flat", pos=self.ex.acct.pos)
+                        break
+                    if not self.stop_after_close:
+                        self.ask_close("closing: the run's time is up")
                 await asyncio.sleep(max(0.02, self.period - (time.time() - now)))
         finally:
             self.why = "stopped"

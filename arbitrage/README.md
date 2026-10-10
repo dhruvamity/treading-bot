@@ -68,6 +68,9 @@ arbitrage close      arbitrage close --now # close the position: as maker first,
 arbitrage pause      arbitrage resume      # open nothing new (an open position is kept) / look again
 arbitrage skip CASHCAT   arbitrage unskip CASHCAT   # markets it must never open
 
+arbitrage livetest [SYMBOL] [--expiry]     # REAL MONEY, smallest size: the Lighter leg's orders once, with a report
+                                           # (needs ARB_LIVE=1 and LIVE typed; sends nothing to Arcus)
+
 arbitrage settings                         # every setting, its value, its range
 arbitrage set max_hold_h 72                # change one; the running bot uses it from its next loop
 ```
@@ -138,7 +141,8 @@ What the first live run will prove or disprove, because nothing could be sent wh
 | Arcus post-only and IOC orders, cancel, cancel-all, leverage, positions, balance | the market-making bot's own client, live-proven there |
 | Arcus: reading one order by its id | from the documentation |
 | Arcus: the position stop and take profit (`positionTpsl`, signed as trigger orders) | from the documentation; the docs disagree with themselves on the leg's price field |
-| Lighter: everything that sends (orders, cancels, stops, leverage) | signs correctly offline; never sent by this program. `lighter livetest` (lighter/README.md, section 6) sent each of them once at the minimum size on 2026-10-09: all worked, including a stop and a take-profit built as here with the 5% worst price past the trigger. Not fixed here: this program's own resting maker orders on Lighter carry a 28-day expiry, and Lighter's scheduled cancel-all does not fire by itself, so a dead executor would leave them on the book |
+| Lighter: everything that sends (orders, cancels, stops, leverage) | signs correctly offline; never sent by this program. The Lighter bot's own test sent the same kinds of request on the venue on 2026-10-09 and 10 (lighter/README.md, section 6), including a stop and a take-profit built as here. `arbitrage livetest` sends them through this program's own adapter, once, at the smallest size: a maker order with its 5.5-minute expiry, the cancel and re-place the engine does before that expiry, a taker order, the position as the adapter reads it, the stop pair, cancel-all, the close. Its report is in `arbitrage/reports/`. **Run on 2026-10-10 (SPY): 9 of 9 passed, cost $0.0003, ended flat**; Lighter gave the maker order 328 s to live, and the adapter's own reading of orders, fills and the position matched Lighter's at every step |
+| Lighter: the stop pair | counted as placed only when Lighter's own list shows both orders: Lighter answers OK to a batch and leaves out a member it does not like (seen on the venue) |
 | Lighter and Arcus reads (book, position, balance, key check) | run against the real accounts on 2026-10-04 |
 | The executor's logic | 38 offline tests on simulated venues, and paper runs on real prices (open, stops, close by command and by the time limit) |
 

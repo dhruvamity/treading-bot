@@ -23,6 +23,7 @@ from lighter_bot.config import Latency, Requests
 from lighter_bot.log import Log
 from lighter_bot.trade.feed import MarketFeed
 from lighter_bot.trade.strategy import BUY, SELL, Quote
+from lighter_bot.venue import consts as C
 from lighter_bot.venue.market import Market
 from lighter_bot.venue.nonce import ClientIds
 from lighter_bot.venue.rest import Budget
@@ -44,7 +45,7 @@ class Order:
     ahead: float = -1.0        # paper: queue ahead at our price
     oid: int = 0               # Lighter's order index, once known
     why_done: str = ""
-    expires: float = 0.0       # live: when Lighter drops the order by itself (0: paper, or not ours)
+    expires: float = 0.0       # when Lighter drops the order by itself (0: an order that is not ours)
 
 
 @dataclass
@@ -95,6 +96,7 @@ class Exchange:
         self.acct = Account()
         self.fill_cbs: list[Callable[[Fill], None]] = []
         self.rejects: list[tuple[float, str]] = []
+        self.expired = 0                   # our orders Lighter dropped at their expiry: the engine was late to replace
 
     def live_orders(self) -> list[Order]:
         return [o for o in self.orders.values() if o.state != "done"]
@@ -156,6 +158,9 @@ class PaperExchange(Exchange):
                 o.ahead = self._shown(o.side, o.px)
             elif o.state == "cancelling" and now >= o.lands_at:
                 o.state = "done"
+            elif o.state == "open" and o.expires and now >= o.expires:
+                o.state, o.why_done = "done", "canceled-expired"
+                self.expired += 1
             elif o.state == "open":
                 o.ahead = min(o.ahead, self._shown(o.side, o.px))
         for due, q in list(self.pending_takers):
@@ -222,13 +227,15 @@ class PaperExchange(Exchange):
             if c.kind == "new" and c.quote is not None:
                 q = c.quote
                 cid = self.ids.take()[0]
-                self.orders[cid] = Order(cid, q.side, q.px, q.qty, q.tag, q.reduce_only, "sent", now, lands)
+                self.orders[cid] = Order(cid, q.side, q.px, q.qty, q.tag, q.reduce_only, "sent", now, lands,
+                                         expires=now + C.QUOTE_EXPIRY_S)
             elif c.kind == "modify" and c.quote is not None and c.cid in self.orders:
                 o = self.orders[c.cid]
                 o.state, o.lands_at = "cancelling", lands
                 cid = self.ids.take()[0]
                 q = c.quote
-                self.orders[cid] = Order(cid, q.side, q.px, q.qty, q.tag, q.reduce_only, "sent", now, lands)
+                self.orders[cid] = Order(cid, q.side, q.px, q.qty, q.tag, q.reduce_only, "sent", now, lands,
+                                         expires=o.expires)      # a modify does not move an order's expiry
             elif c.kind == "cancel" and c.cid in self.orders:
                 o = self.orders[c.cid]
                 if o.state != "done":

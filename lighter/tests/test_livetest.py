@@ -27,14 +27,16 @@ class Venue:
     cancel-all. It answers the REST calls and pushes the account-stream frames the real one would."""
 
     def __init__(self, ex, *, far_limit=0.015, flat_row=False, stream_flat=True, fill_touch=False, cross_fills=False,
-                 min_cancel_ms=300_000, equity=6.0, slip_max=0.02, bleed=0.0, forgets=False, late_s=0.0, elsewhere=0,
-                 expires=True, lazy=False):
+                 min_cancel_ms=300_000, equity=6.0, slip_max=0.06, bleed=0.0, forgets=False, late_s=0.0, elsewhere=0,
+                 expires=True, lazy=False, drops_stop=False, slow_account=0):
         self.ex, self.bid, self.ask = ex, 100.00, 100.02
         self.far_limit, self.flat_row, self.stream_flat = far_limit, flat_row, stream_flat
         self.fill_touch, self.cross_fills, self.min_cancel_ms, self.slip_max = fill_touch, cross_fills, min_cancel_ms, slip_max
         self.equity, self.bleed = equity, bleed
         self.forgets, self.late_s, self.elsewhere = forgets, late_s, elsewhere   # the scheduled cancel-all going wrong
         self.expires, self.lazy = expires, lazy      # does an order's expiry remove it; does the next request fire it
+        self.drops_stop = drops_stop                 # a reduce-only stop goes by itself once the position is closed
+        self.slow_account, self.stale = slow_account, 0     # account reads that still say flat after a fill
         self.orders: dict[int, dict] = {}
         self.pos = 0.0
         self.now = time.time()
@@ -48,6 +50,7 @@ class Venue:
     # ---- time
     async def sleep(self, s: float) -> None:
         self.now += s
+        self.ex._pos_stream_at -= s          # time passes for the exchange too: the stream's word gets older
         if self.scheduled is not None and self.now * 1000 >= self.scheduled + self.late_s * 1000:
             self.scheduled = None
             self._cancel_everything()
@@ -71,6 +74,10 @@ class Venue:
     def _trade(self, cid: int, buy: bool, qty: float, px: float, maker: bool) -> None:
         self.tid += 1
         self.pos += qty if buy else -qty
+        self.stale = self.slow_account if abs(self.pos) > 1e-9 else 0
+        if self.drops_stop and abs(self.pos) < 1e-9:
+            for c in [c for c, o in self.orders.items() if o["status"] == "pending" and o["reduce_only"]]:
+                self._order_frame({**self.orders.pop(c), "status": "canceled-reduce-only"})
         self.equity -= (self.ask - self.bid) / 2 * qty + self.bleed
         t = {"trade_id": self.tid, "price": str(px), "size": str(qty), "timestamp": int(time.time() * 1000),
              "is_maker_ask": (not buy) if maker else buy, "bid_account_id": ACCT if buy else 9,
@@ -85,6 +92,10 @@ class Venue:
     # ---- REST
     async def account(self, index: int):
         rows = []
+        self.stale -= 1
+        if self.stale >= 0:                                    # Lighter's read trailing its own stream
+            return {"accounts": [{"total_asset_value": str(self.equity), "available_balance": str(self.equity),
+                                  "positions": [], "cancel_all_time": 0, "total_order_count": len(self.orders)}]}
         if abs(self.pos) > 1e-9 or self.flat_row:
             rows.append({"market_id": M.market_id, "position": str(abs(round(self.pos, 6))),
                          "sign": 1 if self.pos >= 0 else -1, "avg_entry_price": "100.01"})
@@ -223,10 +234,15 @@ def test_the_whole_sequence_passes_and_ends_flat_with_no_orders(cfg, tmp_path):
         assert r[name] == lt.PASS, (name, r.get(name))
     assert r["buy as maker"] == lt.INFO and r["batch with a bad member"] == lt.INFO
     assert t.far == 0.01                                    # 2% was refused as too far from the mark, 1% rests
-    assert v.leverage == [M.leverage_fraction(5), M.leverage_fraction(50)]
+    assert v.leverage == [M.leverage_fraction(5), M.leverage_fraction(50), M.leverage_fraction(2)]   # and back
     notes = {s.name: s.detail for s in rep.steps}
     assert "refused whole" in notes["batch with a bad member"]
-    assert "1% past the trigger" in notes["stop and take-profit orders"]       # the arbitrage's 5% was refused here
+    assert "5% past the trigger" in notes["stop and take-profit orders"]
+    for name in ("quote renewal", "the bot's stop on Lighter", "the stop goes when the position is closed"):
+        assert r[name] == lt.PASS, (name, notes.get(name))
+    assert "the bot cancelled it" in notes["the stop goes when the position is closed"]
+    assert "does not see it as an order to cancel" in notes["the bot's stop on Lighter"]
+    assert "leverage back to the 2x it was" in notes["end"]
     assert "no longer lists the market at all" in notes["sell to close: flat"]
     assert "scheduled 330 s ahead" in notes["dead man's switch"] and "by itself" in notes["dead man's switch"]
     assert r["order expiry"] == lt.INFO and "cannot tell" in notes["order expiry"]      # both went in the same moment
@@ -256,6 +272,16 @@ def test_a_maker_fill_at_the_touch_is_reported_as_one(cfg, tmp_path):
     r = results(rep)
     assert r["buy as maker"] == lt.PASS and r["sell to close as maker"] == lt.PASS and "buy with a taker order" not in r
     assert r["dead man's switch"] == lt.SKIP and rep.clean and not rep.failed and v.pos == 0
+
+
+def test_a_venue_that_refuses_the_stops_worst_price_is_a_failure_of_the_bots_stop(cfg, tmp_path):
+    t, v, _ = make(cfg, tmp_path, slip_max=0.02)             # the real venue took 5% on 2026-10-09; this one does not
+    t.dms = False
+    rep = asyncio.run(t.run())
+    notes = {s.name: s.detail for s in rep.steps}
+    assert "1% past the trigger" in notes["stop and take-profit orders"]          # the test's own orders fall back
+    assert results(rep)["the bot's stop on Lighter"] == lt.FAIL and "21735" in notes["the bot's stop on Lighter"]
+    assert rep.clean and v.pos == 0 and not v.orders
 
 
 def test_a_post_only_order_that_trades_is_a_failure_and_is_closed(cfg, tmp_path):
@@ -319,6 +345,41 @@ def test_an_expiry_lighter_does_not_act_on_fails_and_a_switch_the_next_request_f
     assert "refused (21122" in notes["a request after the scheduled time"]
     assert "now gone" in notes["a request after the scheduled time"]
     assert rep.clean and not v.orders
+
+
+def test_a_stop_lighter_drops_by_itself_and_an_account_read_that_trails_a_fill(cfg, tmp_path):
+    """Both seen on the venue on 2026-10-10: the stop was gone as soon as the position closed, and the account read
+    still said flat a second after the short was filled (the test then called a filled order "no fill")."""
+    t, v, _said = make(cfg, tmp_path, drops_stop=True, slow_account=2)
+    t.only = ("long", "short")
+    rep = asyncio.run(t.run())
+    notes = {s.name: s.detail for s in rep.steps}
+    assert not rep.failed, [(s.name, s.detail) for s in rep.failed]
+    assert "by itself when the position closed (it ended as canceled-reduce-only)" in notes[
+        "the stop goes when the position is closed"]
+    assert "position -0.11" in notes["sell short with a taker order"] and rep.clean and v.pos == 0
+    # a position the account read does not show yet must still be closed, not left behind as "flat"
+    t2, v2, _ = make(cfg, tmp_path / "b", slow_account=3)
+    v2.pos, t2.armed = 0.0, True
+    t2.rep.equity_start = 6.0
+
+    async def leftover() -> float:
+        v2._trade(77, True, 0.11, 100.02, maker=False)       # a fill the stream reports and the read does not yet
+        return await t2.flatten()
+
+    assert asyncio.run(leftover()) == 0.0 and v2.pos == 0
+
+
+def test_only_the_named_steps_run_and_the_leverage_is_left_alone(cfg, tmp_path):
+    t, v, _said = make(cfg, tmp_path)
+    t.only = ("renewal", "long")
+    rep = asyncio.run(t.run())
+    names = [s.name for s in rep.steps]
+    assert names[0] == "connect" and names[-1] == "end" and not rep.failed and rep.clean
+    assert "quote renewal" in names and "the bot's stop on Lighter" in names and "sell to close: flat" in names
+    assert not any(n.startswith(("leverage", "limit order", "batch", "dead man", "sell short")) for n in names)
+    assert v.leverage == [] and "leverage" not in rep.steps[-1].detail     # it set none, so it puts none back
+    assert "these steps only: renewal, long" in lt.plan_text(M, 5.0, 1.0, True, False, ("renewal", "long"))
 
 
 def test_the_dead_mans_switch_is_not_tried_when_other_markets_have_orders(cfg, tmp_path):

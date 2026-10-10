@@ -153,9 +153,16 @@ series. `/set capital 250` fixes it.
   fired on days that were well up and then gave some back.
 - **Other protections:** every quote carries a 5.5-minute expiry (the shortest Lighter takes) and the bot replaces it 2 minutes
   before that: if the bot or its machine dies, Lighter drops every order by itself within 5.5 minutes (measured in the live test
-  of 2026-10-09: gone 17 s past the expiry). Lighter's scheduled cancel-all, the "dead man's switch", is still moved every minute
-  but is not that protection: Lighter acts on it only when the account's next request arrives, and a dead bot sends none. A
-  position the dead bot was holding stays open: no stop rests on Lighter. Also: a stale feed (no frame for 10 s) pulls the quotes; an error
+  of 2026-10-09: gone 17 s past the expiry). Lighter's scheduled cancel-all, the "dead man's switch", is not sent any more:
+  Lighter acts on it only when the account's next request arrives, and a dead bot sends none; when it did fire later, it
+  would have taken the stop below with it.
+  **A dead bot's position:** while the bot holds a position, one reduce-only stop-loss order rests on Lighter for it, triggered
+  where the position has lost twice the bot's own position stop (so the bot's own exit comes first while it lives), never
+  further than 10% from the entry, with a worst price 5% past the trigger. It follows the position (at most one change every
+  10 s, when the side, the size by 20% or the trigger moved) and it lasts 28 days, so it is still there when the quotes have
+  expired. `lighter stop` cancels it with everything else: a position you keep after that is yours to watch. Paper and the
+  backtest replace their orders on the same 3.5-minute clock, so they lose the same places in the queue; they do not model
+  the stop on Lighter. Also: a stale feed (no frame for 10 s) pulls the quotes; an error
   in a second cancels all orders; a 429 pauses requests 60 s and lowers the requote rate 20%; positions and orders are reconciled with
   Lighter every 5 minutes.
 
@@ -210,12 +217,14 @@ wild in the last hour, its data fresh.
   It needs `LBOT_LIVE=1`, a passing doctor and `LIVE` typed at its prompt; nothing else can start it (not Telegram, not a flag). It
   picks the liquid market with the smallest minimum order (SPY: about $11 an order, so $5 in the account is enough), and refuses an
   account that already has an order or a position on that market, before sending anything. What it does: sets the leverage (5x,
-  then the maximum); rests, moves and cancels a post-only order far from the price; cancel-all; two orders in one request; a batch
-  with a bad member; a post-only order that would cross; a buy (as maker, else with a taker order), a stop and a take-profit as the
-  arbitrage places them, a close; a reduce-only order with no position; a short and its close; and the two things that should
+  then the maximum); rests, moves and cancels a post-only order far from the price; cancel-all; two orders in one request; the
+  replacement of an order as the engine decides it 2 minutes before an expiry; a batch with a bad member; a post-only order that
+  would cross; a buy (as maker, else with a taker order), a stop and a take-profit as the arbitrage places them, the bot's own
+  stop on Lighter beside the open position, a close with that stop resting, the stop going when flat; a reduce-only order with
+  no position; a short and its close; and the two things that should
   clear a dead bot's orders: the 5.5-minute expiry on the bot's own orders removing one, and Lighter's dead man's switch cancelling another
-  (`--skip-dms` leaves that out: it can take 11 minutes; `--dms-only` runs that step alone, with two far orders and no trade). It stops and closes everything when the
-  account is $1 down (`--max-loss`), and always ends flat with no orders. With a zero-fee account the cost is the spread on about
+  (`--skip-dms` leaves that out: it can take 11 minutes; `--dms-only` runs that step alone, with two far orders and no trade; `--only renewal,long` runs just the steps you name: `leverage`, `limit`, `renewal`, `cancel-all`, `batch`, `post-only`, `long`, `reduce-only`, `short`, `dms`). It stops and closes everything when the
+  account is $1 down (`--max-loss`), and always ends flat with no orders and the leverage it found. With a zero-fee account the cost is the spread on about
   four minimum orders: cents. The report is printed and written to `lighter/reports/livetest-<time>.md`: `PASS` (Lighter did it
   and the bot's own books agree), `FAIL` (a bug to fix before a real run), `INFO` (something learned, such as how far from the
   price an order may rest).
@@ -225,8 +234,41 @@ wild in the last hour, its data fresh.
   Lighter holds a scheduled cancel-all for the account but did not act on it for 5 minutes past its time, and then cancelled
   everything the moment the account sent another request. So it cannot clear a dead bot's orders, and the test now reports it
   as `INFO`. An order's own expiry does: the bot's quotes used to carry 28 days; they now carry 5.5 minutes and are replaced
-  before that runs out, and the last run saw Lighter remove an order placed that way 31 s after its expiry.
-- **Before the first quote,** the run cancels your orders on that market, sets the leverage (cross margin) and schedules the cancel-all.
+  before that runs out, and the last run saw Lighter remove an order placed that way 31 s after its expiry. Those runs left
+  SPY at 50x on the account (Lighter's default is 2x): `lighter leverage SPY 2` puts it back, and the test now does that itself.
+  **Run of 2026-10-10 (no cost, ended flat, leverage back at 2x):** the replacement before an expiry worked as the engine
+  decides it (one request: old order off the book, new one on it), the bot's own stop rested on Lighter beside the open
+  position, the reduce-only exit order was accepted and filled next to it, and Lighter dropped the stop by itself once the
+  position was closed. One line said `FAIL` wrongly: the short was filled, but Lighter's account read still said flat a
+  second later. The test now waits for that read, and the bot no longer lets an account read replace a position the stream
+  gave it in the last 5 seconds.
+- **The first real run: smallest size, ten minutes, ends flat.** After a clean live test, this is the bot quoting by itself for
+  the first time, with as little money at work as Lighter allows:
+
+  ```bash
+  .venv/bin/lighter run SPY "smart 0" --lev 2 --capital 16 --live --sl 1 --seconds 600 --flat
+  ```
+
+  $16 at 2x gives orders of about $13 and never more than $26 held; the position stop is $0.32, the stop on Lighter sits at
+  twice that, and `--sl 1` ends the run if it is $1 down. `--seconds 600 --flat` ends it after ten minutes with the position
+  closed (maker, then taker) instead of kept. It asks for `LIVE` like any live start. The same command without `--live` is
+  the paper rehearsal. What to read afterwards: `lighter/logs/run-live-<day>.jsonl`, `lighter/state/fills-live.jsonl` and
+  `status-live.json`.
+
+
+  **That run, 2026-10-10:** ten minutes, 70 fills (69 as maker), $1,045 traded, +$0.003, ended flat with no orders. No
+  refusal while it quoted; the stop on Lighter followed the position 53 times and never fired. What it found: at the end
+  it held $9 of SPY, under Lighter's $10 minimum, and Lighter refused the maker order to close it (40 times in 20 s) until
+  the taker order did. A position under the minimum is now closed with a taker order at once, quotes under the minimum
+  are not sent even to reduce, and after a refused request the bot waits 2 s before it asks for orders again. Paper and
+  the backtest follow the same rules.
+
+  **A second run the same day, to see the replacement before an expiry** (`mid 5`, quotes 5 bps from the mid so that they
+  rest; 8 minutes, no fill, no cost): at 210.8 s and at 421.9 s the bot replaced both quotes in one request, each with 120 s
+  left; seconds later Lighter's stream showed the two new orders open with 328 s to live. None expired, nothing was
+  refused. The bot logs each replacement (`renewed`) and counts them in its status file, next to the orders Lighter
+  dropped at their expiry instead (`expired`, which should stay 0).
+- **Before the first quote,** the run cancels your orders on that market, sets the leverage (cross margin) and withdraws a scheduled cancel-all an older version may have left.
   It treats every order on that market as its own: trade by hand on another market, or use a sub-account (`LIGHTER_ACCOUNT_INDEX`).
 - **Control** (CLI, or Telegram): `lighter pause` / `unpause` (no new orders; closing orders keep working), `close` (close the position, maker
   then taker, and stop), `stop` (quotes cancelled, position kept), `resume` (trade again after the kill or a daily stop).
@@ -284,12 +326,13 @@ starts, stops and ends.
 | `lighter record [--seconds N] [--markets A,B] [--no-depth]` | Record by hand (the scout does it) |
 | `lighter scout run [--record-only \| --follow]` / `scout scan [--capital 250] [--markets A,B] [--full]` | The scout daemon (with no flag the machine's `BOT_ROLE` decides what it does) / one scan now |
 | `lighter backtest MARKET SETUP [--capital 100] [--lev 50] [--stops 2/5/25] [--days D1,D2]` | One setup, day by day, with markouts |
-| `lighter run MARKET SETUP [--lev N\|max] [--capital X] [--sl X] [--tp X] [--vol 1m] [--live] [--bg]` | Run a setup |
+| `lighter run MARKET SETUP [--lev N\|max] [--capital X] [--sl X] [--tp X] [--vol 1m] [--seconds N [--flat]] [--live] [--bg]` | Run a setup (`--seconds`: stop after that long, position kept; with `--flat`, closed first) |
 | `lighter pilot approve N [--list most\|cheapest\|max] [--live]` | Run a list's pick |
 | `lighter pause` / `unpause` / `stop` / `close` / `resume` `[--mode paper\|live]` | Control the run |
 | `lighter auto [on\|off\|set\|status] [--live] [--budget X] [--cost X]` | The autopilot |
 | `lighter doctor [MARKET] [--lev N]` | Everything a live run needs (read-only) |
-| `lighter livetest [MARKET] [--skip-dms] [--dms-only] [--max-loss 1] [--lev-low 5] [--wait 20]` | **Real money, minimum size:** every kind of request the bot sends, once, with a report (section 6) |
+| `lighter leverage MARKET [X]` | The account's leverage on a market; with a number, set it (needs `LBOT_LIVE=1` and `yes` typed; a run sets its own at start) |
+| `lighter livetest [MARKET] [--only STEPS] [--skip-dms] [--dms-only] [--max-loss 1] [--lev-low 5] [--wait 20]` | **Real money, minimum size:** every kind of request the bot sends, once, with a report (section 6) |
 | `lighter set [NAME VALUE]` | See or change a setting (`default` undoes it) |
 | `lighter account` | The account as Lighter keeps it |
 | `lighter keys` | A new API key pair (local only; register it with `scripts/register_key.py`) |

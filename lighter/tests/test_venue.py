@@ -28,6 +28,30 @@ def test_market_scaling_and_leverage():
     assert Market.from_dict(m.as_dict()) == m
 
 
+def test_the_leverage_an_account_has_on_a_market():
+    m = Market(market_id=26, symbol="SPY", price_decimals=2, size_decimals=4, min_base=0.001, min_quote=10.0,
+               imf_min=200, imf_default=5000, mmf=120)
+    assert m.default_leverage == 2.0 and m.max_leverage == 50.0
+    assert m.account_leverage({"positions": []}) == 2.0                      # never set: Lighter's default
+    rows = [{"market_id": 1, "initial_margin_fraction": "5.00"}, {"market_id": 26, "initial_margin_fraction": "2.00"}]
+    assert m.account_leverage({"positions": rows}) == 50.0                   # Lighter gives it in percent
+    assert m.account_leverage({"positions": [{"market_id": 26, "initial_margin_fraction": "0"}]}) == 2.0
+
+
+def test_the_leverage_command_is_wired_and_refuses_an_unknown_market(cfg, monkeypatch):
+    from lighter_bot import cli
+    from lighter_bot.trade import runner
+
+    async def no_markets(_cfg):
+        return {}
+
+    monkeypatch.setattr(cli, "_cfg", lambda: cfg)
+    monkeypatch.setattr(runner, "fetch_markets", no_markets)
+    with pytest.raises(SystemExit) as e:
+        cli.main(["leverage", "NOSUCH", "2"])
+    assert "not a Lighter perp" in str(e.value)
+
+
 def test_book_nonce_continuity():
     b = Book(1)
     b.snapshot({"bids": [{"price": "100", "size": "1"}], "asks": [{"price": "101", "size": "2"}], "nonce": 10})

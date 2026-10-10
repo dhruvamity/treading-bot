@@ -28,6 +28,8 @@ from arbitrage.exec.venue import BUY, OrderInfo, Spec, Top, VenueDown
 AUTH_LIFETIME_S = 6 * 3600
 TRIGGER_SLIP = 0.05          # a triggered stop may fill up to 5% past its trigger
 RECONCILE_S = 20.0           # how often the position is also read over REST
+STOPS_LOOKS = 6              # how many times Lighter's own list is read for a new stop pair
+STOPS_WAIT_S = 1.0           # ... and how long apart
 
 
 def order_view(od: dict[str, Any]) -> tuple[float, bool, str]:
@@ -238,11 +240,22 @@ class LighterTrade:
             info.open, info.note = False, f"{e.code}: {e.message}"[:160]
         return cid
 
+    @property
+    def maker_life_s(self) -> float:
+        """How long a maker order may rest before the engine replaces it: Lighter drops it by itself at its expiry,
+        which cannot be moved (lighter_bot/venue/consts.py)."""
+        from lighter_bot.venue import consts as C
+
+        return C.QUOTE_EXPIRY_S - C.QUOTE_RENEW_S
+
     async def maker(self, symbol: str, side: int, size: float, price: float, reduce_only: bool) -> str:
+        """A post-only order that expires by itself in 5.5 minutes: what clears it if this program dies. Lighter's
+        scheduled cancel-all does not (measured on the venue, 2026-10-09: it fires only on the account's next
+        request). The stop and the take-profit keep the 28 days: they are what protects the position then."""
         from lighter_bot.venue import consts as C
 
         return str(await self._order(side, size, price, reduce_only, order_type=C.ORDER_LIMIT, tif=C.TIF_POST_ONLY,
-                                     expiry=C.ORDER_EXPIRY_DEFAULT))
+                                     expiry=int((time.time() + C.QUOTE_EXPIRY_S) * 1000)))
 
     async def taker(self, symbol: str, side: int, size: float, worst: float, reduce_only: bool) -> str:
         from lighter_bot.venue import consts as C
@@ -288,11 +301,13 @@ class LighterTrade:
             return False
         m = self.market
         side = -1 if position > 0 else 1                  # the closing side
-        txs = []
+        txs, cids = [], set()
         for order_type, trigger in ((C.ORDER_STOP_LOSS, stop), (C.ORDER_TAKE_PROFIT, take)):
             worst = trigger * (1 + side * TRIGGER_SLIP)
+            cid = self.ids.take()[0]
+            cids.add(cid)
             txs.append(self.signer.create_order(
-                market=m.market_id, client_index=self.ids.take()[0], size=m.size_int(abs(position)),
+                market=m.market_id, client_index=cid, size=m.size_int(abs(position)),
                 price=m.price_int(worst, side_buy=side == BUY), is_ask=side != BUY, order_type=order_type,
                 tif=C.TIF_IOC, reduce_only=True, expiry=C.ORDER_EXPIRY_DEFAULT, nonce=self.nonces.take()[0],
                 trigger_price=m.price_int(trigger, side_buy=True)))
@@ -300,7 +315,15 @@ class LighterTrade:
             await self._send(txs)
         except ApiError:
             return False
-        return True
+        # "OK" is not enough: Lighter answers OK to a batch and leaves out a member it does not like (seen on the
+        # venue, 2026-10-09). The position is protected only when both orders are on Lighter's own list.
+        for look in range(STOPS_LOOKS):
+            ao = await self._call(self.rest.active_orders(self.account, m.market_id))
+            if cids <= {int(o.get("client_order_index") or 0) for o in ao.get("orders") or []}:
+                return True
+            if look < STOPS_LOOKS - 1:
+                await asyncio.sleep(STOPS_WAIT_S)
+        return False
 
     async def set_leverage(self, symbol: str, leverage: float) -> None:
         """The account's margin setting for the market: enough for the position, never over the market's maximum."""

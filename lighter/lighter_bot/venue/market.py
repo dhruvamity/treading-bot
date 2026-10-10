@@ -74,9 +74,22 @@ class Market:
     def size_of(self, steps: int) -> float:
         return steps / 10**self.size_decimals
 
+    @property
+    def default_leverage(self) -> float:
+        """What an account has on the market until it sets its own."""
+        return MF_ONE / self.imf_default if self.imf_default > 0 else 1.0
+
     def leverage_fraction(self, leverage: float) -> int:
         """The initial margin fraction for a leverage, never below the market's minimum (its maximum leverage)."""
         return max(self.imf_min, math.ceil(MF_ONE / max(1.0, leverage)))
+
+    def account_leverage(self, account: dict[str, Any]) -> float:
+        """The leverage an account (one of /api/v1/account's rows) has on this market: its own setting, else the
+        market's default. Lighter gives the account's initial margin fraction in percent."""
+        for p in account.get("positions") or []:
+            if int(p.get("market_id", -1)) == self.market_id and float(p.get("initial_margin_fraction") or 0) > 0:
+                return 100.0 / float(p["initial_margin_fraction"])
+        return self.default_leverage
 
     def as_dict(self) -> dict[str, Any]:
         return asdict(self)
