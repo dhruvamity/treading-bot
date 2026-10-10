@@ -33,6 +33,7 @@ from lighter_bot.venue import consts as C
 
 log = Log("engine")
 US = 1_000_000
+FLAT_GRACE_S = 90.0      # a run with a time limit and --flat may take this long over it to close its position
 
 
 def plan(want: list[Quote], orders: list[Order], tol: float, now: float) -> list[Change]:
@@ -203,6 +204,13 @@ class Engine:
         return plan(want, orders, tol, time.time() if now is None else now)
 
     # ---------------------------------------------------------------- control
+    def ask_close(self, why: str) -> None:
+        """Close the position (a maker order at the touch, then a taker order) and stop once flat."""
+        self.stop_after_close = True
+        if self.guard:
+            self.guard.state, self.guard.exit_since = "exit_run", int(time.time() * US)
+            self.guard.why = why
+
     def read_control(self) -> None:
         p = self.path("control")
         if not p.exists():
@@ -218,10 +226,7 @@ class Engine:
             if cmd == "stop":
                 self._stop.set()
             elif cmd == "close":
-                self.stop_after_close = True
-                if self.guard:
-                    self.guard.state, self.guard.exit_since = "exit_run", int(time.time() * US)
-                    self.guard.why = "closing: asked from Telegram or the CLI"
+                self.ask_close("closing: asked from Telegram or the CLI")
             elif cmd == "pause":
                 self.paused = True
             elif cmd == "unpause":
@@ -347,7 +352,9 @@ class Engine:
         (self.dir / f"heartbeat-{self.mode}").write_text(str(now))
 
     # ---------------------------------------------------------------- the loop
-    async def run_loop(self, seconds: float | None = None) -> None:
+    async def run_loop(self, seconds: float | None = None, flat_at_end: bool = False) -> None:
+        """Until stopped, or for `seconds`. At the time limit the quotes are cancelled and the position is kept; with
+        `flat_at_end` the position is closed first (as `lighter close` does), within FLAT_GRACE_S."""
         self.dir.mkdir(parents=True, exist_ok=True)
         loop = asyncio.get_running_loop()
         for s in (signal.SIGINT, signal.SIGTERM):
@@ -372,7 +379,12 @@ class Engine:
                     self.save(now)
                     self._last_status = now
                 if end and now >= end:
-                    break
+                    if not flat_at_end or now >= end + FLAT_GRACE_S:
+                        if flat_at_end:
+                            log.warn("time_up_not_flat", pos=self.ex.acct.pos)
+                        break
+                    if not self.stop_after_close:
+                        self.ask_close("closing: the run's time is up")
                 await asyncio.sleep(max(0.02, self.period - (time.time() - now)))
         finally:
             self.why = "stopped"

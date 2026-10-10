@@ -153,8 +153,9 @@ series. `/set capital 250` fixes it.
   fired on days that were well up and then gave some back.
 - **Other protections:** every quote carries a 5.5-minute expiry (the shortest Lighter takes) and the bot replaces it 2 minutes
   before that: if the bot or its machine dies, Lighter drops every order by itself within 5.5 minutes (measured in the live test
-  of 2026-10-09: gone 17 s past the expiry). Lighter's scheduled cancel-all, the "dead man's switch", is still moved every minute
-  but is not that protection: Lighter acts on it only when the account's next request arrives, and a dead bot sends none.
+  of 2026-10-09: gone 17 s past the expiry). Lighter's scheduled cancel-all, the "dead man's switch", is not sent any more:
+  Lighter acts on it only when the account's next request arrives, and a dead bot sends none; when it did fire later, it
+  would have taken the stop below with it.
   **A dead bot's position:** while the bot holds a position, one reduce-only stop-loss order rests on Lighter for it, triggered
   where the position has lost twice the bot's own position stop (so the bot's own exit comes first while it lives), never
   further than 10% from the entry, with a worst price 5% past the trigger. It follows the position (at most one change every
@@ -241,7 +242,19 @@ wild in the last hour, its data fresh.
   position was closed. One line said `FAIL` wrongly: the short was filled, but Lighter's account read still said flat a
   second later. The test now waits for that read, and the bot no longer lets an account read replace a position the stream
   gave it in the last 5 seconds.
-- **Before the first quote,** the run cancels your orders on that market, sets the leverage (cross margin) and schedules the cancel-all.
+- **The first real run: smallest size, ten minutes, ends flat.** After a clean live test, this is the bot quoting by itself for
+  the first time, with as little money at work as Lighter allows:
+
+  ```bash
+  .venv/bin/lighter run SPY "smart 0" --lev 2 --capital 16 --live --sl 1 --seconds 600 --flat
+  ```
+
+  $16 at 2x gives orders of about $13 and never more than $26 held; the position stop is $0.32, the stop on Lighter sits at
+  twice that, and `--sl 1` ends the run if it is $1 down. `--seconds 600 --flat` ends it after ten minutes with the position
+  closed (maker, then taker) instead of kept. It asks for `LIVE` like any live start. The same command without `--live` is
+  the paper rehearsal. What to read afterwards: `lighter/logs/run-live-<day>.jsonl`, `lighter/state/fills-live.jsonl` and
+  `status-live.json`.
+- **Before the first quote,** the run cancels your orders on that market, sets the leverage (cross margin) and withdraws a scheduled cancel-all an older version may have left.
   It treats every order on that market as its own: trade by hand on another market, or use a sub-account (`LIGHTER_ACCOUNT_INDEX`).
 - **Control** (CLI, or Telegram): `lighter pause` / `unpause` (no new orders; closing orders keep working), `close` (close the position, maker
   then taker, and stop), `stop` (quotes cancelled, position kept), `resume` (trade again after the kill or a daily stop).
@@ -299,7 +312,7 @@ starts, stops and ends.
 | `lighter record [--seconds N] [--markets A,B] [--no-depth]` | Record by hand (the scout does it) |
 | `lighter scout run [--record-only \| --follow]` / `scout scan [--capital 250] [--markets A,B] [--full]` | The scout daemon (with no flag the machine's `BOT_ROLE` decides what it does) / one scan now |
 | `lighter backtest MARKET SETUP [--capital 100] [--lev 50] [--stops 2/5/25] [--days D1,D2]` | One setup, day by day, with markouts |
-| `lighter run MARKET SETUP [--lev N\|max] [--capital X] [--sl X] [--tp X] [--vol 1m] [--live] [--bg]` | Run a setup |
+| `lighter run MARKET SETUP [--lev N\|max] [--capital X] [--sl X] [--tp X] [--vol 1m] [--seconds N [--flat]] [--live] [--bg]` | Run a setup (`--seconds`: stop after that long, position kept; with `--flat`, closed first) |
 | `lighter pilot approve N [--list most\|cheapest\|max] [--live]` | Run a list's pick |
 | `lighter pause` / `unpause` / `stop` / `close` / `resume` `[--mode paper\|live]` | Control the run |
 | `lighter auto [on\|off\|set\|status] [--live] [--budget X] [--cost X]` | The autopilot |

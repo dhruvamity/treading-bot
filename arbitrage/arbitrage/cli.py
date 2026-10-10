@@ -256,6 +256,38 @@ def cmd_run(a: argparse.Namespace, cfg: Config) -> int:
     return 0
 
 
+def cmd_livetest(a: argparse.Namespace, cfg: Config) -> int:
+    """The Lighter leg of the executor, once, on the real venue at the smallest size (arbitrage/exec/legtest.py).
+    Real money: ARB_LIVE=1 and LIVE typed here. It sends nothing to Arcus."""
+    from arbitrage import ops
+    from arbitrage.config import STATE, no_trading, read_env
+    from arbitrage.exec import legtest
+    from arbitrage.exec.lighter import LighterTrade
+
+    if no_trading():
+        print(f"not started: {no_trading()}")
+        return 1
+    if ops.running("live"):
+        print("not started: the live executor is running (arbitrage stop --live first): two programs must not trade "
+              "one account")
+        return 1
+    if read_env().get("ARB_LIVE", "").strip() != "1":
+        print("LIVE is off: put ARB_LIVE=1 in arcus/.env first (README.md, section 6). Nothing was sent.")
+        return 1
+    symbol = a.symbol.upper()
+    print(legtest.plan_text(symbol, a.expiry, a.max_loss))
+    if not sys.stdin.isatty():
+        print("not started: the live test needs you at the keyboard to type LIVE")
+        return 1
+    if input("\nType LIVE to start: ").strip() != "LIVE":
+        print("not started")
+        return 1
+    rep = asyncio.run(legtest.LegTest(LighterTrade(STATE), symbol, max_loss=a.max_loss, expiry=a.expiry).run())
+    p = legtest.write_report(rep, ROOT / "reports")
+    print("\n" + rep.text() + f"\nWritten to {p}")
+    return 0 if rep.clean and not rep.failed else 1
+
+
 def cmd_service(a: argparse.Namespace, cfg: Config) -> int:
     """`arbitrage start`, `arbitrage stop`: the executor in the background (arbitrage/ops.py)."""
     from arbitrage import ops
@@ -453,6 +485,12 @@ def main(argv: list[str] | None = None) -> None:
     money(p)
     p = sub.add_parser("stop", help="stop the background executor (its position and stops stay)")
     p.add_argument("--live", action="store_true")
+    p = sub.add_parser("livetest", help="REAL MONEY, minimum size: the Lighter leg's orders, once, with a report "
+                                        "(needs ARB_LIVE=1 and LIVE typed)")
+    p.add_argument("symbol", nargs="?", default="SPY")
+    p.add_argument("--expiry", action="store_true",
+                   help="also wait about 6 minutes to see Lighter expire a maker order")
+    p.add_argument("--max-loss", type=float, default=1.0, help="stop and close everything this many dollars down")
     sub.add_parser("settings", help="the settings and what they mean")
     p = sub.add_parser("set", help="change a setting: arbitrage set max_hold_h 72")
     p.add_argument("name")
@@ -472,7 +510,8 @@ def main(argv: list[str] | None = None) -> None:
         sys.exit(0)
     plain = {"settings": cmd_settings, "set": cmd_settings, "backtest": cmd_backtest, "run": cmd_run,
              "status": cmd_control, "close": cmd_control, "pause": cmd_control, "resume": cmd_control,
-             "skip": cmd_control, "unskip": cmd_control, "start": cmd_service, "stop": cmd_service}
+             "skip": cmd_control, "unskip": cmd_control, "start": cmd_service, "stop": cmd_service,
+             "livetest": cmd_livetest}
     if a.cmd in plain:
         sys.exit(plain[a.cmd](a, cfg))
     fn = {"scan": cmd_scan, "plan": cmd_plan, "paper": cmd_paper, "feeds": cmd_feeds}[a.cmd]

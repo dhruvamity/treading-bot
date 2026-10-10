@@ -36,6 +36,7 @@
 /lighter/OWNER_ACTIONS.md
 /arbitrage/data/
 /arbitrage/state/
+/arbitrage/reports/
 /arbitrage/settings.json
 /arbitrage/OWNER_ACTIONS.md
 *.sqlite

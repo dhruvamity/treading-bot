@@ -9,9 +9,9 @@
 - A dead bot's orders: every quote carries the shortest expiry Lighter takes (5.5 minutes), and the engine replaces
   it 2 minutes before that (an expiry cannot be moved). If the bot or its machine dies, Lighter drops every order
   within 5.5 minutes by itself. The live test of 2026-10-09 measured it: gone 17 s past the expiry.
-- The scheduled cancel-all ("dead man's switch", moved 5.5 minutes ahead every 60 s) is kept, but it is not that
-  protection: the same test showed Lighter acts on it only when the account's next request arrives, and a dead bot
-  sends none.
+- Lighter's scheduled cancel-all ("dead man's switch") is not sent any more. The same test showed Lighter acts on it
+  only when the account's next request arrives: a dead bot sends none, so it cleared nothing, and when it did fire
+  later (the owner's first request, the bot's restart) it would have taken the stop below with it.
 - A dead bot's position: while the bot holds one, a reduce-only stop-loss order rests on Lighter for it (`protect`),
   triggered at twice the bot's own position stop (consts.VENUE_STOP_X), so the bot's own exit comes first while it lives. It carries
   the 28-day expiry: it is what is left when the quotes have expired. It is not one of the engine's orders: the
@@ -41,8 +41,6 @@ from lighter_bot.venue.ws import WsClient
 
 log = Log("live")
 AUTH_LIFETIME_S = 7 * 3600
-DMS_EVERY_S = 60.0
-DMS_AHEAD_MS = C.CANCEL_ALL_MIN_MS + 30_000
 QUOTE_EXPIRY_MS = int(C.QUOTE_EXPIRY_S * 1000)
 STOP_EVERY_S = 10.0          # at most one change of it in this long (the position of a market maker moves all the time)
 STOP_SLIP = 0.05             # its worst price past the trigger (what the live test saw Lighter accept)
@@ -84,7 +82,6 @@ class LiveExchange(Exchange):
         self.started_ms = int(time.time() * 1000)
         self.auth_until = 0.0
         self._tasks: list[asyncio.Task[Any]] = []
-        self._last_dms = 0.0
         self._last_reconcile = 0.0
         self.vstop: Order | None = None           # the stop-loss order resting on Lighter (px is its trigger)
         self.stop_cids: set[int] = set()         # every stop this run placed: their frames are not quotes
@@ -287,22 +284,9 @@ class LiveExchange(Exchange):
         await self.rest.send([tx], kind=RESERVE, wait=True)
         log.info("leverage_set", market=self.market.symbol, leverage=leverage, fraction=frac)
 
-    async def dead_mans_switch(self, now: float) -> None:
-        if now - self._last_dms < DMS_EVERY_S:
-            return
-        self._last_dms = now
-        n = self._n(2)
-        txs = [self.signer.cancel_all(tif=C.CANCEL_ALL_ABORT, time_ms=0, nonce=n[0]),
-               self.signer.cancel_all(tif=C.CANCEL_ALL_SCHEDULED, time_ms=int(now * 1000) + DMS_AHEAD_MS,
-                                      nonce=n[1])]
-        try:
-            await self.rest.send(txs, kind=RESERVE, wait=True)
-        except ApiError as e:
-            log.warn("dms_refused", code=e.code, msg=e.message)
-            self._last_dms = now - DMS_EVERY_S + 10      # try again in 10 s
-
     async def disarm(self) -> None:
-        """Abort the scheduled cancel-all (a clean stop that leaves no orders)."""
+        """Withdraw a scheduled cancel-all, if the account has one (an older version of the bot kept one, and the
+        live test sets one to see what Lighter does with it)."""
         with contextlib.suppress(ApiError):
             await self.rest.send([self.signer.cancel_all(tif=C.CANCEL_ALL_ABORT, time_ms=0, nonce=self._n()[0])],
                                  kind=RESERVE, wait=True)
@@ -451,8 +435,7 @@ class LiveExchange(Exchange):
         self.orders = {k: o for k, o in self.orders.items() if o.state != "done" or now - o.sent_at < 60}
 
     async def upkeep(self, now: float) -> None:
-        """Called by the engine every second: dead man's switch, auth refresh, reconciles."""
-        await self.dead_mans_switch(now)
+        """Called by the engine every second: auth refresh, reconciles."""
         if now > self.auth_until:
             await self.subscribe_account()
         stale = any(o.state in ("sent", "cancelling") and now - o.sent_at > UNACKED_S for o in self.orders.values())
@@ -466,6 +449,7 @@ class LiveExchange(Exchange):
         await self.subscribe_account()
         await self.reconcile()
         await self.cancel_all()
+        await self.disarm()
 
     async def stop(self) -> None:
         with contextlib.suppress(Exception):

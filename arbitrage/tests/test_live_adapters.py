@@ -11,6 +11,7 @@ from typing import Any
 
 import pytest
 
+from arbitrage.exec import lighter as lighter_mod
 from arbitrage.exec.arcus import ArcusTrade, tpsl_orders
 from arbitrage.exec.lighter import LighterTrade, order_view
 from arbitrage.exec.venue import BUY, SELL, VenueDown
@@ -144,6 +145,17 @@ class FakeSigner:
         return ("leverage", kw)
 
 
+class FakeBook:
+    """Lighter's own list of the account's orders: every trigger order the signer made, unless hidden."""
+
+    def __init__(self, sg: FakeSigner) -> None:
+        self.sg, self.hidden = sg, set[int]()        # order types Lighter left out of a batch it answered OK to
+
+    async def active_orders(self, account: int, market: int | None = None) -> dict[str, Any]:
+        return {"orders": [{"client_order_index": o["client_index"], "status": "pending"} for o in self.sg.orders
+                           if o["trigger_price"] and o["order_type"] not in self.hidden]}
+
+
 def lighter(tmp_path: Path) -> tuple[LighterTrade, FakeSigner, list[Any]]:
     from lighter_bot.venue.market import Market
     from lighter_bot.venue.nonce import ClientIds, Nonces
@@ -152,6 +164,7 @@ def lighter(tmp_path: Path) -> tuple[LighterTrade, FakeSigner, list[Any]]:
     t.market = Market(market_id=19, symbol="BABA", price_decimals=2, size_decimals=4, min_base=0.04, min_quote=10.0,
                       imf_min=1000, imf_default=5000, mmf=600)
     t.account, t.signer = 12345, FakeSigner()
+    t.rest = FakeBook(t.signer)
     t.nonces, t.ids = Nonces(tmp_path / "n.txt"), ClientIds(tmp_path / "c.txt")
     sent: list[Any] = []
 
@@ -163,7 +176,8 @@ def lighter(tmp_path: Path) -> tuple[LighterTrade, FakeSigner, list[Any]]:
     return t, t.signer, sent
 
 
-async def test_lighter_orders_stops_and_leverage_as_they_would_be_signed(tmp_path: Path) -> None:
+async def test_lighter_orders_stops_and_leverage_as_they_would_be_signed(tmp_path: Path,
+                                                                         monkeypatch: pytest.MonkeyPatch) -> None:
     from lighter_bot.venue import consts as C
 
     t, sg_, sent = lighter(tmp_path)
@@ -186,6 +200,11 @@ async def test_lighter_orders_stops_and_leverage_as_they_would_be_signed(tmp_pat
     assert (stop["trigger_price"], take["trigger_price"], stop["size"]) == (9956, 11329, 51851)
     assert stop["price"] < stop["trigger_price"] and stop["tif"] == C.TIF_IOC  # may run 5% past the trigger, no more
     assert len(sent[-1]) == 2                                             # one request for the pair
+    # Lighter answers OK to a batch and leaves out a member it does not like: both must be on its own list
+    monkeypatch.setattr(lighter_mod, "STOPS_WAIT_S", 0.0)
+    t.rest.hidden = {C.ORDER_TAKE_PROFIT}
+    assert not await t.set_stops("BABA", 5.1851, 99.5632, 113.297)        # one is missing: not protected
+    t.rest.hidden = set()
     await t.set_stops("BABA", -5.1851, 113.297, 99.5632)                  # short: both legs buy, bound above
     assert not sg_.orders[-1]["is_ask"] and sg_.orders[-2]["price"] > sg_.orders[-2]["trigger_price"]
     assert not await t.set_stops("BABA", 0.0, 1.0, 2.0)

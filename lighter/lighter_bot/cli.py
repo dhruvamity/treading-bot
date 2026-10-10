@@ -230,8 +230,9 @@ def cmd_run(a: argparse.Namespace) -> None:
     async def go() -> None:
         eng = await build(cfg, spec)
         print(f"{spec.mode.upper()} {spec.market} {spec.setup} @ {spec.leverage:g}x: Ctrl-C stops it (quotes "
-              f"cancelled, the position kept)")
-        await eng.run_loop(a.seconds)
+              f"cancelled, the position kept)" + (f"; it ends by itself after {a.seconds:g} s"
+                                                 + (", flat" if a.flat else "") if a.seconds else ""))
+        await eng.run_loop(a.seconds, a.flat)
     try:
         asyncio.run(go())
     except RunRefused as e:
@@ -515,7 +516,8 @@ def main(argv: list[str] | None = None) -> None:
     p.add_argument("--spec")
     p.add_argument("--confirmed", action="store_true", help=argparse.SUPPRESS)
     p.add_argument("--bg", action="store_true", help="in the background")
-    p.add_argument("--seconds", type=float)
+    p.add_argument("--seconds", type=float, help="stop after this long (quotes cancelled, the position kept)")
+    p.add_argument("--flat", action="store_true", help="with --seconds: close the position (maker, then taker) first")
     p.set_defaults(fn=cmd_run)
     for name, help_ in (("stop", "stop the run (quotes cancelled, position kept)"),
                         ("close", "close the position (maker, then taker) and stop"),

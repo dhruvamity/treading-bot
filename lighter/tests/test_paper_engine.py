@@ -119,6 +119,37 @@ def test_the_engine_keeps_the_stop_on_the_venue_at_twice_its_own_position_stop(t
     assert asked == [(now, pytest.approx(2 * eng.sizes.pos_stop_usd))] and eng.sizes.pos_stop_usd > 0
 
 
+def test_a_run_with_a_time_limit_keeps_its_position_unless_told_to_end_flat(tmp_path):
+    def held(sub: str) -> tuple[PaperExchange, Engine]:
+        ex = paper(tmp_path / sub)
+        eng = Engine(ex, RunState(RunSpec("X", "Mid 0", 10.0, capital=100.0)), tmp_path / sub)
+        eng.period = 0.02
+        ex._book_fill(BUY, 100.01, 0.5)                       # the bot is long when its time is up
+        ex.cash -= 0.5 * 100.01
+        return ex, eng
+
+    ex, eng = held("a")
+    asyncio.run(eng.run_loop(0.1))
+    assert ex.acct.pos == 0.5 and not eng.stop_after_close and not [o for o in ex.live_orders() if o.state == "open"]
+    ex, eng = held("b")
+    t0 = time.time()
+
+    async def go() -> None:
+        task = asyncio.create_task(eng.run_loop(0.1, True))
+        while not task.done() and time.time() - t0 < 5:
+            await asyncio.sleep(0.05)
+            if eng.stop_after_close:
+                want = [o for o in ex.live_orders() if o.tag == "exit" and o.state == "open"]
+                if want and ex.acct.pos:                      # the maker exit at the touch: let it fill
+                    ex.cash += ex.acct.pos * want[0].px
+                    ex._book_fill(SELL, want[0].px, ex.acct.pos)
+                    want[0].state = "done"
+        await task
+
+    asyncio.run(go())
+    assert eng.stop_after_close and ex.acct.pos == 0 and time.time() - t0 < 5      # closed first, then stopped
+
+
 def test_engine_quotes_and_obeys_controls(tmp_path):
     ex = paper(tmp_path)
     run = RunState(RunSpec("X", "Mid 0", 10.0, capital=100.0))
