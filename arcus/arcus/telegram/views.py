@@ -448,6 +448,10 @@ def profile_text(scan: dict[str, Any] | None, profile: str, budget: float, now: 
 
     p = P.profile_of(profile)
     if not scan:
+        from arcus.common import role as roles
+
+        if roles.is_trader():
+            return card("🔎", "NO LISTS ON A TRADER", codes(*roles.TRADER_NO_LISTS))
         return card("🔎", "NO SCAN YET", codes("On the server: tbot up"))
     top = P.top(scan, p, budget)
     cap = (scan.get("capital") or {}).get("usd")
@@ -487,9 +491,10 @@ def pick_keyboard(top: list[dict[str, Any]], profile: str = "volume") -> Keyboar
 
 
 # ------------------------------------------------------------------ run any setup: the run form (Tread.fi's order form)
-def markets_keyboard(scan: dict[str, Any] | None) -> Keyboard:
-    """Every scanned market, the most backtested volume first (its best setup)."""
-    best: dict[str, float] = {}
+def markets_keyboard(scan: dict[str, Any] | None, known: list[str] | None = None) -> Keyboard:
+    """Every market a run can start on: the scanned ones with their most backtested volume first (the best setup's),
+    then the rest of `known` (the venue's own market list: all there is on a machine that never scans)."""
+    best: dict[str, float] = dict.fromkeys(known or [], 0.0)
     for c in (scan or {}).get("all") or []:
         vol = float(c["volume_day"]) if c.get("days") else 0.0
         best[c["market"]] = max(best.get(c["market"], 0.0), vol)

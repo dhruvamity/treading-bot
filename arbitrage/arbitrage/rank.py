@@ -42,6 +42,8 @@ class Leg:
     online: bool = True
     off_hours: bool = False
     category: str = ""          # the venue's own asset class: "EQUITIES", "INDICES", "COMMODITIES", "CRYPTO" (Arcus)
+    band_lo: float = 0.0        # Arcus, while the underlying is closed: the price band it trades in (0 = none now).
+    band_hi: float = 0.0        # A fill at or beyond an edge is rejected until that side widens (an hour of pressure)
 
 
 @dataclass(frozen=True)
@@ -82,6 +84,10 @@ class Settings:
     stop_pct: float = 0.0           # stop and take profit, % from the entry on both legs; 0 = dynamic (the two
                                     # stop_* settings above). A number here overrides it, up to 80% of the way to
                                     # liquidation
+    band_guard: bool = True         # while the stock market is closed, do not open a position whose stop on Arcus's leg
+                                    # would sit outside Arcus's off-hours price band: Arcus rejects fills at or past
+                                    # the band's edge, so that stop could not be filled while Lighter's leg, which
+                                    # has no band, is closed by its own (Arcus docs, real-world-assets)
     stop_early: float = 0.8         # once the price is this share of the way to the stop the position is closed with
                                     # limit orders (Arcus as maker, no fee); if the stop itself is reached before
                                     # that is done, the rest goes with taker orders at once. 0 = taker orders at
@@ -259,4 +265,12 @@ def plan(arcus: Leg, lighter: Leg, hist_arcus: list[float], hist_lighter: list[f
         r.append(f"position ${notional:,.0f} is under the venues' minimum order (${need:,.0f})")
     if sigma_day <= 0:
         r.append("no price history for the stop distance")
+    if s.band_guard and arcus.off_hours and 0 < arcus.band_lo < arcus.band_hi and arcus.mark > 0:
+        # Arcus's leg loses when the price rises if it is short there, when it falls if it is long
+        room = arcus.band_hi / arcus.mark - 1 if short is arcus else 1 - arcus.band_lo / arcus.mark
+        if stop > room:
+            r.append(f"Arcus's off-hours price band: the stop on its leg is {stop * 100:.2f}% away and the band lets "
+                     f"the price go only {max(room, 0.0) * 100:.2f}% further that way, so Arcus could not fill it "
+                     "(band_guard). It opens nearer the middle of the band, at a higher leverage, or when the "
+                     "stock market reopens")
     return p

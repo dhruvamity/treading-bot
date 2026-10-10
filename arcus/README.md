@@ -46,6 +46,20 @@ Arcus WebSocket ──► scout recorder ──► data/scout/tape/<MARKET>/<day
 
 ## 2. Tutorial: zero to a live run
 
+**Step 0. Where it runs.** On your own computer: install it (main [README](../README.md), section 2) and go on to step 1.
+On servers, do the setup first: one machine for everything is the main README's section 3; **a recorder VPS and a trader
+VPS is [Two servers, step by step](../README.md#two-servers-step-by-step-one-records-one-trades)**, every command in order.
+In short, after the clone and `bash deploy/scripts/bootstrap.sh` on both:
+
+```bash
+.venv/bin/tbot role recorder                       # on the recorder (no keys); `tbot role trader` on the trader (your keys)
+.venv/bin/tbot up                                  # starts only what that machine is for, and says which that is
+.venv/bin/tbot status                              # THIS MACHINE: recorder / trader
+```
+
+The steps below are then typed on the trader (or sent to its Telegram chat); the recorder only records, so on two servers
+`tbot up` in step 1 starts the Telegram bot and no scouts, and the lists of step 2 come from your own computer.
+
 **Step 1. Start it.** `.venv/bin/tbot up` starts both scouts and the Telegram bot. The first lists appear after about 3 days
 of recording; `/run` works at once and never waits for a scan.
 

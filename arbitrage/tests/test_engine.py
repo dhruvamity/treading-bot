@@ -600,6 +600,24 @@ def test_cycling_opens_whatever_the_funding_pays_and_closes_on_the_clock() -> No
     assert capped.notional < 51 * cyc.leverage
 
 
+def test_off_hours_nothing_opens_whose_arcus_stop_would_sit_outside_arcus_price_band() -> None:
+    """Arcus rejects a fill at or past its off-hours band; Lighter has no band. A stop beyond the band on Arcus's leg
+    could not be filled while Lighter's leg is closed by its own (Arcus docs: real-world assets, price bands)."""
+    a, b = legs()                                          # BABA, the stock market closed: 6.7x, the stop 4.2% away
+    thin, money, s = [4.4e-6] * 168, {"arcus": 120.0, "lighter": 120.0}, Settings(cycle_h=3)
+    free = plan(a, b, thin, [4e-6] * 168, 0.0167, money, s)
+    assert free.go and free.short_venue == "arcus" and free.stop_dist == pytest.approx(0.0417, abs=1e-3)
+    tight = replace(a, band_lo=a.mark * 0.95, band_hi=a.mark * 1.03)      # 3% of room above: a short's stop needs 4.2%
+    blocked = plan(tight, b, thin, [4e-6] * 168, 0.0167, money, s)
+    assert not blocked.go and "off-hours price band" in blocked.reasons[-1] and "3.00%" in blocked.reasons[-1]
+    assert plan(tight, b, thin, [4e-6] * 168, 0.0167, money, replace(s, band_guard=False)).go
+    wide = replace(a, band_lo=a.mark * 0.99, band_hi=a.mark * 1.05)       # the losing side is the upper: 5% will do
+    assert plan(wide, b, thin, [4e-6] * 168, 0.0167, money, s).go
+    long_there = plan(wide, b, thin, [4e-6] * 168, 0.0167, money, s, short_venue="lighter")   # long on Arcus: 1% below
+    assert not long_there.go and "1.00%" in long_there.reasons[-1]
+    assert plan(replace(tight, off_hours=False), b, thin, [4e-6] * 168, 0.0167, money, s).go  # in the session: no band
+
+
 def test_with_no_market_named_profundings_best_stock_is_looked_at_first() -> None:
     from arbitrage.scan import candidates
     a, b = legs()

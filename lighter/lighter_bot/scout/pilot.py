@@ -34,13 +34,19 @@ def latest(cfg: Config) -> dict[str, Any] | None:
     return ops.read_json(cfg.data_dir / "scout" / "latest.json")
 
 
+NO_LISTS_HERE = ("no list on this machine: it does not scan. Lists come from the machine that does (BOT_SYNC_FROM in "
+                 "arcus/.env). Your own pick needs none: /l_run SPY smart +1 50x paper")
+
+
 def pick(cfg: Config, lst: str, n: int) -> dict[str, Any]:
     scan = latest(cfg)
     if scan is None:
-        raise ValueError("no scan yet: is the scout running? (lighter up)")
+        raise ValueError("no scan yet: is the scout running? (lighter up)" if cfg.ranks else NO_LISTS_HERE)
     age = (time.time() - scan["t"]) / 60
     if age > MAX_SCAN_AGE_MIN:
-        raise ValueError(f"the last scan is {age:.0f} minutes old: is the scout running?")
+        raise ValueError(f"the last scan is {age:.0f} minutes old: is the scout running?" if cfg.ranks else
+                         f"the last list is {age:.0f} minutes old: nothing has arrived from the machine that scans "
+                         "(`tbot sync status`). Your own pick needs none: /l_run SPY smart +1 50x paper")
     rows = scan["lists"].get(lst) or []
     if not 1 <= n <= len(rows):
         raise ValueError(f"the {lst} list has {len(rows)} entries")

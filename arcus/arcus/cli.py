@@ -212,7 +212,8 @@ def _up(parts: tuple[str, ...], show: bool = True) -> None:
     from arcus.telegram.control import Control
 
     app = load_app()
-    _role()
+    for line in roles.note(_role(), roles.memory_mb()):
+        print(line)
     live = Control(app).is_running("live")
     for line in ops.up_parts(app, dict(os.environ), live, parts):
         print(line)
@@ -275,6 +276,18 @@ def cmd_tbot_status(a: argparse.Namespace) -> None:
 
     _role()
     print(ops.dashboard(load_app(), dict(os.environ), Path.cwd(), "all"))
+
+
+def cmd_tbot_role(a: argparse.Namespace) -> None:
+    """`tbot role [trader|recorder|scout|all]`: say what this machine is for, or set it (BOT_ROLE in .env)."""
+    if a.role:
+        roles.write(a.role)
+        os.environ[roles.ENV] = a.role
+        print(f"BOT_ROLE={a.role} is now in .env.")
+    for line in roles.note(_role(), roles.memory_mb()):
+        print(line)
+    if a.role:
+        print("It applies to what is started from now on: `tbot down`, then `tbot up` (a running trade is left alone).")
 
 
 def cmd_tbot_scout(a: argparse.Namespace) -> None:
@@ -830,7 +843,9 @@ def cmd_auto(a: argparse.Namespace) -> None:
         print("\nNext 24 h at a usual market:")
         print("\n".join("  " + x for x in ap.plan_lines(pb, ap.ceiling(ap.settings_of(st), pb))))
     else:
-        print("\nNo playbook yet: the scout builds it after its next scan (or `arcus scout playbook`)")
+        print("\nNo playbook on this machine: a trader builds none; it arrives with the lists from the machine that "
+              "scans (BOT_SYNC_FROM in .env). Until then the autopilot starts nothing." if roles.is_trader() else
+              "\nNo playbook yet: the scout builds it after its next scan (or `arcus scout playbook`)")
 
 
 def cmd_account(a: argparse.Namespace) -> None:
@@ -1180,6 +1195,7 @@ TBOT_HELP = """tbot: the commands that belong to no single bot (one install, thr
   tbot up [arcus] [lighter] [telegram]   start those parts; with none named, all of them (BOT_ROLE decides what a part is)
   tbot down [parts] [--all]              stop them; --all also stops their runs (quotes cancelled, positions kept)
   tbot status                            one screen for the whole machine
+  tbot role [trader|recorder|scout|all]  what this machine is for (BOT_ROLE in .env): say it, or set it
   tbot scout [arcus|lighter|both]        start the scouts (--stop stops them)
   tbot telegram [--read-only]            the one Telegram bot for Arcus, Lighter and the arbitrage, in this terminal
   tbot recommend [MARKET ...] [--scan]   the best setups of each list, as the Telegram lines to paste
@@ -1199,7 +1215,7 @@ def main_tbot(argv: list[str] | None = None) -> None:
         main(args)
         return
     p = argparse.ArgumentParser(prog="tbot", description=TBOT_HELP, formatter_class=argparse.RawDescriptionHelpFormatter)
-    sub = p.add_subparsers(dest="cmd", required=True, metavar="up|down|status|scout|telegram|recommend|export|import|sync")
+    sub = p.add_subparsers(dest="cmd", required=True, metavar="up|down|status|role|scout|telegram|recommend|export|import|sync")
     sp = sub.add_parser("up", help="start parts")
     sp.add_argument("parts", nargs="*", help="arcus, lighter, telegram, scouts; none = all")
     sp.set_defaults(fn=cmd_tbot_up)
@@ -1208,6 +1224,9 @@ def main_tbot(argv: list[str] | None = None) -> None:
     sp.add_argument("--all", action="store_true", help="also stop the runs of those parts (positions kept)")
     sp.set_defaults(fn=cmd_tbot_down)
     sub.add_parser("status", help="the whole machine on one screen").set_defaults(fn=cmd_tbot_status)
+    sp = sub.add_parser("role", help="what this machine is for: trader, recorder, scout or all")
+    sp.add_argument("role", nargs="?", choices=list(roles.ROLES))
+    sp.set_defaults(fn=cmd_tbot_role)
     sp = sub.add_parser("scout", help="start or stop the scouts")
     sp.add_argument("which", nargs="?", choices=["arcus", "lighter", "both"], default="both")
     sp.add_argument("--stop", action="store_true")

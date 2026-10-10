@@ -229,7 +229,9 @@ def others_status(role: str = "all") -> list[str]:
         if rec:
             lines.append(f"  recorder  {rec.get('markets', 0)} markets · {int(rec.get('rows_total') or 0):,} rows · last "
                          f"written {ago(age)} ago" + (" · PAUSED: disk nearly full" if rec.get("paused_for_disk") else "")
-                         + (" (on the other machine, as last fetched)" if role == "trader" else ""))
+                         + ("" if role != "trader" else " (on the other machine, as last fetched)"
+                            if os.environ.get("BOT_SYNC_FROM") else
+                            " (an old file from when this machine recorded: a trader records nothing)"))
         runs = [m for m in ("live", "paper") if st["services"].get(f"run-{m}")]
         for m in runs:
             r = st.get(m) or {}

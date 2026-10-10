@@ -148,16 +148,19 @@ def load_dotenv(path: Path | str = ".env") -> list[str]:
     p = Path(path)
     if not p.exists():
         return []
-    set_names = []
+    found: dict[str, str] = {}
     for line in p.read_text().splitlines():
         line = line.strip()
         if not line or line.startswith("#") or "=" not in line:
             continue
         k, _, v = line.partition("=")
         k, v = k.strip(), v.strip().strip('"').strip("'")
-        if k and v and k not in os.environ:
-            os.environ[k] = v
-            set_names.append(k)
+        if k and v:
+            found[k] = v      # a name written twice: the LAST line counts, as the Lighter bot and the arbitrage read
+                              # the same file (first-wins here made the three disagree on BOT_ROLE after an `echo >>`)
+    set_names = [k for k in found if k not in os.environ]
+    for k in set_names:
+        os.environ[k] = found[k]
     return set_names
 
 

@@ -32,6 +32,9 @@ Where each stands (October 2026):
 They start everything, show one status screen, run the best Arcus setup on paper, close it, and pack everything recorded
 and traded into one file ([Export and import](#4-export-and-import)).
 
+**Setting up servers?** [Two servers, step by step](#two-servers-step-by-step-one-records-one-trades) has every command
+in order for a recorder VPS and a trader VPS.
+
 **New here?** Section [9](#9-tutorial-the-commands-by-what-you-want-to-do) is the step-by-step guide with the exact
 command for each job, for all three bots. Section [10](#10-two-small-servers-azure-free-tier-and-the-arbitrage-alone)
 covers 1 GB servers (an Azure free-tier VM, the arbitrage on its own, a recorder plus a trader).
@@ -45,6 +48,7 @@ covers 1 GB servers (an Azure free-tier VM, the arbitrage on its own, a recorder
 | Start both scouts, nothing else | `tbot scout` (or `tbot up scouts`) |
 | Stop them | `arcus down`, `lighter down`, `tbot down [parts]` (`--all` also stops the runs: positions are kept) |
 | Look | `arcus status`, `lighter status`, `arbitrage status`, and `tbot status` for the whole machine |
+| Say what this machine is for | `tbot role` shows it; `tbot role trader` (or `recorder`, `scout`, `all`) sets `BOT_ROLE` in `.env` |
 | The Telegram bot, in a terminal | `tbot telegram` (the one bot controls all three; it has no owner among them) |
 | Export, import, sync, recommend | `tbot export`, `tbot import`, `tbot sync`, `tbot recommend` |
 
@@ -139,6 +143,7 @@ chmod 600 .env
 | `LIGHTER_ADDRESS`, `LIGHTER_API_PRIVATE_KEY`, `LIGHTER_API_KEY_INDEX`, `LIGHTER_ACCOUNT_INDEX` | The Lighter key ([lighter/README.md](lighter/README.md), section 3) | Lighter live |
 | `LBOT_LIVE=1` | Allows live Lighter runs | Lighter live |
 | `ARB_LIVE=1`, `ARCUS_ACCOUNT_INDEX` | Allows the live arbitrage; the Arcus subaccount it uses | arbitrage live |
+| `PROFUNDING_API_KEY` | ProFunding's data key (read-only; never give it an exchange key) | the arbitrage, when ProFunding decides the side or the market |
 | `BOT_ROLE` | What this machine is for: `all` (default), `trader`, `recorder` or `scout` ([two machines](#two-machines-one-records-one-trades)) | two machines |
 | `BOT_SYNC_FROM`, `BOT_SYNC_KEY` | On a trader: `user@host` of the machine that makes the lists, and the key file it fetches with (default `~/.ssh/treading_bot_sync`) | a trader that fetches lists |
 
@@ -168,7 +173,8 @@ A server records around the clock and trades while your laptop is off. Recording
 0.3–0.5 GB a day for both venues (10–15 GB a month). Pick a region both venues allow; `arcus region-check` asks Arcus,
 and `arcus/scripts/latency_map.py` shows how far the machine is from each venue.
 
-**Set it up** (once, as a normal user who can `sudo`):
+**Set it up** (once, as a normal user who can `sudo`). This is one machine that does everything; for a recorder and a
+trader on two small servers use [the step-by-step guide](#two-servers-step-by-step-one-records-one-trades) below.
 
 ```bash
 git clone https://github.com/dhruvamity/treading-bot.git
@@ -215,6 +221,129 @@ make install
 - **Seed a new server** with the history you already have: `tbot export --full` on the old machine, copy the file,
   `tbot import` on the new one.
 
+### Two servers, step by step: one records, one trades
+
+Every command, in order. Two Ubuntu 24.04 servers, 1 vCPU and 1 GB each are enough: the **recorder** needs disk (10–15 GB a
+month for both venues) and no keys; the **trader** holds the keys and must be in a region Arcus allows. Log in with an SSH key.
+(`bootstrap.sh` and the link between two real servers have not been run on real servers yet: read what each step prints.)
+
+**A. On both servers**, the same lines. A 1 GB machine gets a swap file first:
+
+```bash
+sudo fallocate -l 2G /swapfile && sudo chmod 600 /swapfile && sudo mkswap /swapfile && sudo swapon /swapfile
+echo '/swapfile none swap sw 0 0' | sudo tee -a /etc/fstab
+```
+```bash
+git clone https://github.com/dhruvamity/treading-bot.git
+cd treading-bot/arcus
+bash deploy/scripts/bootstrap.sh
+```
+
+The script installs the three bots, keeps the clock in sync, closes the firewall to everything but SSH, creates `.env` from the
+template and makes `tbot up` run after every reboot. It starts nothing.
+
+**B. The recorder** (no keys go on this machine):
+
+```bash
+cd ~/treading-bot/arcus
+.venv/bin/tbot role recorder               # writes BOT_ROLE=recorder into .env and says what this machine now is
+.venv/bin/tbot up                         # both recorders; no scans, no Telegram, no trading
+.venv/bin/tbot status                     # THIS MACHINE: recorder (records only); the rows climb
+cat data/scout/recorder.json              # last_msg_age_s a few seconds, paused_for_disk false
+df -h /                                   # recording pauses under 5 GB free
+```
+
+**C. The trader.** Put the keys in `.env` first, either by typing them (`nano .env`) or by copying the file you already have,
+from your own computer: `scp arcus/.env USER@TRADER:treading-bot/arcus/.env`.
+
+| Line in `.env` | For |
+|---|---|
+| `ARCUS_ADDRESS`, `ARCUS_API_PRIVATE_KEY`, `ARCUS_ACCOUNT_INDEX` | Arcus, and the arbitrage's Arcus leg |
+| `LIGHTER_ADDRESS`, `LIGHTER_API_PRIVATE_KEY`, `LIGHTER_API_KEY_INDEX`, `LIGHTER_ACCOUNT_INDEX` | Lighter, and the arbitrage's Lighter leg |
+| `TELEGRAM_BOT_TOKEN`, `TELEGRAM_CHAT_ID`, `TELEGRAM_ALLOWED_USER_IDS` | control and alerts from the phone |
+| `PROFUNDING_API_KEY` | the arbitrage, when ProFunding decides the side or the market (`/arb_lev max max SPY`) |
+| `BOT_PILOT_LIVE`, `LBOT_LIVE`, `ARB_LIVE` | leave empty: paper. `1` only when you go live with that bot |
+
+```bash
+cd ~/treading-bot/arcus
+.venv/bin/tbot role trader                 # writes BOT_ROLE=trader into .env and says what this machine now is
+chmod 600 .env
+.venv/bin/arcus region-check              # must say OK for Arcus perps
+.venv/bin/arcus doctor                    # keys, account and clock; reads only
+.venv/bin/tbot up                         # the Telegram bot and the runs' guardian; no recording, no scans
+.venv/bin/tbot status                     # THIS MACHINE: trader (Telegram and trading)
+```
+
+**Check it took.** `tbot up` prints `this machine: trader` as its first line and `tbot status` begins with
+`THIS MACHINE: trader`. A trader still starts two small `scout` processes, which watch its own runs and record nothing:
+
+| Line of `tbot up` | Right, on a trader | Wrong: the role was not set |
+|---|---|---|
+| `scout: started …` | `[this machine is a trader: …]` | `[always]` |
+| `lighter scout: started …` | `[it follows the other machine's lists; no recording here]` | `[it records, with no keys and no orders]` |
+
+If you see the right-hand column: `tbot down`, `tbot role trader`, `tbot up`. On a machine with under 3 GB of memory and no
+role, `tbot up` prints a warning saying so. (`tbot role` writes the line whatever the file looks like: an `.env` made before
+the roles existed has no `BOT_ROLE` line, and editing a line that is not there changes nothing.)
+
+**D. From the phone**, in the trader's Telegram chat: `/whoami`, then `/status`, `/l_status`, `/arb_status`. A paper run of each bot:
+
+```
+/run SPY smart 0 50x paper
+/l_run SPY smart +1 50x paper
+/arb_lev max max SPY
+/arb_cycle 3
+/arb_start 120 120
+```
+
+The last three are the funding arbitrage on SPY at the highest leverage, renewed every 3 funding payments, on paper with a
+pretend $120 a venue (section 9.5). Live runs come after each bot's own checks: sections 9.3 to 9.5.
+
+**E. Let the trader watch the recorder** (optional; it sends `⚠️ TWO MACHINES` to Telegram when the recorder goes quiet).
+On the **trader**:
+
+```bash
+.venv/bin/tbot sync key                   # prints one line starting ssh-ed25519
+```
+On the **recorder**, with that whole line in quotes:
+```bash
+.venv/bin/tbot sync allow 'ssh-ed25519 AAAA… treading-bot-sync'
+```
+Back on the **trader** (the recorder's user and address; its private address when both are in one network):
+```bash
+echo 'BOT_SYNC_FROM=USER@RECORDER-ADDRESS' >> .env
+.venv/bin/tbot sync pull                  # try it once
+.venv/bin/tbot sync status                # when it last worked
+.venv/bin/tbot down && .venv/bin/tbot up
+```
+The trader asks and nothing ever logs in to the trader; that key can run one command on the recorder and gets no shell. If it
+cannot connect, allow port 22 from the trader's address in the recorder's network rules.
+
+**F. Bring the recording home** every few days, for backtests and for the setups worth running. On the recorder:
+
+```bash
+.venv/bin/tbot export                     # prints the file name and the scp line
+```
+On your own computer, from `treading-bot/arcus`:
+```bash
+scp USER@RECORDER:treading-bot/exports/tb-XXXX.tar ~/Downloads/
+.venv/bin/tbot import                     # must end "N complete, 0 short"
+.venv/bin/arcus recommend --scan          # the best setups, as lines to paste into Telegram
+```
+
+**G. Update either server** after a change to the code:
+
+```bash
+cd ~/treading-bot/arcus
+git pull
+make install
+.venv/bin/tbot down
+.venv/bin/tbot up
+```
+
+`tbot down` leaves a running trade alone. After a reboot `tbot up` comes back by itself on both; **the arbitrage executor does
+not**: start it again with `/arb_start` (it picks its position up from its files; section 10.4).
+
 ### Two machines: one records, one trades
 
 One small server cannot record, rank and trade at once: on 2026-10-09 the two recorders together took about 210 MB,
@@ -236,13 +365,8 @@ machine's `.env`, and `tbot up` starts only what that machine is for. All three 
 - **What it does not have by itself is the lists** (`/top3`, the pilot's picks, both autopilots): they are worked out
   from the tape, where the tape is. They reach the trader in one of two ways, below.
 
-**A trader and a recorder (two small servers).** No connection between them is needed. On each:
-
-```bash
-echo "BOT_ROLE=recorder" >> .env
-```
-
-(`BOT_ROLE=trader` on the other), then `.venv/bin/tbot up`. For lists, bring the tape to a bigger computer and scan
+**A trader and a recorder (two small servers).** No connection between them is needed; the commands are in
+[the step-by-step guide above](#two-servers-step-by-step-one-records-one-trades). For lists, bring the tape to a bigger computer and scan
 there: `tbot export` on the recorder, `tbot import` at home ([section 4](#4-export-and-import)), then
 
 ```bash
@@ -694,6 +818,8 @@ and two 64 GiB disks. These terms change: read your account's "free services" pa
   to spare, so **add a swap file first** (below) and measure with `free -m` and `ps -eo rss,cmd --sort=-rss | head` after a day.
 
 ### 10.3 Set up the VM
+
+The whole two-server setup, command by command, is in [section 3](#two-servers-step-by-step-one-records-one-trades); this part is what is particular to Azure.
 
 In the Azure portal: **Create a virtual machine** → image **Ubuntu Server 24.04 LTS**, size **Standard_B1s**, authentication **SSH
 public key**, an allowed region, OS disk 64 GiB (it is free), inbound port **22 only**. After it exists, in its Networking page edit the

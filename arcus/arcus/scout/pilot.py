@@ -325,6 +325,11 @@ class Pilot:
         run (it refused everything once the scan was 90 minutes old, e.g. during a long scan)."""
         scan = self.latest_scan()
         if not scan:
+            from arcus.common import role as roles
+
+            if roles.is_trader():
+                raise ValueError("no list on this machine: a trader makes none (they come from the machine that scans, "
+                                 "BOT_SYNC_FROM in .env). /run SPY mid 0 max paper needs no list")
             raise ValueError("no scan yet: start `arcus scout run` and wait for the first scan (or /run any setup)")
         return scan
 
@@ -450,7 +455,15 @@ class Pilot:
         spec = self.control.app.sizing.capital_usd
         if str(spec).lower() != "auto":
             return float(spec)
-        raise ValueError("no capital known yet: start `arcus scout run` so it can read the account")
+        raise ValueError("no capital known yet: the account could not be read. Is ARCUS_ADDRESS in .env and the "
+                         "account funded (/balance)? Or give a number: /set capital 100")
+
+    def markets(self) -> list[str]:
+        """Every market a run can be started on: the ones the last scan backtested, and the ONLINE ones of the market
+        list this machine reads from Arcus itself. A trader never scans, so on a trader it is the second alone."""
+        scanned = {c["market"] for c in (self.latest_scan() or {}).get("all") or []}
+        online = {m for m, x in self._meta().items() if x.get("status") in (None, "ONLINE")}
+        return sorted(scanned | online)
 
     def _meta(self) -> dict[str, dict[str, Any]]:
         try:

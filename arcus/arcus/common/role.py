@@ -17,12 +17,15 @@ three packages do not import each other.
 from __future__ import annotations
 
 import os
+import stat
 from collections.abc import Mapping
+from pathlib import Path
 
 ENV = "BOT_ROLE"
 ROLES = ("all", "trader", "recorder", "scout")
 WHAT = {"all": "records, ranks, Telegram and trading", "trader": "Telegram and trading",
         "recorder": "records only", "scout": "records and ranks"}
+SMALL_MB = 3000        # under this much memory a machine cannot record, rank and trade at once
 
 
 def role(env: Mapping[str, str] | None = None) -> str:
@@ -32,6 +35,65 @@ def role(env: Mapping[str, str] | None = None) -> str:
     if v not in ROLES:
         raise ValueError(f"{ENV}={v!r} in .env: must be one of {', '.join(ROLES)}")
     return v
+
+
+def write(r: str, path: Path | str = ".env") -> Path:
+    """Put BOT_ROLE=r in the .env file (`tbot role trader`): the line that is there is replaced and a second one is
+    dropped; a file without the line (an .env made before the roles existed) gets it at the end. Every other line is
+    kept as it is, and the file stays private."""
+    if r not in ROLES:
+        raise ValueError(f"{r!r} is not a role: one of {', '.join(ROLES)}")
+    p = Path(path)
+    out, done = [], False
+    for ln in p.read_text().splitlines() if p.exists() else []:
+        if ln.split("=", 1)[0].strip() == ENV and not ln.lstrip().startswith("#"):
+            if not done:
+                out.append(f"{ENV}={r}")
+            done = True
+        else:
+            out.append(ln)
+    if not done:
+        out.append(f"{ENV}={r}")
+    if not p.exists():
+        os.close(os.open(p, os.O_WRONLY | os.O_CREAT, 0o600))
+    p.write_text("\n".join(out) + "\n")
+    os.chmod(p, stat.S_IRUSR | stat.S_IWUSR)
+    return p
+
+
+def memory_mb() -> float | None:
+    """This machine's memory in MB (None where the system does not say)."""
+    try:
+        return os.sysconf("SC_PAGE_SIZE") * os.sysconf("SC_PHYS_PAGES") / 1e6
+    except (ValueError, OSError, AttributeError):
+        return None
+
+
+def note(r: str, mem_mb: float | None = None) -> list[str]:
+    """What `tbot up` says first: what this machine is for, and a warning when a small machine is about to do
+    everything because nobody told it its role."""
+    out = [f"this machine: {r} ({WHAT[r]}). `tbot role trader|recorder|scout|all` changes it"]
+    if r == "all" and mem_mb is not None and mem_mb < SMALL_MB:
+        out.append(f"WARNING: {mem_mb:,.0f} MB of memory and no BOT_ROLE: this machine is about to record and rank as "
+                   "well as trade, which needs about 8 GB. On a small server run `tbot role trader` (the keys are "
+                   "here; no recording) or `tbot role recorder` (no keys), then `tbot down` and `tbot up`.")
+    return out
+
+
+# What to say on a trader where a list, a scan or a playbook is asked for: it never makes one, so "wait for the scan"
+# would be wrong advice (2026-10-11: a trader answered /top3 with "NO SCAN YET, on the server: tbot up")
+TRADER_NO_LISTS = ("This machine is a trader: it makes no lists and no scans",
+                   "Lists come from the machine that scans (BOT_SYNC_FROM in .env)",
+                   "or from your own computer: tbot sync push USER@THIS-MACHINE",
+                   "No list is needed for your own pick: /run SPY mid 0 max paper")
+
+
+def is_trader(env: Mapping[str, str] | None = None) -> bool:
+    """True on a trader machine; False for every other role and for a BOT_ROLE that is not a role."""
+    try:
+        return role(env) == "trader"
+    except ValueError:
+        return False
 
 
 def records(r: str) -> bool:
