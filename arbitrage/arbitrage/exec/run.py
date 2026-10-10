@@ -96,13 +96,15 @@ class FileStore:
 class LivePlanner:
     """The engine's eyes: the scanner's best plan now, and how an open position's difference is doing."""
 
-    def __init__(self, cfg: Callable[[], Config], skip: Callable[[], set[str]] = set) -> None:
-        self.cfg, self.skip = cfg, skip
+    def __init__(self, cfg: Callable[[], Config], skip: Callable[[], set[str]] = set,
+                 only: Callable[[], set[str]] = set) -> None:
+        self.cfg, self.skip, self.only = cfg, skip, only
 
     async def best(self, collateral: dict[str, float]) -> Plan | None:
-        res = await scanner.run(self.cfg(), top=12, collateral=collateral)
+        only = self.only()                         # `arbitrage only SPY QQQ`: nothing else is looked at
+        res = await scanner.run(self.cfg(), top=12, collateral=collateral, symbols=sorted(only) or None)
         skip = self.skip()
-        return next((p for p in res.plans if p.go and p.symbol not in skip), None)
+        return next((p for p in res.plans if p.go and p.symbol not in skip and (not only or p.symbol in only)), None)
 
     async def edges(self, symbol: str, short_venue: str) -> tuple[float, float] | None:
         res = await scanner.run(self.cfg(), symbols=[symbol], collateral={"arcus": 1.0, "lighter": 1.0})
@@ -113,11 +115,20 @@ class LivePlanner:
         return sign * p.edge_next_h, sign * p.edge_24h
 
 
-def skipped(root: Path = ROOT) -> set[str]:
+def listed(name: str, root: Path = ROOT) -> set[str]:
+    """A list of markets kept in settings.json: "skip" (never opened) or "only" (nothing else is opened)."""
     try:
-        return {str(x).upper() for x in json.loads((root / "settings.json").read_text()).get("skip", [])}
+        return {str(x).upper() for x in json.loads((root / "settings.json").read_text()).get(name, [])}
     except (OSError, ValueError, AttributeError):
         return set()
+
+
+def skipped(root: Path = ROOT) -> set[str]:
+    return listed("skip", root)
+
+
+def allowed(root: Path = ROOT) -> set[str]:
+    return listed("only", root)
 
 
 def telegram_alert(env: dict[str, str]) -> Callable[[str], None] | None:
@@ -226,7 +237,7 @@ async def run(mode: str, *, seconds: float | None = None, collateral: dict[str, 
         venues = live_venues()
     else:
         venues, closer = await paper_venues(collateral or {})
-    eng = Engine(venues, LivePlanner(load, skipped), lambda: load().settings, store, state=store.load(),
+    eng = Engine(venues, LivePlanner(load, skipped, allowed), lambda: load().settings, store, state=store.load(),
                  require_native_stops=mode == "live")
     funding = PaperFunding(STATE / "paper-funding.json") if mode == "paper" else None
     books = STATE / "paper-venues.json"         # the paper venues' positions and money, kept across restarts

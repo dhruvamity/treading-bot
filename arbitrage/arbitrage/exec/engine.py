@@ -2,10 +2,14 @@
 
     flat -> entering -> open -> exiting -> flat
 
-- **entering / exiting:** each leg works one post-only order at the best price and follows it (`requote_s`). When
-  one leg has been ahead of the other for `chase_s`, the difference is crossed with a taker order on the leg that is
-  behind, provided that costs no more than `max_cross_bp` (half its spread plus its taker fee). If it would cost
-  more, the leg keeps following as maker; after `enter_timeout_s` it crosses anyway: equal legs come before cost.
+- **entering / exiting:** the leg on the venue that charges takers (Arcus) works one post-only order at the best
+  price and follows it (`requote_s`). The leg on the venue whose taker orders are free (Lighter) rests nothing: every
+  loop it takes whatever the other leg has filled, so the two legs are never apart for longer than a loop
+  (`hedge_taker`; on the one day both books were recorded this cost the same as a maker order there and left the
+  position one-sided for half a second instead of ten). With `hedge_taker` off, or when both venues charge takers or
+  neither does, both legs rest maker orders: when one has been ahead of the other for `chase_s`, the difference is
+  crossed on the leg that is behind, provided that costs no more than `max_cross_bp` (half its spread plus its taker
+  fee). After `enter_timeout_s` an entry is left at what has filled, and an exit is finished with taker orders.
 - **open:** both venues hold their own stop and take profit for the whole position (`set_stops`), and the bot checks
   the same distances itself. If either leg shrinks or disappears (its stop fired, a liquidation, a manual close) the
   other leg is closed at once. Every few minutes `rank.exit_reason` decides whether to keep it; the settings are read
@@ -97,6 +101,7 @@ class State:
     why: str = ""                                      # why it is closing
     urgent: bool = False
     paused: bool = False
+    waiting: bool = False                              # flat and opening nothing until the money has been moved
     pause_after: bool = False                          # once flat again, open nothing until `arbitrage resume`
     last_hint: float = 0.0                             # when the owner was last told to move money
     plan: dict[str, Any] = field(default_factory=dict)
@@ -267,8 +272,20 @@ class Engine:
             if c is None:
                 return
             money[name] = c
-        if now - st.last_hint > HINT_EVERY_S and self._tell_transfer(money):
-            st.last_hint = now
+        s = self.settings()
+        if self._uneven(money, s) is not None:
+            wait = s.uneven_wait
+            if now - st.last_hint > (s.uneven_remind_min * 60 if wait else HINT_EVERY_S):
+                self._tell_transfer(money)
+                st.last_hint = now
+            if wait:                                  # nothing is opened until the owner has moved it
+                st.waiting = True
+                return
+        elif st.waiting:
+            st.waiting = False
+            self._say("rebalance", "the money is even again ("
+                      + ", ".join(f"{v} ${x:,.2f}" for v, x in money.items()) + "): looking for positions again",
+                      money=dict(money))
         p = await self.planner.best(money)
         if p is None or not p.go:
             return
@@ -305,20 +322,40 @@ class Engine:
         """Say exactly how much to move between the venues when one holds less than `rebalance_share` of the money.
         A closed position leaves its gain on one venue and its loss on the other; the smaller balance sizes the next
         position, and only the owner can move money (the venues cannot send to each other). True when it was said."""
+        s = self.settings()
+        found = self._uneven(money, s)
+        if found is None:
+            return False
+        move, high, low, share = found
+        total = sum(money.values())
+        then = ("Nothing is opened until it has arrived; the bot sees it by itself" if s.uneven_wait
+                else "Until then the next position is sized by the smaller")
+        self._say("rebalance", f"MOVE ${move:,.2f} from {high} to {low}. {high} has ${money[high]:,.2f}, {low} "
+                               f"${money[low]:,.2f} ({share * 100:.0f}% of ${total:,.2f}); after it each has "
+                               f"${total / 2:,.2f}. {then}",
+                  move=round(move, 2), src=high, dst=low, money=dict(money))
+        return True
+
+    @staticmethod
+    def _uneven(money: dict[str, float], s: Settings) -> tuple[float, str, str, float] | None:
+        """(dollars to move, from, to, the smaller venue's share) when one venue is under `rebalance_share`."""
         total = sum(money.values())
         if total <= 0 or len(money) < 2:
-            return False
+            return None
         low = min(money, key=lambda v: money[v])
         high = max(money, key=lambda v: money[v])
         share = money[low] / total
-        if share >= self.settings().rebalance_share:
-            return False
-        move = (money[high] - money[low]) / 2
-        self._say("rebalance", f"MOVE ${move:,.2f} from {high} to {low}. {high} has ${money[high]:,.2f}, {low} "
-                               f"${money[low]:,.2f} ({share * 100:.0f}% of ${total:,.2f}); after it each has "
-                               f"${total / 2:,.2f}. Until then the next position is sized by the smaller",
-                  move=round(move, 2), src=high, dst=low, money=dict(money))
-        return True
+        if share >= s.rebalance_share:
+            return None
+        return (money[high] - money[low]) / 2, high, low, share
+
+    def _follower(self, legs: list[LegState], s: Settings) -> LegState | None:
+        """The leg that rests no order and takes what the other has filled: the one venue whose taker orders are
+        free, when the other's are not (`hedge_taker`). None: both legs rest maker orders."""
+        if not s.hedge_taker or len(legs) != 2:
+            return None
+        free = [leg for leg in legs if self.specs[leg.venue].taker_bp <= 0]
+        return free[0] if len(free) == 1 else None
 
     def _begin_exit(self, why: str, *, urgent: bool) -> None:
         st = self.st
@@ -333,7 +370,7 @@ class Engine:
             self._say("pause", "paused: the last position was closed for a reason that will repeat; `arbitrage resume` "
                                "once it is sorted out")
         self.st = State(paused=self.st.paused or self.st.pause_after, last_scan=self.clock(),
-                        last_hint=self.st.last_hint)
+                        last_hint=self.st.last_hint, waiting=self.st.waiting)
         self.specs.clear()
 
     # ------------------------------------------------------------------------------------------ entering, exiting
@@ -355,6 +392,16 @@ class Engine:
         tops = await self._tops()
         if tops is None:
             return
+        if not entering and not st.urgent and st.stop_dist > 0:
+            # a close with limit orders has no venue stop behind it (cancelled above): the bot is the stop, every
+            # loop. At the stop price whatever is left goes with taker orders on both legs.
+            for name, t in tops.items():
+                e = st.entry.get(name, 0.0)
+                if e > 0 and abs(t.mid / e - 1) >= st.stop_dist:
+                    st.urgent = True
+                    self._say("exiting", f"{st.symbol}: {name} reached the stop ({(t.mid / e - 1) * 100:+.2f}% from "
+                                         "the entry) while closing: the rest with taker orders")
+                    break
         legs = list(st.legs.values())
         for leg in legs:
             await self._refresh(leg)
@@ -373,17 +420,23 @@ class Engine:
             return
 
         # ---- one leg ahead of the other: after chase_s the one behind crosses the spread
+        follower = self._follower(legs, s)
         lead, lag = (legs[0], legs[1]) if legs[0].filled >= legs[1].filled else (legs[1], legs[0])
         gap = min(lead.filled - lag.filled, lag.left)
         if gap >= dust[lag.venue]:
             st.behind_since = st.behind_since or now
             cost = tops[lag.venue].spread_bp / 2 + self.specs[lag.venue].taker_bp
-            if late or (now - st.behind_since >= s.chase_s and cost <= s.max_cross_bp):
+            hedge = lag is follower                             # its taker orders are free: at once, every time
+            if late or hedge or (now - st.behind_since >= s.chase_s and cost <= s.max_cross_bp):
                 if lag.order_id and not lag.order_taker:        # its maker order goes first
                     await self._cancel(lag)
                 elif not lag.busy:
-                    self._say("cross", f"{st.symbol}: {lag.venue} is {gap:g} behind after "
-                                       f"{now - st.behind_since:.0f} s: crossing there (about {cost:.1f} bp)")
+                    if hedge:
+                        self._say("hedge", f"{st.symbol}: {lead.venue} has filled {gap:g} more: taking it on "
+                                           f"{lag.venue} (about {cost:.1f} bp)")
+                    else:
+                        self._say("cross", f"{st.symbol}: {lag.venue} is {gap:g} behind after "
+                                           f"{now - st.behind_since:.0f} s: crossing there (about {cost:.1f} bp)")
                     await self._taker(lag, gap, tops[lag.venue], URGENT_BP if late else max(s.max_cross_bp, cost))
                 return
         else:
@@ -406,6 +459,8 @@ class Engine:
                 moved = abs(leg.order_px - want) > sp.tick / 2 and now - leg.order_at >= s.requote_s
                 if not leg.order_taker and (moved or (life and now - leg.order_at >= life)):
                     await self._cancel(leg)
+            elif leg is follower:
+                continue                         # it only follows the other leg's fills (above)
             elif not leg.trim_id and leg.left >= dust[leg.venue]:
                 v = self.venues[leg.venue]
                 try:
@@ -527,6 +582,13 @@ class Engine:
             move = t.mid / st.entry[name] - 1
             if abs(move) >= st.stop_dist:
                 self._begin_exit(f"stop: {name} moved {move * 100:+.2f}% from the entry", urgent=True)
+                return
+        for name, t in tops.items():
+            move = t.mid / st.entry[name] - 1
+            if s.stop_early > 0 and abs(move) >= s.stop_early * st.stop_dist:
+                # limit orders while there is still room; _work goes over to taker orders at the stop itself
+                self._begin_exit(f"near the stop: {name} moved {move * 100:+.2f}% from the entry, the stop is "
+                                 f"{st.stop_dist * 100:.2f}% away", urgent=False)
                 return
         if s.drift_close_share > 0 and now % 3600 < AFTER_PAYMENT_S:
             # what this position has moved from one venue to the other so far: one leg's loss is the other's gain

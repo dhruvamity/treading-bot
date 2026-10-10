@@ -566,12 +566,28 @@ It holds one position: short where funding pays more, long on the other venue, t
 and none of the recorders. It trades stocks, indices and commodities only, never crypto (`arbitrage set rwa_only 0` lifts that).
 Both venues pay funding every hour and a position needs about two days to pay for its fills, so it is held for days, until the
 difference is gone (`arbitrage study` shows the numbers; arbitrage README, section 2).
+Since 10 Oct 2026 it uses the highest leverage both venues allow at that hour unless you set less (`arbitrage set max_leverage 10`,
+Telegram `/arb_lev 10`): SPY is 50x while the stock market is open and 33x while it is closed, the same number on both venues.
+For anything but SPY and QQQ set `stop_sigmas 3` first (arbitrage README, section 2).
+
+**The owner's mode: SPY, highest leverage, renewed every three funding payments, side from ProFunding.** `only SPY`, `cycle 3`,
+`side profunding` below (Telegram `/arb_only SPY`, `/arb_cycle 3`, `/arb_side profunding`). It buys volume and open interest and
+costs money: at $240 about $141,000 of volume a day for about $4.90 a day, or $90,000 for $3.10 with `/arb_lev 30` (arbitrage
+README, sections 2a and 3a). Near its stop (from 80% of the way, `stop_early`) it closes with limit orders, which pay no fee; at
+the stop itself it uses taker orders.
 ```bash
 .venv/bin/arbitrage scan                          # ranks the markets with your accounts' free collateral
 .venv/bin/arbitrage plan SPY --arcus 120 --lighter 120
 .venv/bin/arbitrage history --update              # the funding history (the first time without --update: about an hour)
 .venv/bin/arbitrage backtest --capital 240        # the rules replayed on it
-.venv/bin/arbitrage study --capital 240           # how long to hold, the stop's distance, weekdays
+.venv/bin/arbitrage history --profunding          # ProFunding's last 30 days of the same rates, as a check
+.venv/bin/arbitrage study --capital 240           # the best market of each hour: how long to hold, how much leverage
+.venv/bin/arbitrage fills SPY QQQ                 # what its orders cost on recorded order books
+.venv/bin/arbitrage cyclecost SPY QQQ                 # the highest leverage, closed and reopened on a clock: what that costs
+.venv/bin/arbitrage basis SPY QQQ                 # Arcus's price against Lighter's, by the minute and over each weekend
+.venv/bin/arbitrage only SPY QQQ                  # the markets it may open and no others (`only all` lifts it)
+.venv/bin/arbitrage cycle 3                       # close and reopen every 3 funding payments (hours); `cycle off`
+.venv/bin/arbitrage side profunding               # ProFunding decides which venue is short (`side venues` = their own rates)
 .venv/bin/arbitrage start --arcus 120 --lighter 120   # PAPER, in the background, pretend $120 per venue
 .venv/bin/arbitrage status                        # what it does, funding paid, last events
 .venv/bin/arbitrage set max_hold_h 72             # any setting, applied to the open position within ~10 s
@@ -608,8 +624,9 @@ run and the money matches `/arb_status`:
 **What no test here proves:** that a stop order actually fires and closes the other leg on the real venues; weeks of holding
 (funding credited, margin moving, the venues' rules changing); a venue going down while a position is open; fills at a size larger
 than the order book shows; and the money you must move by hand between the venues. Each size step is how you meet those.
-Moving money between the venues is yours: when a position closes and one side holds under 40% of the total, the bot sends the exact
-amount and direction to Telegram (`MOVE $50.00 from lighter to arcus`). The venues cannot send to each other (arbitrage README, 6a). Use an account of its own
+Moving money between the venues is yours: when a position closes and one side holds under 40% of the total (the two more than 20%
+apart), the bot opens nothing, sends the exact amount and direction to Telegram (`MOVE $50.00 from lighter to arcus`), repeats it
+every 30 minutes and goes on by itself once the money has arrived. The venues cannot send to each other (arbitrage README, 6a). Use an account of its own
 on each venue (or stop the market-making bots), because two programs on one account each treat the other's position as theirs.
 
 ### 9.6 Autopilots

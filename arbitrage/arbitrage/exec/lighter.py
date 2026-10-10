@@ -184,7 +184,9 @@ class LighterTrade:
     async def start(self, symbol: str) -> Spec:
         await self._call(self._connect(symbol))
         m = self.market
-        return Spec(tick=m.tick, step=m.step, min_size=m.min_base, min_notional=m.min_quote, taker_bp=0.0)
+        # a standard account pays no fee; the market's own figure is used in case that ever changes
+        return Spec(tick=m.tick, step=m.step, min_size=m.min_base, min_notional=m.min_quote,
+                    taker_bp=float(getattr(m, "taker_fee", 0.0) or 0.0) * 1e4)
 
     async def stop(self) -> None:
         if self.ws is not None:

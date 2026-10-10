@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import math
+from dataclasses import replace
 from pathlib import Path
 
 import pytest
@@ -57,16 +58,19 @@ def test_the_edge_is_the_smallest_of_three_that_agree() -> None:
     assert conservative_edge(0.0, 2e-6, 5e-6) == 0.0
 
 
-def test_leverage_keeps_the_stop_three_daily_moves_away() -> None:
-    a, b = legs()
-    s = Settings()
+def test_leverage_is_the_venues_highest_unless_a_stop_distance_or_a_ceiling_is_set() -> None:
+    a, b = legs()                                           # 10% margin on both, 15% on Arcus while the stock is closed
+    assert max_leverage(replace(a, off_hours=False), b, 0.0167, Settings())[0] == pytest.approx(10.0)
+    lev, stop, liq = max_leverage(a, b, 0.0167, Settings())                           # the stock market is closed now
+    assert lev == pytest.approx(1 / 0.15) and liq == pytest.approx(0.15 - 0.066667) and stop == pytest.approx(liq / 2)
+    s = Settings(stop_sigmas=3.0, hold_off_hours=True, max_leverage=20.0)             # the rule until 10 Oct 2026
     lev, stop, liq = max_leverage(a, b, 0.0167, s)
     # venues allow 1/0.15 = 6.7x held overnight; the stop rule allows 1/(3*0.0167/0.5 + 0.0667) = 5.99x
     assert lev == pytest.approx(1 / (3 * 0.0167 / 0.5 + 0.066667), rel=1e-6)
     assert liq == pytest.approx(1 / lev - 0.066667) and stop == pytest.approx(liq / 2)
     assert stop >= 3 * 0.0167 - 1e-9
     assert max_leverage(a, b, 0.001, s)[0] == pytest.approx(1 / 0.15)                 # the venue's off-hours margin
-    assert max_leverage(a, b, 0.001, Settings(hold_off_hours=False))[0] == pytest.approx(10.0)
+    assert max_leverage(replace(a, off_hours=False), b, 0.001, s)[0] == pytest.approx(1 / 0.15)    # ... at any hour
     assert max_leverage(a, b, 0.001, Settings(max_leverage=3))[0] == 3.0              # the owner's ceiling
     assert max_leverage(a, b, 0.5, s)[0] == 1.0                                       # never under 1x
 
@@ -209,6 +213,20 @@ async def test_telegram_messages_become_the_same_commands(tmp_path: Path, monkey
     assert "max_hold_h = 72" in await telegram.run_command(["set", "max_hold_h", "72"])
     assert config.load({}).settings.max_hold_h == 72.0                    # the running bot reads it on its next loop
     assert "must be between" in await telegram.run_command(["set", "max_hold_h", "-5"])
+    # the short ones of 10 Oct 2026
+    assert t("/cycle 3", False) == ["cycle", "3"] and t("/side profunding", True) == ["side", "profunding"]
+    assert t("/lev max", False) == ["set", "max_leverage", "max"] and t("/only SPY", False) == ["only", "SPY"]
+    assert telegram.changes_something(["cycle", "3"]) and telegram.changes_something(["side", "venues"])
+    assert "cycle_h = 3" in await telegram.run_command(["cycle", "3"])
+    assert "every 3 funding payments" in await telegram.run_command(["cycle"])
+    assert "cycle_h = 0" in await telegram.run_command(["cycle", "off"])
+    assert "not closed on a clock" in await telegram.run_command(["cycle"])
+    assert "profunding_side = 1" in await telegram.run_command(["side", "profunding"])
+    assert "ProFunding decides" in await telegram.run_command(["side"])
+    assert "profunding_side = 0" in await telegram.run_command(["side", "venues"])
+    assert "`profunding` or `venues`" in await telegram.run_command(["side", "lighter"])
+    assert "max_leverage = 10" in await telegram.run_command(["set", "max_leverage", "10"])
+    assert "max_leverage = 50" in await telegram.run_command(["set", "max_leverage", "max"])
     assert "unknown setting" in await telegram.run_command(["set", "nonsense", "1"])
     assert config.set_value("stop_pct", "auto", tmp_path / "settings.json") == 0.0
 

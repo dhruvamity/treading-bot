@@ -13,7 +13,9 @@ What it assumes, and where that flatters or hurts:
 - an entry or exit costs `fill_cost_bp` per leg; a stop costs Arcus's taker fee and `cross_slip_bp` on both legs;
 - a stop is checked against each hour's high and low on the leg's own venue; both legs are then closed at the same
   relative move, so a stop costs its fees and no more (the gap between the venues at that moment is not known);
-- margin, minimum sizes and the 24-hour volume are today's values for the whole period;
+- margin and minimum sizes are today's values for the whole period; the 24-hour volume the entry rule checks is the
+  one each venue's hourly candles give for the 24 hours before (today's figure where the price files have no volume
+  column: a download from before 10 Oct 2026);
 - each venue keeps its own money: a leg's gain stays on its venue, so the smaller balance sets the next position.
   A stop leaves most of the money on one venue; the replay moves it back to half and half while flat (the owner's
   transfer between the venues) and counts how often, or never moves it (`rebalance_below=0`).
@@ -27,6 +29,7 @@ import math
 from dataclasses import dataclass, field, replace
 from pathlib import Path
 
+from arbitrage.hours import open_hours
 from arbitrage.rank import HOURS_YEAR, Leg, Plan, Settings, exit_reason, plan
 from arbitrage.venues import arcus_leg, lighter_leg, sigma_day
 
@@ -41,6 +44,7 @@ class Series:
     rate: dict[str, dict[int, float]]               # venue -> {payment time: rate}
     px: dict[str, dict[int, tuple[float, float, float]]]   # venue -> {hour start: (high, low, close)}
     hours: list[int] = field(default_factory=list)  # payment times both venues have a rate for
+    vol: dict[str, dict[int, float]] = field(default_factory=dict)   # venue -> {hour start: dollars traded}; may be {}
 
 
 @dataclass
@@ -118,15 +122,18 @@ def load(data: Path, symbols: list[str] | None = None) -> dict[str, Series]:
         rate = {v: {int(r["ts"]): float(r["rate_per_hour"]) for r in _csv(data / f"{v}_{sym}_funding.csv")}
                 for v in VENUES}
         px: dict[str, dict[int, tuple[float, float, float]]] = {}
+        vol: dict[str, dict[int, float]] = {}
         for v, names in (("arcus", ("perp", "px")), ("lighter", ("px",))):
             rows: dict[int, tuple[float, float, float]] = {}
             for name in reversed(names):                 # the perp's own trades win over the oracle where both exist
                 for r in _csv(data / f"{v}_{sym}_{name}.csv"):
                     rows[int(r["ts"])] = (float(r["high"]), float(r["low"]), float(r["close"]))
+                    if name == "px" and r.get("volume") not in (None, ""):
+                        vol.setdefault(v, {})[int(r["ts"])] = float(r["volume"])
             px[v] = rows
         hours = sorted(set(rate["arcus"]) & set(rate["lighter"]))
         if len(hours) >= 48 and px["arcus"] and px["lighter"]:
-            out[sym] = Series(sym, {"arcus": a, "lighter": b}, rate, px, hours)
+            out[sym] = Series(sym, {"arcus": a, "lighter": b}, rate, px, hours, vol if len(vol) == 2 else {})
     return out
 
 
@@ -141,6 +148,7 @@ class _Market:
         self.ra: list[float] = []
         self.rl: list[float] = []
         self.closes: list[float] = []
+        self.traded: dict[str, list[float]] = {v: [] for v in VENUES}       # the last 24 hours' dollars, per venue
         self._sigma: tuple[int, float] = (-1, 0.0)
 
     def step(self, t: int) -> bool:
@@ -150,6 +158,8 @@ class _Market:
             self.bar[v] = bar
             if bar is not None:
                 self.last[v] = bar[2]
+            if self.s.vol:
+                self.traded[v] = [*self.traded[v][-23:], self.s.vol[v].get(t - H, 0.0)]
         if self.s.px["lighter"].get(t - H) is not None:
             self.closes.append(self.last["lighter"])
         if t not in self.s.rate["arcus"] or t not in self.s.rate["lighter"]:
@@ -169,6 +179,10 @@ class _Market:
             return None
         legs = {v: replace(self.s.legs[v], mark=self.last[v], rate_h=r[-1], next_rate_h=r[-1], next_at=t + H)
                 for v, r in (("arcus", self.ra), ("lighter", self.rl))}
+        if legs["arcus"].imf_off > legs["arcus"].imf:     # a stock: closed or open at this hour, not at the download
+            legs["arcus"] = replace(legs["arcus"], off_hours=not open_hours(t))
+        if self.s.vol:                                   # what was traded in the 24 h before, not what is today
+            legs = {v: replace(leg, volume_24h=sum(self.traded[v])) for v, leg in legs.items()}
         return plan(legs["arcus"], legs["lighter"], self.ra[-168:], self.rl[-168:], self.sigma(t), money, st)
 
 

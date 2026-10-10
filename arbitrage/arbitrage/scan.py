@@ -12,6 +12,7 @@ import time
 from dataclasses import dataclass, field
 from pathlib import Path
 
+from arbitrage import feeds
 from arbitrage.config import STATE, Config
 from arbitrage.rank import Leg, Plan, plan
 from arbitrage.venues import Arcus, Lighter, sigma_day
@@ -83,6 +84,9 @@ async def sigma_for(symbol: str, arcus: Arcus, root: Path, now: float) -> float:
     return s
 
 
+SIDE_AGE_S = 1800.0      # ProFunding's side is asked for again at most this often (its free key: 100 requests a day)
+
+
 async def run(cfg: Config, *, symbols: list[str] | None = None, top: int = 10,
               collateral: dict[str, float] | None = None, root: Path = STATE) -> Scan:
     arcus, lighter = Arcus(), Lighter()
@@ -100,21 +104,36 @@ async def run(cfg: Config, *, symbols: list[str] | None = None, top: int = 10,
         want = [s.upper() for s in symbols] if symbols else sorted(
             common, key=lambda s: -abs(la[s].next_rate_h - ll[s].next_rate_h))[:top]
         out = Scan(ts=now, collateral=collateral, common=len(common))
+        # `profunding_side`: which venue is short is ProFunding's answer for the pair (its LighterRH / Arcus row)
+        sides: dict[str, str] | None = None
+        no_side = ""
+        if cfg.settings.profunding_side:
+            try:
+                rows = await feeds.profunding(cfg.profunding_key, root / "profunding.json", max_age_s=SIDE_AGE_S)
+                sides = {k: str(v["short"]) for k, v in rows.items()}
+                if not rows and not cfg.profunding_key:
+                    no_side = "PROFUNDING_API_KEY is not set, and profunding_side asks ProFunding for the side"
+            except Exception as e:   # noqa: BLE001  whatever went wrong there, the side is not known
+                no_side = f"ProFunding could not be read ({str(e)[:80]}), and profunding_side asks it for the side"
         for sym in want:
             if sym not in la or sym not in ll:
                 continue
+            side = sides.get(sym) if sides is not None else None
             ha, hl = await hist.fresh("arcus", sym, arcus, now), await hist.fresh("lighter", sym, lighter, now)
             xa, xl = aligned(ha, hl)
             sig = await sigma_for(sym, arcus, root, now)
-            p = plan(la[sym], ll[sym], xa, xl, sig, collateral, cfg.settings)
+            p = plan(la[sym], ll[sym], xa, xl, sig, collateral, cfg.settings, short_venue=side)
             if p.go or symbols:      # worth a closer look: price it with both books' real spreads
                 try:
                     (ab, aa), (lb, lk) = await arcus.top(sym), await lighter.top(sym)
                     spreads = {"arcus": (aa - ab) / ab * 1e4, "lighter": (lk - lb) / lb * 1e4}
-                    p = plan(la[sym], ll[sym], xa, xl, sig, collateral, cfg.settings, spreads)
+                    p = plan(la[sym], ll[sym], xa, xl, sig, collateral, cfg.settings, spreads, short_venue=side)
                     p.spreads_bp = spreads
                 except (RuntimeError, KeyError, IndexError, ZeroDivisionError):
                     p.reasons.append("could not read both order books")
+            if cfg.settings.profunding_side and side is None:
+                p.reasons.append(no_side or f"ProFunding lists no Arcus / LighterRH pair for {sym} now, and "
+                                            "profunding_side asks it for the side")
             out.plans.append(p)
             out.legs[sym] = (la[sym], ll[sym])
         out.plans.sort(key=lambda p: (not p.go, -p.income_day, -p.edge_h))

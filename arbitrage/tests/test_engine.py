@@ -15,6 +15,11 @@ from arbitrage.rank import Plan, Settings, plan
 from tests.test_arbitrage import legs
 
 SYM = "BABA"
+# the older behaviour most of these tests are about: both legs rest maker orders, uneven money does not stop it,
+# and the leverage keeps the stop three daily moves away
+BOTH = Settings(hedge_taker=False, uneven_wait=False, enter_timeout_s=180.0, stop_sigmas=3.0, max_leverage=20.0,
+                stop_early=0.0,
+                hold_off_hours=True)
 
 
 class Clock:
@@ -71,7 +76,7 @@ class Rig:
         for v in (self.arcus, self.lighter):
             v.set_top(SYM, 106.40, 106.42)
         self.store, self.planner = Store(), Planner()
-        self.s = settings or Settings()
+        self.s = settings or BOTH
         self.planner.settings = lambda: self.s
         self.e = Engine({"arcus": self.arcus, "lighter": self.lighter}, self.planner, lambda: self.s, self.store,
                         clock=self.clock, **kw)
@@ -141,7 +146,7 @@ async def test_a_leg_left_behind_follows_the_price_then_crosses_the_spread() -> 
 
 
 async def test_a_cross_that_costs_too_much_waits_and_is_done_anyway_at_the_timeout() -> None:
-    r = Rig(Settings(max_cross_bp=3.0, enter_timeout_s=60))
+    r = Rig(replace(BOTH, max_cross_bp=3.0, enter_timeout_s=60))
     await r.step(n=2)
     r.lighter.fill(r.open_orders(r.lighter)[0].id)
     r.arcus.set_top(SYM, 106.30, 106.50)                   # 18.8 bp wide: half of it plus 2.25 bp is far over 3 bp
@@ -155,7 +160,7 @@ async def test_a_cross_that_costs_too_much_waits_and_is_done_anyway_at_the_timeo
 
 
 async def test_an_entry_nobody_fills_ends_flat_with_nothing_left_on_the_book() -> None:
-    r = Rig(Settings(enter_timeout_s=30))
+    r = Rig(replace(BOTH, enter_timeout_s=30))
     await r.step(n=2)
     await r.step(dt=31)
     await r.step(n=2)
@@ -164,7 +169,7 @@ async def test_an_entry_nobody_fills_ends_flat_with_nothing_left_on_the_book() -
 
 
 async def test_a_maker_order_is_replaced_before_it_would_expire_on_a_venue_where_orders_expire() -> None:
-    r = Rig(Settings(enter_timeout_s=900))
+    r = Rig(replace(BOTH, enter_timeout_s=900))
     r.lighter.maker_life_s = 210.0             # Lighter: an order drops off by itself 5.5 minutes after it is placed
     await r.step(n=2)
     (a0,), (l0,) = r.open_orders(r.arcus), r.open_orders(r.lighter)
@@ -383,14 +388,14 @@ async def test_stops_refused_pause_the_bot_and_unequal_money_is_said() -> None:
 
 
 async def test_a_cap_on_the_position_size_for_a_first_small_run() -> None:
-    r = Rig(Settings(max_notional_usd=50.0))
+    r = Rig(replace(BOTH, max_notional_usd=50.0))
     await r.step()
     assert r.e.st.size * 106.41 == pytest.approx(50.0, abs=0.02)
 
 
 
 async def test_a_closed_position_that_left_the_money_uneven_says_at_once_how_much_to_move() -> None:
-    r = Rig(Settings(rebalance_share=0.45))
+    r = Rig(replace(BOTH, rebalance_share=0.45))
     await r.to_open()
     for v in (r.arcus, r.lighter):
         v.set_top(SYM, 109.60, 109.62)                     # +3%: the long venue gains what the short one loses
@@ -441,3 +446,176 @@ def test_a_crypto_market_is_never_planned_unless_the_owner_allows_it() -> None:
     allowed = plan(replace(a, category="CRYPTO"), b, *hist, 0.0167, money, Settings(rwa_only=False))
     assert stock.go and allowed.go
     assert not crypto.go and "crypto" in crypto.reasons[0]
+
+
+# ------------------------------------------------------------------------------ the owner's rules of 10 Oct 2026
+async def test_lighters_leg_rests_nothing_and_takes_what_arcus_has_filled() -> None:
+    r = Rig(Settings(uneven_wait=False))                   # hedge_taker is on by default
+    await r.step(n=2)
+    st = r.e.st
+    assert st.phase == "entering" and (st.long_venue, st.short_venue) == ("lighter", "arcus")
+    (sell,) = r.open_orders(r.arcus)
+    assert not r.open_orders(r.lighter) and not [x for x in r.lighter.sent if x[0] == "maker"]
+    r.arcus.fill(sell.id, sell.size / 2)                   # half of Arcus's order is taken
+    await r.step()                                         # counted
+    await r.step()                                         # Lighter takes the same amount, at once
+    kind, _, side, size, *_ = r.lighter.sent[-1]
+    assert (kind, side) == ("taker", BUY) and size == pytest.approx(sell.size / 2, abs=1e-4)
+    assert abs(r.lighter.pos[SYM] + r.arcus.pos[SYM]) < 2e-4            # equal within Lighter's size step
+    assert "hedge" in r.store.kinds() and "cross" not in r.store.kinds()
+    r.arcus.fill(sell.id)                                  # the rest
+    await r.step(n=4)
+    assert r.e.st.phase == "open" and abs(r.lighter.pos[SYM] + r.arcus.pos[SYM]) < 2e-4
+    assert not [x for x in r.lighter.sent if x[0] == "maker"]
+
+    r.s = replace(r.s, max_hold_h=1.0)                     # closing works the same way round
+    await r.step(dt=2 * 3600)
+    assert r.e.st.phase == "exiting" and not r.e.st.urgent
+    await r.step(n=2)
+    (buy,) = r.open_orders(r.arcus)
+    assert buy.side == BUY and not r.open_orders(r.lighter)
+    r.arcus.fill(buy.id)
+    await r.step(n=4)
+    assert r.e.st.phase == "flat" and r.lighter.sent[-1][0] == "taker" and r.lighter.sent[-1][-1]   # reduce-only
+    assert abs(r.lighter.pos[SYM]) < 2e-4 and abs(r.arcus.pos[SYM]) < 2e-4
+
+
+async def open_hedged(r: Rig) -> float:
+    """Short Arcus, long Lighter, open with the venues' stops placed; returns the stop's distance."""
+    await r.step(n=2)
+    (sell,) = r.open_orders(r.arcus)
+    r.arcus.fill(sell.id)
+    await r.step(n=5)
+    assert r.e.st.phase == "open" and r.arcus.stops and r.lighter.stops, r.store.events
+    return r.e.st.stop_dist
+
+
+def move_to(r: Rig, share: float, d: float) -> None:
+    px = 106.41 * (1 + share * d)
+    for v in (r.arcus, r.lighter):
+        v.set_top(SYM, px - 0.01, px + 0.01)
+
+
+async def test_near_the_stop_it_closes_with_limit_orders_and_pays_no_taker_fee() -> None:
+    r = Rig(Settings(uneven_wait=False))                   # stop_early is 0.8 by default
+    d = await open_hedged(r)
+    move_to(r, 0.7, d)
+    await r.step()
+    assert r.e.st.phase == "open"                          # 70% of the way: nothing yet
+    move_to(r, 0.85, d)
+    await r.step()
+    assert r.e.st.phase == "exiting" and not r.e.st.urgent and "near the stop" in r.e.st.why
+    await r.step(n=2)
+    (buy,) = r.open_orders(r.arcus)                        # Arcus's short is bought back by a resting order ...
+    assert buy.side == BUY and r.arcus.sent[-1][0] == "maker" and r.arcus.sent[-1][-1]
+    assert not r.open_orders(r.lighter)                    # ... and Lighter waits for it
+    r.arcus.fill(buy.id)
+    await r.step(n=4)
+    assert r.e.st.phase == "flat" and abs(r.arcus.pos[SYM]) < 2e-4 and abs(r.lighter.pos[SYM]) < 2e-4
+    assert not [x for x in r.arcus.sent if x[0] == "taker"]            # no taker order on the venue that charges
+    assert r.lighter.sent[-1][0] == "taker" and r.lighter.sent[-1][-1]
+
+
+async def test_the_stop_reached_while_closing_with_limit_orders_ends_it_with_taker_orders() -> None:
+    r = Rig(Settings(uneven_wait=False))
+    d = await open_hedged(r)
+    move_to(r, 0.85, d)
+    await r.step(n=3)
+    assert r.e.st.phase == "exiting" and not r.e.st.urgent and r.open_orders(r.arcus)
+    move_to(r, 1.01, d)                                    # nobody sold to the resting order and the price went on
+    await r.step()
+    assert r.e.st.urgent and "reached the stop" in r.store.events[-1][1]
+    await r.step(n=4)
+    assert r.e.st.phase == "flat" and abs(r.arcus.pos[SYM]) < 2e-4 and abs(r.lighter.pos[SYM]) < 2e-4
+    assert r.arcus.sent[-1][0] == "taker" and not r.open_orders(r.arcus)
+
+    r2 = Rig(Settings(uneven_wait=False, stop_early=0.0, max_hold_h=1.0))     # any close with limit orders is watched
+    d = await open_hedged(r2)
+    await r2.step(dt=2 * 3600)
+    assert r2.e.st.phase == "exiting" and not r2.e.st.urgent
+    await r2.step()
+    move_to(r2, -1.01, d)
+    await r2.step()
+    assert r2.e.st.urgent
+    await r2.step(n=4)
+    assert r2.e.st.phase == "flat"
+
+    r3 = Rig(Settings(uneven_wait=False, stop_early=0.0))  # switched off: nothing happens short of the stop
+    d = await open_hedged(r3)
+    move_to(r3, 0.95, d)
+    await r3.step(n=2)
+    assert r3.e.st.phase == "open"
+
+
+async def test_two_venues_that_both_charge_takers_both_rest_maker_orders() -> None:
+    r = Rig(Settings(uneven_wait=False))
+    r.lighter.spec = replace(r.lighter.spec, taker_bp=2.8)             # a premium Lighter account
+    await r.step(n=2)
+    assert len(r.open_orders(r.arcus)) == 1 and len(r.open_orders(r.lighter)) == 1
+
+
+async def test_uneven_money_stops_new_positions_and_repeats_the_amount_until_it_is_moved() -> None:
+    r = Rig(Settings())                                    # uneven_wait is on by default
+    r.lighter.collateral = 40.0                            # Arcus 120, Lighter 40: 25% of the money
+    await r.step()
+    assert r.e.st.phase == "flat" and r.e.st.waiting and r.planner.asked == 0
+    (text,) = [t for k, t in r.store.events if k == "rebalance"]
+    assert text.startswith("MOVE $40.00 from arcus to lighter") and "Nothing is opened until it has arrived" in text
+    await r.step(dt=eng.SCAN_EVERY_S + 1, n=3)             # a quarter of an hour: not said again yet
+    assert r.store.kinds().count("rebalance") == 1
+    await r.step(dt=eng.SCAN_EVERY_S + 1, n=4)             # past uneven_remind_min (30)
+    assert r.store.kinds().count("rebalance") == 2 and r.e.st.phase == "flat"
+    r.arcus.collateral, r.lighter.collateral = 80.0, 80.0  # the owner has moved it
+    await r.step(dt=eng.SCAN_EVERY_S + 1)
+    assert "even again" in r.store.events[-2][1] and r.e.st.phase == "entering" and not r.e.st.waiting
+
+
+def test_cycling_opens_whatever_the_funding_pays_and_closes_on_the_clock() -> None:
+    from arbitrage.rank import exit_reason
+    a, b = legs()
+    thin = [4.4e-6] * 168                                  # Arcus pays 0.4e-6 an hour more: 0.35% a year
+    money = {"arcus": 120.0, "lighter": 120.0}
+    usual = plan(a, b, thin, [4e-6] * 168, 0.0167, money, Settings())
+    assert not usual.go and any("floor" in x or "changed sides" in x for x in usual.reasons)
+    cyc = plan(a, b, thin, [4e-6] * 168, 0.0167, money, Settings(cycle_h=3))
+    assert cyc.go and cyc.short_venue == "arcus"           # the side the next payment points to
+    back = plan(replace(a, next_rate_h=1e-6), b, thin, [4e-6] * 168, 0.0167, money, Settings(cycle_h=3))
+    assert back.go and back.short_venue == "lighter"       # ... and the other way round when it turns
+    # `profunding_side`: the side is given, whatever the venues' own rates say
+    told = plan(a, b, thin, [4e-6] * 168, 0.0167, money, Settings(cycle_h=3), short_venue="lighter")
+    assert told.go and (told.short_venue, told.long_venue) == ("lighter", "arcus")
+    assert told.prices["lighter"]["side"] == -1.0 and told.prices["arcus"]["side"] == 1.0   # the stops follow the side
+    paying = [1.7e-5] * 168                                # Arcus clearly pays more: the usual rule would short it
+    assert plan(a, b, paying, [4e-6] * 168, 0.0167, money, Settings(), short_venue="arcus").go
+    against = plan(a, b, paying, [4e-6] * 168, 0.0167, money, Settings(), short_venue="lighter")
+    assert not against.go and against.short_venue == "lighter"      # without cycling it is not opened against them
+    s = Settings(cycle_h=3)
+    assert exit_reason(2.9, -1e-5, -1e-5, s) == ""         # not the funding: the clock
+    assert "cycle" in exit_reason(3.0, 1e-5, 1e-5, s)
+    assert plan(replace(a, category="CRYPTO"), b, thin, [4e-6] * 168, 0.0167, money, s).go is False   # still no crypto
+
+
+async def test_only_the_listed_markets_are_looked_at(tmp_path: Any, monkeypatch: pytest.MonkeyPatch) -> None:
+    from types import SimpleNamespace
+
+    from arbitrage.exec import run
+
+    (tmp_path / "settings.json").write_text('{"only": ["spy", "QQQ"], "skip": ["QQQ"]}')
+    assert run.allowed(tmp_path) == {"SPY", "QQQ"} and run.skipped(tmp_path) == {"QQQ"}
+    assert run.allowed(tmp_path / "nothing") == set()
+    asked: dict[str, Any] = {}
+    a, b = legs()
+    money = {"arcus": 120.0, "lighter": 120.0}
+    plans = [plan(replace(a, symbol=sym), replace(b, symbol=sym), [1.7e-5] * 168, [4e-6] * 168, 0.0167, money,
+                  Settings()) for sym in ("NVDA", "QQQ", "SPY")]
+
+    async def scan(cfg: Any, **kw: Any) -> Any:
+        asked.update(kw)
+        return SimpleNamespace(plans=plans)
+
+    monkeypatch.setattr(run.scanner, "run", scan)
+    p = run.LivePlanner(lambda: None, lambda: run.skipped(tmp_path), lambda: run.allowed(tmp_path))   # type: ignore[arg-type,return-value]
+    best = await p.best(money)
+    assert best is not None and best.symbol == "SPY" and asked["symbols"] == ["QQQ", "SPY"]   # NVDA pays as much
+    best = await run.LivePlanner(lambda: None).best(money)                                    # type: ignore[arg-type,return-value]
+    assert best is not None and best.symbol == "NVDA" and asked["symbols"] is None            # no list: the first

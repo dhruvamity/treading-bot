@@ -12,6 +12,9 @@
     arbitrage start [--arcus 120 --lighter 120] | start --live | stop  the same executor in the background
     arbitrage status [--live] | close [--now] | pause | resume         the running bot (add --live for the live one)
     arbitrage skip CASHCAT | unskip CASHCAT                            markets it must not open
+    arbitrage only SPY QQQ | only all                                  the markets it may open, and no others
+    arbitrage cycle 3 | cycle off                                      close and reopen every 3 funding payments (hours)
+    arbitrage side profunding | side venues                            what decides which venue is short
     arbitrage livetest [SYMBOL] [--what all|lighter|arcus|engine]      REAL MONEY, smallest size: legs, then engine
 
 In the one Telegram bot the same commands are `/arb_<command>`.
@@ -228,6 +231,26 @@ def cmd_settings(a: argparse.Namespace, cfg: Config) -> int:
     return 0
 
 
+def cmd_short(a: argparse.Namespace, cfg: Config) -> int:
+    """`cycle 3`, `cycle off`, `side profunding`, `side venues`: the two settings with a plain name of their own."""
+    name = {"cycle": "cycle_h", "side": "profunding_side"}[a.cmd]
+    if a.value is None:
+        cur = getattr(cfg.settings, name)
+        print((f"closed and reopened every {cur:g} funding payments (hours)" if cur else "not closed on a clock")
+              if a.cmd == "cycle" else
+              "ProFunding decides which venue is short" if cur else "the venues' own rates decide which venue is short")
+        return 0
+    value = a.value
+    if a.cmd == "side":
+        word = value.strip().lower()
+        if word not in ("profunding", "pf", "venues", "own", "rates"):
+            print("side is `profunding` or `venues`")
+            return 1
+        value = "1" if word in ("profunding", "pf") else "0"
+    a.cmd, a.name, a.value = "set", name, value
+    return cmd_settings(a, cfg)
+
+
 def _mode(a: argparse.Namespace) -> str:
     return "live" if getattr(a, "live", False) else "paper"
 
@@ -271,7 +294,44 @@ def cmd_study(a: argparse.Namespace, cfg: Config) -> int:
         return 1
     st = replace(cfg.settings, rwa_only=not a.all_markets)
     print(study.report(series, a.capital, st, title=" (every market)" if a.all_markets else
-                       " (stocks, indices, commodities)"))
+                       " (stocks, indices, commodities)", data=data))
+    return 0
+
+
+TAPES = (ROOT.parent / "arcus" / "data" / "scout" / "tape", ROOT.parent / "lighter" / "data" / "tape")
+
+
+def cmd_cycle(a: argparse.Namespace, cfg: Config) -> int:
+    """One market at the venues' highest leverage, closed and reopened on a clock (arbitrage/cycle.py). Reads only."""
+    from arbitrage import backtest as bt
+    from arbitrage import cycle
+
+    data = Path(a.data) if a.data else ROOT / "data" / "history"
+    syms = [s.upper() for s in a.symbols] or ["SPY", "QQQ"]
+    series = bt.load(data, syms) if data.exists() else {}
+    if not series:
+        print(f"no history for {', '.join(syms)} under {data}: `arbitrage history` downloads it")
+        return 1
+    print(cycle.report({s: series[s] for s in syms if s in series}, a.capital,
+                       dict.fromkeys(syms, a.cost) if a.cost is not None else {"SPY": 1.5, "QQQ": 2.0},
+                       cfg.settings.margin_use))
+    return 0
+
+
+def cmd_basis(a: argparse.Namespace, cfg: Config) -> int:
+    """Arcus's price against Lighter's, minute by minute, and over each weekend (arbitrage/basis.py). Reads only."""
+    from arbitrage import basis
+
+    data = Path(a.data) if a.data else ROOT / "data" / "history"
+    print(basis.report(data, [s.upper() for s in a.symbols] or ["SPY", "QQQ"]))
+    return 0
+
+
+def cmd_fills(a: argparse.Namespace, cfg: Config) -> int:
+    """What the two legs' orders cost on the recorded order books (arbitrage/fills.py). Reads only."""
+    from arbitrage import fills
+
+    print(fills.report(TAPES[0], TAPES[1], [s.upper() for s in a.symbols] or ["SPY", "QQQ"], a.days))
     return 0
 
 
@@ -362,10 +422,26 @@ def cmd_service(a: argparse.Namespace, cfg: Config) -> int:
 
 def cmd_control(a: argparse.Namespace, cfg: Config) -> int:
     from arbitrage import ops
-    from arbitrage.exec.run import FileStore, skipped
+    from arbitrage.exec.run import FileStore, allowed, skipped
 
     mode = _mode(a)
     store = FileStore(STATE, mode, echo=None)
+    if a.cmd == "only":
+        want = {x.upper() for x in a.symbols}
+        if want & {"ALL", "ANY", "NONE", "OFF"}:
+            want = set()
+        p = ROOT / "settings.json"
+        try:
+            d = json.loads(p.read_text())
+        except (OSError, ValueError):
+            d = {}
+        if a.symbols:
+            d["only"] = sorted(want)
+            p.write_text(json.dumps(d, indent=1) + "\n")
+        cur = allowed()
+        print("opens only: " + ", ".join(sorted(cur)) if cur else
+              "opens any market that passes the rules (`arbitrage only SPY QQQ` narrows it)")
+        return 0
     if a.cmd in ("skip", "unskip"):
         cur = skipped()
         cur = cur | {a.symbol.upper()} if a.cmd == "skip" else cur - {a.symbol.upper()}
@@ -395,6 +471,7 @@ def cmd_control(a: argparse.Namespace, cfg: Config) -> int:
     age = time.time() - store.position.stat().st_mtime
     pid = ops.running(mode)
     print(f"{mode.upper()} · {st.phase}" + (" · paused" if st.paused else "")
+          + (" · waiting for the money to be moved (the last MOVE line below)" if st.waiting else "")
           + f" · last written {age:.0f} s ago"
           + (f" · running (pid {pid})" if pid else "" if age < 120 else "  (the bot is not running)"))
     if st.phase != "flat":
@@ -409,7 +486,8 @@ def cmd_control(a: argparse.Namespace, cfg: Config) -> int:
         if st.opened_at:
             print(f"  held {(time.time() - st.opened_at) / 3600:.1f} h; planned "
                   f"${st.plan.get('income_day', 0):.2f} a day; min hold {cfg.settings.min_hold_h:g} h, max "
-                  f"{cfg.settings.max_hold_h or 'none'}")
+                  f"{cfg.settings.max_hold_h or 'none'}"
+                  + (f"; closed and reopened every {cfg.settings.cycle_h:g} h" if cfg.settings.cycle_h else ""))
         if st.why:
             print(f"  closing: {st.why}")
     for ev in store.tail(8):
@@ -529,16 +607,39 @@ def main(argv: list[str] | None = None) -> None:
     for name in ("skip", "unskip"):
         p = sub.add_parser(name, help="a market the bot must not open" if name == "skip" else "allow it again")
         p.add_argument("symbol")
+    p = sub.add_parser("only", help="the markets it may open and no others: arbitrage only SPY QQQ (all = any)")
+    p.add_argument("symbols", nargs="*")
     p = sub.add_parser("history", help="download both venues' funding and price history for the backtest")
     p.add_argument("--venue", choices=("lighter", "arcus", "both"), default="both")
     p.add_argument("--symbols", nargs="*")
     p.add_argument("--update", action="store_true",
                    help="keep what is there and fetch only the hours since (minutes instead of an hour)")
+    p.add_argument("--profunding", action="store_true",
+                   help="instead: ProFunding's record of the same rates, the last 30 days (a second source to check)")
+    p.add_argument("--minutes", nargs="+", metavar="SYMBOL",
+                   help="instead: both venues' prices by the minute for these markets (for `arbitrage basis`)")
     p = sub.add_parser("study", help="how long to hold a position: the history replayed for every holding time")
     p.add_argument("--capital", type=float, default=240.0)
     p.add_argument("--symbols", nargs="*")
     p.add_argument("--data", help="another history folder")
     p.add_argument("--all-markets", action="store_true", help="crypto too (the bot itself trades no crypto)")
+    p = sub.add_parser("cycle", help="close and reopen the position every N funding payments (hours): arbitrage "
+                                     "cycle 3; arbitrage cycle off")
+    p.add_argument("value", nargs="?")
+    p = sub.add_parser("side", help="what decides which venue is short: arbitrage side profunding | venues")
+    p.add_argument("value", nargs="?")
+    p = sub.add_parser("cyclecost", help="a market at the highest leverage, closed and reopened on a clock: what it "
+                                         "costs and how often it breaks")
+    p.add_argument("symbols", nargs="*", help="default: SPY QQQ")
+    p.add_argument("--capital", type=float, default=240.0)
+    p.add_argument("--cost", type=float, help="what one cycle (out and in again, both legs) costs, in bp of a leg")
+    p.add_argument("--data", help="another history folder")
+    p = sub.add_parser("basis", help="Arcus's price against Lighter's by the minute, and over each weekend")
+    p.add_argument("symbols", nargs="*", help="default: SPY QQQ")
+    p.add_argument("--data", help="another history folder")
+    p = sub.add_parser("fills", help="what a limit order on Arcus and a taker order on Lighter cost, on recorded books")
+    p.add_argument("symbols", nargs="*", help="default: SPY QQQ")
+    p.add_argument("--days", type=int, default=5, help="the last days of the Arcus tape to use (default 5)")
     p = sub.add_parser("start", help="the executor in the background: paper unless --live")
     p.add_argument("--live", action="store_true")
     p.add_argument("--yes", action="store_true", help="--live without the typed confirmation")
@@ -567,14 +668,21 @@ def main(argv: list[str] | None = None) -> None:
     if a.cmd == "history":
         from arbitrage import history
 
+        if a.profunding:
+            history.profunding(ROOT / "data" / "history", cfg.profunding_key, symbols=a.symbols)
+            sys.exit(0)
+        if a.minutes:
+            history.minutes(ROOT / "data" / "history", [s.upper() for s in a.minutes], tape_root=TAPES[0])
+            sys.exit(0)
         tape = ROOT.parent / "arcus" / "data" / "scout" / "tape"
         history.download(ROOT / "data" / "history", venues=("lighter", "arcus") if a.venue == "both" else (a.venue,),
                          symbols=a.symbols, tape_root=tape if tape.is_dir() else None, update=a.update)
         sys.exit(0)
     plain = {"settings": cmd_settings, "set": cmd_settings, "backtest": cmd_backtest, "run": cmd_run,
-             "study": cmd_study,
+             "study": cmd_study, "cyclecost": cmd_cycle, "basis": cmd_basis, "fills": cmd_fills,
+             "cycle": cmd_short, "side": cmd_short,
              "status": cmd_control, "close": cmd_control, "pause": cmd_control, "resume": cmd_control,
-             "skip": cmd_control, "unskip": cmd_control, "start": cmd_service, "stop": cmd_service,
+             "skip": cmd_control, "unskip": cmd_control, "only": cmd_control, "start": cmd_service, "stop": cmd_service,
              "livetest": cmd_livetest}
     if a.cmd in plain:
         sys.exit(plain[a.cmd](a, cfg))
