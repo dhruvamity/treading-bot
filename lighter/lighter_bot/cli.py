@@ -314,6 +314,13 @@ def cmd_livetest(a: argparse.Namespace) -> None:
     from lighter_bot.trade.runner import fetch_markets
     from lighter_bot.venue.nonce import ClientIds, Nonces
     from lighter_bot.venue.rest import Rest
+    if a.dms_only and a.skip_dms:
+        sys.exit("refused: --dms-only and --skip-dms together leave nothing to test")
+    only = tuple(x.strip().lower() for x in (a.only or "").split(",") if x.strip())
+    unknown = [x for x in only if x not in livetest.STEPS]
+    if unknown or (only and (a.dms_only or a.skip_dms)):
+        sys.exit(f"refused: --only takes these names, comma-separated, and no other step flag: {', '.join(livetest.STEPS)}")
+    only = tuple(x for x in livetest.STEPS if x in only)        # in the order they run
     cfg = _cfg()
     if cfg.no_trading():
         sys.exit(f"refused: {cfg.no_trading()}")
@@ -331,9 +338,7 @@ def cmd_livetest(a: argparse.Namespace) -> None:
     print(doctor.render(ok, lines))
     if not ok:
         sys.exit("refused: the doctor found problems")
-    if a.dms_only and a.skip_dms:
-        sys.exit("refused: --dms-only and --skip-dms together leave nothing to test")
-    print("\n" + livetest.plan_text(m, a.lev_low, a.max_loss, not a.skip_dms, a.dms_only))
+    print("\n" + livetest.plan_text(m, a.lev_low, a.max_loss, not a.skip_dms, a.dms_only, only))
     if not sys.stdin.isatty():
         sys.exit("refused: the live test needs you at the keyboard to type LIVE")
     if input("\nType LIVE to start: ").strip() != "LIVE":
@@ -350,7 +355,7 @@ def cmd_livetest(a: argparse.Namespace) -> None:
                           ClientIds(cfg.state_dir / "client-ids-live.txt"),
                           Nonces(cfg.state_dir / f"nonce-{account}-{cfg.creds.api_key_index}.txt"))
         return await livetest.LiveTest(ex, max_loss=a.max_loss, wait_fill_s=a.wait, dms=not a.skip_dms,
-                                       dms_only=a.dms_only, lev_low=a.lev_low).run()
+                                       dms_only=a.dms_only, only=only, lev_low=a.lev_low).run()
 
     rep = asyncio.run(go())
     p = livetest.write_report(rep, cfg.root / "reports")
@@ -547,6 +552,8 @@ def main(argv: list[str] | None = None) -> None:
     p.add_argument("--wait", type=float, default=20.0, help="seconds a post-only order at the touch may wait for a fill")
     p.add_argument("--skip-dms", action="store_true", help="leave out the dead man's switch step (up to 11 minutes)")
     p.add_argument("--dms-only", action="store_true", help="only the dead man's switch step: one far order, no trade")
+    p.add_argument("--only", help="only these steps, comma-separated: leverage, limit, renewal, cancel-all, batch, "
+                                  "post-only, long (with the bot's stop), reduce-only, short, dms")
     p.set_defaults(fn=cmd_livetest)
     p = sub.add_parser("set", help="see or change a setting: lighter set daily_stop 5")
     p.add_argument("name", nargs="?", choices=list(settings.SETTINGS))

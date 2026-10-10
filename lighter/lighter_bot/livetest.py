@@ -48,6 +48,8 @@ DMS_TRY_MS = (30_000, C.CANCEL_ALL_MIN_MS + 30_000)   # a short horizon first (i
 DMS_LATE_OK_S = 60.0                 # the scheduled cancel-all may fire this long after its time and still pass
 DMS_LATE_S = 300.0                   # and the test waits this long past the time before it calls it never
 PASS, FAIL, INFO, SKIP = "PASS", "FAIL", "INFO", "SKIP"
+# the steps by the names `--only` takes, in the order they run
+STEPS = ("leverage", "limit", "renewal", "cancel-all", "batch", "post-only", "long", "reduce-only", "short", "dms")
 # since the runs of 2026-10-09 the bot counts on the expiry of its orders, so the scheduled cancel-all not firing is
 # a fact about Lighter, not a bug of the bot
 NOT_RELIED_ON = "(the bot does not count on this: the expiry on its orders is what clears them) "
@@ -104,7 +106,7 @@ def min_qty(min_base: float, min_quote: float, step: float, price: float, x: flo
 
 class LiveTest:
     def __init__(self, ex: Any, *, say: Callable[[str], None] = print, max_loss: float = 1.0, wait_fill_s: float = 20.0,
-                 dms: bool = True, dms_only: bool = False, lev_low: float = 5.0, sleep: Callable[[float], Awaitable[None]] = asyncio.sleep,
+                 dms: bool = True, dms_only: bool = False, only: tuple[str, ...] = (), lev_low: float = 5.0, sleep: Callable[[float], Awaitable[None]] = asyncio.sleep,
                  clock: Callable[[], float] = time.time) -> None:
         self.ex = ex                       # a LiveExchange (lighter_bot/trade/live.py)
         self.m = ex.market
@@ -113,6 +115,8 @@ class LiveTest:
         self.wait_fill_s = wait_fill_s
         self.dms = dms or dms_only
         self.dms_only = dms_only           # the dead man's switch step alone: one far order, no trade
+        self.only = tuple(only)            # these steps alone (names in STEPS); empty: all of them
+        self.lev_changed = False           # the test set a leverage: the one it found is put back at the end
         self.lev_low = min(lev_low, self.m.max_leverage)
         self.sleep = sleep
         self.clock = clock
@@ -300,6 +304,7 @@ class LiveTest:
 
     async def step_leverage(self, lev: float, name: str) -> None:
         try:
+            self.lev_changed = True
             await self.ex.set_leverage(lev)
             self.note(name, PASS, f"set to {lev:g}x (cross margin); Lighter accepted it")
         except ApiError as e:
@@ -672,7 +677,7 @@ class LiveTest:
         with contextlib.suppress(Exception):
             left = await self.flatten()
         lev = ""
-        if self.lev_found and not self.dms_only:
+        if self.lev_found and self.lev_changed:
             lev = f", leverage NOT put back to {self.lev_found:g}x"
             with contextlib.suppress(Exception):
                 if not left:
@@ -689,21 +694,20 @@ class LiveTest:
                   f"position {left:+g}, {len(orders)} order(s) STILL OPEN: close them in the Lighter app now")
 
     async def run(self) -> Report:
-        steps: list[tuple[str, Callable[[], Awaitable[Any]]]] = [
-            ("leverage", lambda: self.step_leverage(self.lev_low, f"leverage {self.lev_low:g}x")),
-            ("limit order", self.step_limit_modify_cancel),
-            ("quote renewal", self.step_renewal),
-            ("cancel-all", self.step_cancel_all),
-            ("batch", self.step_batch),
-            ("post-only", self.step_post_only_crossing),
-            ("long", self._long),
-            ("reduce-only", self.step_reduce_only_when_flat),
-            ("short", self._short),
+        every: list[tuple[str, str, Callable[[], Awaitable[Any]]]] = [
+            ("leverage", "leverage", lambda: self.step_leverage(self.lev_low, f"leverage {self.lev_low:g}x")),
+            ("limit", "limit order", self.step_limit_modify_cancel),
+            ("renewal", "quote renewal", self.step_renewal),
+            ("cancel-all", "cancel-all", self.step_cancel_all),
+            ("batch", "batch", self.step_batch),
+            ("post-only", "post-only", self.step_post_only_crossing),
+            ("long", "long", self._long),
+            ("reduce-only", "reduce-only", self.step_reduce_only_when_flat),
+            ("short", "short", self._short),
+            ("dms", "dead man's switch", self.step_dead_mans_switch),
         ]
-        if self.dms_only:
-            steps = []
-        if self.dms:
-            steps.append(("dead man's switch", self.step_dead_mans_switch))
+        only = self.only or (("dms",) if self.dms_only else ())
+        steps = [(name, fn) for key, name, fn in every if (key in only if only else key != "dms" or self.dms)]
         try:
             await self.step_connect()
             for name, fn in steps:
@@ -714,7 +718,7 @@ class LiveTest:
                     raise
                 except Exception as e:      # one step failing is a finding, not a reason to leave the rest untested
                     self.note(name, FAIL, f"{type(e).__name__}: {str(e)[:200]}")
-            if not self.dms:
+            if not self.dms and not only:
                 self.note("dead man's switch", SKIP, "left out (--skip-dms)")
         except Abort as e:
             self.rep.aborted = str(e)
@@ -755,9 +759,16 @@ def pick_market(markets: dict[str, Any]) -> Any:
     return min(busy, key=lambda m: (round(m.min_order_usd(m.last_price), 2), -m.day_volume_usd))
 
 
-def plan_text(m: Any, lev_low: float, max_loss: float, dms: bool, dms_only: bool = False) -> str:
+def plan_text(m: Any, lev_low: float, max_loss: float, dms: bool, dms_only: bool = False,
+              only: tuple[str, ...] = ()) -> str:
     one = min_qty(m.min_base, m.min_quote, m.step, m.last_price) * m.last_price
-    if dms_only:
+    if only and only != ("dms",):
+        return "\n".join((
+            f"LIVE TEST on {m.symbol}, these steps only: {', '.join(only)}. Real orders, real money, the smallest size "
+            f"Lighter takes (about ${one:.2f} each).",
+            f"  It stops and closes everything if the account falls ${max_loss:.2f} below where it started.",
+            "  It ends flat with no orders and the leverage as it found it. Do not trade this market by hand while it runs."))
+    if dms_only or only == ("dms",):
         return "\n".join((
             f"LIVE TEST on {m.symbol}, a dead bot's orders only: two real orders of about ${one:.2f} each, far under "
             "the price, where they do not trade.",

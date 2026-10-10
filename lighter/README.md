@@ -222,7 +222,7 @@ wild in the last hour, its data fresh.
   stop on Lighter beside the open position, a close with that stop resting, the stop going when flat; a reduce-only order with
   no position; a short and its close; and the two things that should
   clear a dead bot's orders: the 5.5-minute expiry on the bot's own orders removing one, and Lighter's dead man's switch cancelling another
-  (`--skip-dms` leaves that out: it can take 11 minutes; `--dms-only` runs that step alone, with two far orders and no trade). It stops and closes everything when the
+  (`--skip-dms` leaves that out: it can take 11 minutes; `--dms-only` runs that step alone, with two far orders and no trade; `--only renewal,long` runs just the steps you name: `leverage`, `limit`, `renewal`, `cancel-all`, `batch`, `post-only`, `long`, `reduce-only`, `short`, `dms`). It stops and closes everything when the
   account is $1 down (`--max-loss`), and always ends flat with no orders and the leverage it found. With a zero-fee account the cost is the spread on about
   four minimum orders: cents. The report is printed and written to `lighter/reports/livetest-<time>.md`: `PASS` (Lighter did it
   and the bot's own books agree), `FAIL` (a bug to fix before a real run), `INFO` (something learned, such as how far from the
@@ -301,7 +301,7 @@ starts, stops and ends.
 | `lighter auto [on\|off\|set\|status] [--live] [--budget X] [--cost X]` | The autopilot |
 | `lighter doctor [MARKET] [--lev N]` | Everything a live run needs (read-only) |
 | `lighter leverage MARKET [X]` | The account's leverage on a market; with a number, set it (needs `LBOT_LIVE=1` and `yes` typed; a run sets its own at start) |
-| `lighter livetest [MARKET] [--skip-dms] [--dms-only] [--max-loss 1] [--lev-low 5] [--wait 20]` | **Real money, minimum size:** every kind of request the bot sends, once, with a report (section 6) |
+| `lighter livetest [MARKET] [--only STEPS] [--skip-dms] [--dms-only] [--max-loss 1] [--lev-low 5] [--wait 20]` | **Real money, minimum size:** every kind of request the bot sends, once, with a report (section 6) |
 | `lighter set [NAME VALUE]` | See or change a setting (`default` undoes it) |
 | `lighter account` | The account as Lighter keeps it |
 | `lighter keys` | A new API key pair (local only; register it with `scripts/register_key.py`) |

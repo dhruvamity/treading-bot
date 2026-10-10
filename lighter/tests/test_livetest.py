@@ -336,6 +336,18 @@ def test_an_expiry_lighter_does_not_act_on_fails_and_a_switch_the_next_request_f
     assert rep.clean and not v.orders
 
 
+def test_only_the_named_steps_run_and_the_leverage_is_left_alone(cfg, tmp_path):
+    t, v, _said = make(cfg, tmp_path)
+    t.only = ("renewal", "long")
+    rep = asyncio.run(t.run())
+    names = [s.name for s in rep.steps]
+    assert names[0] == "connect" and names[-1] == "end" and not rep.failed and rep.clean
+    assert "quote renewal" in names and "the bot's stop on Lighter" in names and "sell to close: flat" in names
+    assert not any(n.startswith(("leverage", "limit order", "batch", "dead man", "sell short")) for n in names)
+    assert v.leverage == [] and "leverage" not in rep.steps[-1].detail     # it set none, so it puts none back
+    assert "these steps only: renewal, long" in lt.plan_text(M, 5.0, 1.0, True, False, ("renewal", "long"))
+
+
 def test_the_dead_mans_switch_is_not_tried_when_other_markets_have_orders(cfg, tmp_path):
     rep, v, _said, notes = dms_alone(cfg, tmp_path, elsewhere=2)
     assert results(rep)["dead man's switch"] == lt.SKIP and "2 open order(s) in other markets" in notes["dead man's switch"]
