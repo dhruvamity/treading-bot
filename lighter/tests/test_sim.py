@@ -74,6 +74,18 @@ def test_the_request_budget_skips_requotes():
     assert r.skipped > 50 and r.requests <= 3 * 3
 
 
+def test_a_resting_order_is_replaced_before_its_expiry_and_goes_to_the_back_of_the_queue():
+    # the live bot's orders expire 5.5 minutes after they are placed and are replaced 2 minutes before that
+    quiet = run(tape(flat_book(), []), "touch 0")
+    assert quiet.requests == 3                                    # placed, and replaced at 210 s and 420 s
+    assert run(tape(flat_book(), []), "touch 0", SimCfg(warmup_s=0, renew_s=0)).requests == 1
+    # 5 ahead of us; 3 trade at our price at 100 s; 4 more at 300 s. An order that had rested all along is reached
+    # (2 left ahead); the replaced one is behind 5 again and is not
+    trades = [(T0 + 100 * US, 100.00, 3.0, 0, 1), (T0 + 300 * US, 100.00, 4.0, 0, 2)]
+    assert run(tape(flat_book(), trades), "touch 0", SimCfg(warmup_s=0, renew_s=0)).maker_fills == 1
+    assert run(tape(flat_book(), trades), "touch 0").maker_fills == 0
+
+
 def test_tape_round_trip_and_dedupe(tmp_path):
     tp = Tape(tmp_path)
     cols = {"ts": np.array([1, 2], np.int64), "bid": np.array([1.0, 1.0]), "ask": np.array([2.0, 2.0]),

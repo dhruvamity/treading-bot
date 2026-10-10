@@ -168,3 +168,100 @@ def test_a_market_lighter_no_longer_lists_is_a_flat_position(ex):
     ex.rest = Rest({"positions": [{"market_id": 1, "position": "0.02", "sign": -1, "avg_entry_price": "84100"}]})
     asyncio.run(ex.reconcile())
     assert ex.acct.pos == pytest.approx(-0.02)
+
+
+class _Recording:
+    """A REST stand-in that keeps what was sent."""
+
+    def __init__(self, error=None):
+        self.sent, self.error = [], error
+
+    async def send(self, txs, *, kind="reserve", wait=True):
+        if self.error:
+            raise self.error
+        self.sent.append([(t.tx_type, signer.tx_fields(t)) for t in txs])
+        return {"code": 200}
+
+
+def _stop_frame(ex, status):
+    return {"channel": "account_orders:1", "type": "update/account_orders", "orders": {"1": [
+        {"client_order_index": ex.vstop.cid, "order_index": 2**48 + 7, "status": status, "is_ask": ex.vstop.side == SELL,
+         "price": "0", "remaining_base_amount": str(ex.vstop.qty), "reduce_only": True, "type": "stop-loss"}]}}
+
+
+def test_a_stop_rests_on_lighter_for_an_open_position_and_follows_it(ex):
+    """What closes the position of a dead bot: Lighter's scheduled cancel-all does not fire by itself (live test,
+    2026-10-09), the quotes expire, and this order is what is left."""
+    import asyncio
+
+    ex.rest = rec = _Recording()
+    ex.acct.pos, ex.acct.entry = 0.05, 84000.0
+    asyncio.run(ex.protect(100.0, 8.0))                       # $8: twice a $4 position stop
+    (typ, f), = rec.sent[0]
+    assert typ == C.TX_CREATE_ORDER and f["Type"] == C.ORDER_STOP_LOSS and f["TimeInForce"] == C.TIF_IOC
+    assert f["IsAsk"] == 1 and f["ReduceOnly"] == 1 and f["BaseAmount"] == 5000
+    assert f["TriggerPrice"] == 838400                        # $8 on 0.05 BTC is $160 under the entry
+    assert f["Price"] == 796480                               # the worst price: 5% past the trigger
+    assert f["OrderExpiry"] > time.time() * 1000 + 27 * 86_400_000     # 28 days: it must outlive a dead bot
+    first = ex.vstop.cid
+    assert ex.vstop.px == 83840.0 and first in ex.stop_cids and not ex.orders
+    ex.on_msg(_stop_frame(ex, "pending"))
+    assert ex.vstop.state == "open" and not ex.orders          # never one of the engine's orders: the diff cannot cancel it
+    asyncio.run(ex.protect(105.0, 8.0))                       # the position grew, but 10 s have not passed
+    ex.acct.pos = 0.051
+    asyncio.run(ex.protect(120.0, 8.0))                       # 2% more: the order still fits
+    assert len(rec.sent) == 1
+    ex.acct.pos = 0.08                                        # 60% more: replaced, in one request
+    asyncio.run(ex.protect(131.0, 8.0))
+    assert [t for t, _ in rec.sent[1]] == [C.TX_CANCEL_ORDER, C.TX_CREATE_ORDER] and rec.sent[1][0][1]["Index"] == first
+    assert rec.sent[1][1][1]["BaseAmount"] == 8000 and rec.sent[1][1][1]["TriggerPrice"] == 839000
+    ex.on_msg(_stop_frame(ex, "pending"))
+    second = ex.vstop.cid
+    ex.acct.pos, ex.acct.entry = 0.0, None                    # flat: nothing to protect
+    asyncio.run(ex.protect(150.0, 8.0))
+    assert [(t, f["Index"]) for t, f in rec.sent[2]] == [(C.TX_CANCEL_ORDER, second)] and ex.vstop is None
+    asyncio.run(ex.protect(170.0, 8.0))
+    assert len(rec.sent) == 3
+
+
+def test_the_stop_for_a_short_sits_above_it_and_is_not_placed_through_the_price(ex):
+    import asyncio
+
+    ex.rest = rec = _Recording()
+    ex.acct.pos, ex.acct.entry = -0.05, 84000.0
+    asyncio.run(ex.protect(100.0, 8.0))
+    f = rec.sent[0][0][1]
+    assert f["IsAsk"] == 0 and f["TriggerPrice"] == 841600 and f["Price"] == 883680 and ex.vstop.side == BUY
+    ex.vstop = None
+    ex.acct.entry = 83800.0                                   # $160 above is 83,960: the offer (84,001) is past it
+    asyncio.run(ex.protect(200.0, 8.0))
+    assert len(rec.sent) == 1 and ex.vstop is None             # it would fire at once: the bot's own stop is at work
+    ex.acct.pos, ex.acct.entry = 0.00001, 84000.0             # a crumb: $8 would be 800,000 away
+    asyncio.run(ex.protect(300.0, 8.0))
+    assert rec.sent[1][0][1]["TriggerPrice"] == 756000        # never further than 10% from the entry
+
+
+def test_a_stop_that_fired_or_was_refused_or_went_with_a_cancel_all(ex):
+    import asyncio
+
+    from lighter_bot.venue.rest import ApiError
+
+    ex.rest = rec = _Recording()
+    ex.acct.pos, ex.acct.entry = 0.05, 84000.0
+    asyncio.run(ex.protect(100.0, 8.0))
+    ex.on_msg(_stop_frame(ex, "pending"))
+    old = ex.vstop
+    ex.rest = _Recording(error=ApiError(400, 21735, "SL/TP order price is too far from the trigger price"))
+    ex.acct.pos = 0.09
+    asyncio.run(ex.protect(120.0, 8.0))
+    assert ex.vstop is old                                     # refused whole: what rested still rests
+    ex.rest = rec
+    ex.on_msg(_stop_frame(ex, "filled"))                      # Lighter fired it
+    assert ex.vstop is None and not ex.orders
+    asyncio.run(ex.protect(121.0, 8.0))                       # the position is still on the books: placed again at once
+    assert len(rec.sent) == 2
+    asyncio.run(ex.cancel_all())                              # a cancel-all on the market takes the stop with it
+    assert ex.vstop is None
+    asyncio.run(ex.protect(122.0, 8.0))
+    assert len(rec.sent) == 4 and ex.vstop is not None         # (the cancel-all itself was the third request)
+

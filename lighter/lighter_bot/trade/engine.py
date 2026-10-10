@@ -29,10 +29,40 @@ from lighter_bot.trade import guard as G
 from lighter_bot.trade.exchange import Change, Exchange, Fill, Order
 from lighter_bot.trade.sizing import Sizes, Stops, sizes, target_capital
 from lighter_bot.trade.strategy import BUY, SELL, Quote, Quoter, Rules, Setup, View
+from lighter_bot.venue import consts as C
 
 log = Log("engine")
 US = 1_000_000
-RENEW_S = 120.0      # a live quote is replaced this long before its expiry (lighter_bot/trade/live.py: QUOTE_EXPIRY_MS)
+
+
+def plan(want: list[Quote], orders: list[Order], tol: float, now: float) -> list[Change]:
+    """The order diff. Keep a live order within the tolerance (and 20% of its size); modify it otherwise; cancel what
+    is not wanted (and anything the bot did not place); leave orders still in flight alone. An order close to its
+    expiry is replaced, wanted price or not: Lighter drops it by itself at the expiry, and a modify cannot move that
+    (lighter_bot/venue/consts.py: QUOTE_EXPIRY_S)."""
+    live = [o for o in orders if o.state in ("open", "sent")]
+    used: set[int] = set()
+    out: list[Change] = []
+    for q in want:
+        match = next((o for o in live if o.cid not in used and o.side == q.side and o.tag == q.tag), None)
+        if match is None:
+            out.append(Change("new", q))
+            continue
+        used.add(match.cid)
+        if match.state == "sent":
+            continue            # not acknowledged yet: never modify an order Lighter has not confirmed
+        renew = bool(match.expires) and match.expires - now < C.QUOTE_RENEW_S
+        if abs(match.px - q.px) <= tol and abs(match.qty - q.qty) <= 0.2 * q.qty and \
+                match.reduce_only == q.reduce_only and not renew:
+            continue
+        if match.reduce_only != q.reduce_only or renew:
+            out += [Change("cancel", cid=match.cid), Change("new", q)]
+        else:
+            out.append(Change("modify", q, match.cid))
+    for o in live:
+        if o.cid not in used and o.state == "open":
+            out.append(Change("cancel", cid=o.cid))
+    return out
 
 
 @dataclass
@@ -168,35 +198,9 @@ class Engine:
 
     # ---------------------------------------------------------------- the order diff
     def diff(self, want: list[Quote], orders: list[Order], now: float | None = None) -> list[Change]:
-        """Keep a live order within the tolerance (and 20% of its size); modify it otherwise; cancel what is not wanted
-        (and anything the bot did not place); leave orders still in flight alone. A live order close to its expiry is
-        replaced, wanted price or not: Lighter drops it by itself at the expiry, and a modify cannot move that."""
-        now = time.time() if now is None else now
         mid = (self.ex.feed.bbo() or (0, 0, 0, 0))
         tol = max(2 * self.m.tick, self.params.tol_bps * 1e-4 * (mid[0] + mid[1]) / 2)
-        live = [o for o in orders if o.state in ("open", "sent")]
-        used: set[int] = set()
-        out: list[Change] = []
-        for q in want:
-            match = next((o for o in live if o.cid not in used and o.side == q.side and o.tag == q.tag), None)
-            if match is None:
-                out.append(Change("new", q))
-                continue
-            used.add(match.cid)
-            if match.state == "sent":
-                continue            # not acknowledged yet: never modify an order Lighter has not confirmed
-            renew = bool(match.expires) and match.expires - now < RENEW_S
-            if abs(match.px - q.px) <= tol and abs(match.qty - q.qty) <= 0.2 * q.qty and \
-                    match.reduce_only == q.reduce_only and not renew:
-                continue
-            if match.reduce_only != q.reduce_only or renew:
-                out += [Change("cancel", cid=match.cid), Change("new", q)]
-            else:
-                out.append(Change("modify", q, match.cid))
-        for o in live:
-            if o.cid not in used and o.state == "open":
-                out.append(Change("cancel", cid=o.cid))
-        return out
+        return plan(want, orders, tol, time.time() if now is None else now)
 
     # ---------------------------------------------------------------- control
     def read_control(self) -> None:
@@ -254,6 +258,9 @@ class Engine:
         run_pnl = eq - self.run.start_equity
         d = g.step(int(now * US), eq, pos, entry, mid, run_pnl=run_pnl, run_vol=self.run.volume)
         self.day_eq = g.day_eq
+        protect = getattr(ex, "protect", None)      # live: the stop that rests on Lighter for an open position
+        if protect is not None:
+            await protect(now, C.VENUE_STOP_X * self.sizes.pos_stop_usd)
         orders = ex.live_orders()
         own_b = sum(o.qty for o in orders if o.side == BUY and abs(o.px - bid) < self.m.tick / 2)
         own_a = sum(o.qty for o in orders if o.side == SELL and abs(o.px - ask) < self.m.tick / 2)

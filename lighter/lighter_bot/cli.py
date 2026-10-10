@@ -358,6 +358,64 @@ def cmd_livetest(a: argparse.Namespace) -> None:
     sys.exit(0 if rep.clean and not rep.failed else 1)
 
 
+def cmd_leverage(a: argparse.Namespace) -> None:
+    """The leverage the account has on a market; with a number, set it. Setting is a signed request to the real
+    account (no order): it needs LBOT_LIVE=1 and `yes` typed here. A run sets its own leverage when it starts, so
+    this matters for trades made by hand in the Lighter app."""
+    from lighter_bot.trade.live import resolve_account
+    from lighter_bot.trade.runner import fetch_markets
+    from lighter_bot.venue.nonce import Nonces
+    from lighter_bot.venue.rest import ApiError, Rest
+    from lighter_bot.venue.signer import Signer
+    cfg = _cfg()
+    m = asyncio.run(fetch_markets(cfg)).get(a.market.upper())
+    if m is None:
+        sys.exit(f"refused: {a.market} is not a Lighter perp (lighter markets)")
+    want = float(a.leverage.lower().removesuffix("x")) if a.leverage else None
+    if want is not None and not 1 <= want <= m.max_leverage:
+        sys.exit(f"refused: {m.symbol} takes 1x to {m.max_leverage:g}x")
+
+    async def read() -> tuple[int, dict[str, Any]]:
+        rest = Rest(cfg.endpoints.rest)
+        try:
+            account = await resolve_account(rest, cfg)
+            return account, ((await rest.account(account)).get("accounts") or [{}])[0]
+        finally:
+            await rest.close()
+
+    async def change(account: int, lev: float) -> None:
+        rest = Rest(cfg.endpoints.rest)
+        signer = Signer(cfg.endpoints.rest, cfg.creds.private_key, cfg.endpoints.chain_id, cfg.creds.api_key_index,
+                        account)
+        nonce = Nonces(cfg.state_dir / f"nonce-{account}-{cfg.creds.api_key_index}.txt").take()[0]
+        try:
+            await rest.send([signer.update_leverage(market=m.market_id, fraction=m.leverage_fraction(lev), nonce=nonce)])
+        except ApiError as e:
+            sys.exit(f"Lighter refused: {e.code}: {e.message}")
+        finally:
+            await rest.close()
+
+    account, acc = asyncio.run(read())
+    now = m.account_leverage(acc)
+    print(f"{m.symbol}: {now:g}x on account {account} (Lighter's default for it is {m.default_leverage:g}x)")
+    if want is None or abs(want - now) < 1e-9:
+        return
+    if any(int(p.get("market_id", -1)) == m.market_id and float(p.get("position") or 0) for p in
+           acc.get("positions") or []):
+        sys.exit(f"refused: a position is open on {m.symbol}; changing the leverage changes its margin")
+    if cfg.no_trading():
+        sys.exit(f"refused: {cfg.no_trading()}")
+    if not cfg.live_allowed:
+        sys.exit("refused: this changes the real account and needs LBOT_LIVE=1 in .env")
+    if ops.running(cfg, "run-live"):
+        sys.exit("refused: a live run is going, and it set the leverage it needs")
+    if not sys.stdin.isatty() or input(f"Set {m.symbol} to {want:g}x on the real account? Type yes: ").strip() != "yes":
+        sys.exit("not changed")
+    asyncio.run(change(account, want))
+    time.sleep(3.0)
+    print(f"{m.symbol}: now {m.account_leverage(asyncio.run(read())[1]):g}x")
+
+
 def cmd_doctor(a: argparse.Namespace) -> None:
     from lighter_bot import doctor
     cfg = _cfg()
@@ -470,6 +528,10 @@ def main(argv: list[str] | None = None) -> None:
     p.add_argument("--budget", type=float)
     p.add_argument("--cost")
     p.set_defaults(fn=cmd_auto)
+    p = sub.add_parser("leverage", help="the account's leverage on a market; with a number, set it: lighter leverage SPY 2")
+    p.add_argument("market")
+    p.add_argument("leverage", nargs="?")
+    p.set_defaults(func=cmd_leverage)
     p = sub.add_parser("doctor", help="everything a live run needs (read-only)")
     p.add_argument("market", nargs="?")
     p.add_argument("--lev")

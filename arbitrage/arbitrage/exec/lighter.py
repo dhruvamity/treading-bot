@@ -238,11 +238,22 @@ class LighterTrade:
             info.open, info.note = False, f"{e.code}: {e.message}"[:160]
         return cid
 
+    @property
+    def maker_life_s(self) -> float:
+        """How long a maker order may rest before the engine replaces it: Lighter drops it by itself at its expiry,
+        which cannot be moved (lighter_bot/venue/consts.py)."""
+        from lighter_bot.venue import consts as C
+
+        return C.QUOTE_EXPIRY_S - C.QUOTE_RENEW_S
+
     async def maker(self, symbol: str, side: int, size: float, price: float, reduce_only: bool) -> str:
+        """A post-only order that expires by itself in 5.5 minutes: what clears it if this program dies. Lighter's
+        scheduled cancel-all does not (measured on the venue, 2026-10-09: it fires only on the account's next
+        request). The stop and the take-profit keep the 28 days: they are what protects the position then."""
         from lighter_bot.venue import consts as C
 
         return str(await self._order(side, size, price, reduce_only, order_type=C.ORDER_LIMIT, tif=C.TIF_POST_ONLY,
-                                     expiry=C.ORDER_EXPIRY_DEFAULT))
+                                     expiry=int((time.time() + C.QUOTE_EXPIRY_S) * 1000)))
 
     async def taker(self, symbol: str, side: int, size: float, worst: float, reduce_only: bool) -> str:
         from lighter_bot.venue import consts as C

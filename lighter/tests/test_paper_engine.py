@@ -70,6 +70,19 @@ def test_paper_rejects_a_crossing_post_only(tmp_path):
     assert not ex.live_orders() and ex.rejects
 
 
+def test_paper_orders_expire_as_live_ones_do(tmp_path):
+    ex = paper(tmp_path)
+    t0 = time.time()
+    asyncio.run(ex.send([Change("new", Quote(BUY, 100.00, 1.0, "b"))], "quote"))
+    ex.tick(t0 + 1)
+    o = ex.live_orders()[0]
+    assert o.state == "open" and o.expires == pytest.approx(t0 + 330, abs=2)
+    ex.tick(t0 + 329)
+    assert ex.live_orders()                                  # the engine replaces it long before this
+    ex.tick(t0 + 332)
+    assert not ex.live_orders() and o.why_done == "canceled-expired" and not ex.rejects
+
+
 def test_engine_diff_keeps_modifies_and_cancels(tmp_path):
     ex = paper(tmp_path)
     run = RunState(RunSpec("X", "Mid 0", 10.0))
@@ -90,6 +103,20 @@ def test_engine_diff_replaces_a_live_order_close_to_its_expiry(tmp_path):
     ch = eng.diff([Quote(BUY, 100.00, 1.0, "b"), Quote(SELL, 100.02, 1.0, "a"), Quote(BUY, 100.00, 1.0, "c")], live, now)
     assert [(c.kind, c.cid) for c in ch] == [("cancel", 1), ("new", 0)] and ch[1].quote.tag == "b"
     assert eng.diff([Quote(SELL, 100.02, 1.0, "a")], live[1:2], now + 181)[0].kind == "cancel"   # 119 s left by then
+
+
+def test_the_engine_keeps_the_stop_on_the_venue_at_twice_its_own_position_stop(tmp_path):
+    ex = paper(tmp_path)
+    eng = Engine(ex, RunState(RunSpec("X", "Mid 0", 10.0, capital=100.0)), tmp_path)
+    asked: list[tuple[float, float]] = []
+
+    async def protect(now: float, loss_usd: float) -> None:
+        asked.append((now, loss_usd))
+
+    ex.protect = protect                                     # the live exchange has one; paper has none
+    now = time.time()
+    asyncio.run(eng.step(now))
+    assert asked == [(now, pytest.approx(2 * eng.sizes.pos_stop_usd))] and eng.sizes.pos_stop_usd > 0
 
 
 def test_engine_quotes_and_obeys_controls(tmp_path):

@@ -26,6 +26,15 @@ CANCEL_ALL_ABORT = 2
 CANCEL_ALL_MIN_MS = 5 * 60 * 1000          # a scheduled cancel-all at least 5 minutes out (MinOrderCancelAllPeriod)
 
 ORDER_EXPIRY_DEFAULT = -1                  # the signer turns -1 into 28 days
+# What clears a dead bot's orders (measured on the venue, 2026-10-09: the scheduled cancel-all does not fire by itself,
+# an order's expiry does). Every resting order of the bot expires this long after it is placed: 5 minutes is the
+# shortest Lighter takes, plus 30 s for the clocks. An expiry cannot be moved, so a live order is replaced
+# QUOTE_RENEW_S before it. Paper and the backtest replace on the same clock, so they lose the same queue places.
+QUOTE_EXPIRY_S = 330.0
+QUOTE_RENEW_S = 120.0
+# What closes a dead bot's position: a stop-loss order resting on Lighter (lighter_bot/trade/live.py: protect),
+# triggered at this multiple of the bot's own position stop, so that the bot's own exit comes first while it lives.
+VENUE_STOP_X = 2.0
 IOC_EXPIRY = 0
 CROSS_MARGIN = 0
 NIL_MARKET = 255                           # cancel-all over every market

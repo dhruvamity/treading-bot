@@ -32,6 +32,7 @@ from lighter_bot.scout.tape import DayTape
 from lighter_bot.trade import guard as G
 from lighter_bot.trade.sizing import Sizes
 from lighter_bot.trade.strategy import BP, BUY, SELL, Params, Plan, Quoter, Rules, View
+from lighter_bot.venue import consts as C
 
 US = 1_000_000
 NEVER = 1 << 62
@@ -63,6 +64,8 @@ class SimCfg:
     warmup_s: float = 120.0
     slip_bps: float = 5.0         # extra cost for a taker order bigger than the recorded depth
     queue: bool = True            # False: only trades through our price fill us (a lower bound)
+    renew_s: float = C.QUOTE_EXPIRY_S - C.QUOTE_RENEW_S   # a resting order is replaced at this age (its expiry cannot
+                                  # be moved), so it goes to the back of the queue; 0: orders rest for ever
     inside_ahead: float = 0.0     # an order better than the best price: this share of the best level's size is
                                   # assumed ahead of it (0: nothing; 1: as if the others stepped up with us at once)
     markouts: tuple[int, ...] = (1, 10, 60)
@@ -269,6 +272,7 @@ class Sim:
         tts, tpx, tsz, tbuy, tgrp = w.tts, w.tpx, w.tsz, w.tbuy, w.tgrp
         ntr = len(tts)
         lat = cfg.maker_us
+        renew_us = int(cfg.renew_s * US)
         orders: list[_Order] = []
         st: dict[str, Any] = {"pos": 0.0, "entry": None, "cash": 0.0, "since": 0}
         sent: list[int] = []                   # times of requote requests in the last minute
@@ -352,7 +356,8 @@ class Sim:
                 m = next((o for o in active if id(o) not in used and o.side == side and o.tag == tag), None)
                 if m is not None:
                     used.add(id(m))
-                    if abs(m.px - px) <= tol and abs(m.qty - qty) <= 0.2 * qty and m.reduce_only == ro:
+                    if abs(m.px - px) <= tol and abs(m.qty - qty) <= 0.2 * qty and m.reduce_only == ro and \
+                            not (renew_us and t - m.live_from >= renew_us):
                         continue
                 changes.append((m, q))
             for o in active:
@@ -446,7 +451,9 @@ class Sim:
                     cancel_all(t)
                     taker(-pos, t)
                 if d.action in (G.QUOTE, G.EXIT) or orders:
-                    fp = (tuple(want), BID[i], ASK[i], tuple((o.side, o.px, o.qty, o.cancel_at) for o in orders))
+                    fp = (tuple(want), BID[i], ASK[i],          # the last item: an order has reached the age to replace it
+                          tuple((o.side, o.px, o.qty, o.cancel_at, renew_us > 0 and t - o.live_from >= renew_us)
+                                for o in orders))
                     if fp != last_fp:
                         last_fp = fp if sync(want, i, t, d.action == G.QUOTE and not plan_taker) else None
                     orders[:] = [o for o in orders if o.cancel_at > t]

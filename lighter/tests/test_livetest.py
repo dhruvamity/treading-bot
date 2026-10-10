@@ -27,7 +27,7 @@ class Venue:
     cancel-all. It answers the REST calls and pushes the account-stream frames the real one would."""
 
     def __init__(self, ex, *, far_limit=0.015, flat_row=False, stream_flat=True, fill_touch=False, cross_fills=False,
-                 min_cancel_ms=300_000, equity=6.0, slip_max=0.02, bleed=0.0, forgets=False, late_s=0.0, elsewhere=0,
+                 min_cancel_ms=300_000, equity=6.0, slip_max=0.06, bleed=0.0, forgets=False, late_s=0.0, elsewhere=0,
                  expires=True, lazy=False):
         self.ex, self.bid, self.ask = ex, 100.00, 100.02
         self.far_limit, self.flat_row, self.stream_flat = far_limit, flat_row, stream_flat
@@ -223,10 +223,15 @@ def test_the_whole_sequence_passes_and_ends_flat_with_no_orders(cfg, tmp_path):
         assert r[name] == lt.PASS, (name, r.get(name))
     assert r["buy as maker"] == lt.INFO and r["batch with a bad member"] == lt.INFO
     assert t.far == 0.01                                    # 2% was refused as too far from the mark, 1% rests
-    assert v.leverage == [M.leverage_fraction(5), M.leverage_fraction(50)]
+    assert v.leverage == [M.leverage_fraction(5), M.leverage_fraction(50), M.leverage_fraction(2)]   # and back
     notes = {s.name: s.detail for s in rep.steps}
     assert "refused whole" in notes["batch with a bad member"]
-    assert "1% past the trigger" in notes["stop and take-profit orders"]       # the arbitrage's 5% was refused here
+    assert "5% past the trigger" in notes["stop and take-profit orders"]
+    for name in ("quote renewal", "the bot's stop on Lighter", "the stop goes when the position is closed"):
+        assert r[name] == lt.PASS, (name, notes.get(name))
+    assert "the bot cancelled it" in notes["the stop goes when the position is closed"]
+    assert "does not see it as an order to cancel" in notes["the bot's stop on Lighter"]
+    assert "leverage back to the 2x it was" in notes["end"]
     assert "no longer lists the market at all" in notes["sell to close: flat"]
     assert "scheduled 330 s ahead" in notes["dead man's switch"] and "by itself" in notes["dead man's switch"]
     assert r["order expiry"] == lt.INFO and "cannot tell" in notes["order expiry"]      # both went in the same moment
@@ -256,6 +261,16 @@ def test_a_maker_fill_at_the_touch_is_reported_as_one(cfg, tmp_path):
     r = results(rep)
     assert r["buy as maker"] == lt.PASS and r["sell to close as maker"] == lt.PASS and "buy with a taker order" not in r
     assert r["dead man's switch"] == lt.SKIP and rep.clean and not rep.failed and v.pos == 0
+
+
+def test_a_venue_that_refuses_the_stops_worst_price_is_a_failure_of_the_bots_stop(cfg, tmp_path):
+    t, v, _ = make(cfg, tmp_path, slip_max=0.02)             # the real venue took 5% on 2026-10-09; this one does not
+    t.dms = False
+    rep = asyncio.run(t.run())
+    notes = {s.name: s.detail for s in rep.steps}
+    assert "1% past the trigger" in notes["stop and take-profit orders"]          # the test's own orders fall back
+    assert results(rep)["the bot's stop on Lighter"] == lt.FAIL and "21735" in notes["the bot's stop on Lighter"]
+    assert rep.clean and v.pos == 0 and not v.orders
 
 
 def test_a_post_only_order_that_trades_is_a_failure_and_is_closed(cfg, tmp_path):

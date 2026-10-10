@@ -390,7 +390,10 @@ class Engine:
             top, sp = tops[leg.venue], self.specs[leg.venue]
             want = top.bid if leg.side == BUY else top.ask
             if leg.order_id:
-                if not leg.order_taker and abs(leg.order_px - want) > sp.tick / 2 and now - leg.order_at >= s.requote_s:
+                # a venue whose orders expire by themselves (Lighter): replaced before that, moved price or not
+                life = getattr(self.venues[leg.venue], "maker_life_s", 0.0)
+                moved = abs(leg.order_px - want) > sp.tick / 2 and now - leg.order_at >= s.requote_s
+                if not leg.order_taker and (moved or (life and now - leg.order_at >= life)):
                     await self._cancel(leg)
             elif not leg.trim_id and leg.left >= dust[leg.venue]:
                 v = self.venues[leg.venue]

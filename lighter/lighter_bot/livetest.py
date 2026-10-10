@@ -31,6 +31,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
+from lighter_bot.trade.engine import plan
 from lighter_bot.trade.exchange import Change, Fill
 from lighter_bot.trade.live import QUOTE_EXPIRY_MS
 from lighter_bot.trade.strategy import BUY, SELL, Quote
@@ -118,6 +119,7 @@ class LiveTest:
         self.rep = Report(self.m.symbol, ex.account, clock())
         self.fills: list[Fill] = []
         self.far = FAR[0]
+        self.lev_found: float | None = None   # the market's leverage on the account before the test: put back at the end
         self.armed = False                 # True once the account was seen flat with no orders: only then may the
                                            # test (and its clean-up) cancel and close anything
         ex.fill_cbs.append(self.fills.append)
@@ -150,6 +152,11 @@ class LiveTest:
                 row = True
                 pos = float(p.get("position") or 0) * (1 if int(p.get("sign") or 1) >= 0 else -1)
         return float(acc.get("total_asset_value") or 0), pos if abs(pos) > self.m.step / 2 else 0.0, row
+
+    async def venue_leverage(self) -> float:
+        """The leverage the account has on this market now: its own setting, else the market's default."""
+        r = await self.ex.rest.account(self.ex.account)
+        return float(self.m.account_leverage((r.get("accounts") or [{}])[0]))
 
     async def venue_schedule(self) -> tuple[int, int]:
         """(the scheduled cancel-all time Lighter holds for the account, 0 for none; its open orders in every market)."""
@@ -271,6 +278,7 @@ class LiveTest:
         eq, pos, _row = await self.venue_account()
         orders = await self.venue_orders()
         self.rep.equity_start = eq
+        self.lev_found = await self.venue_leverage()
         if pos or orders:
             raise Abort(f"the account already has {'a position' if pos else ''}{' and ' if pos and orders else ''}"
                         f"{f'{len(orders)} open order(s)' if orders else ''} on {self.m.symbol}: the test would cancel "
@@ -319,6 +327,38 @@ class LiveTest:
         done = await self.until(lambda: self.ex.orders.get(cid) is None or self.ex.orders[cid].state == "done", 10.0)
         self.note("cancel", PASS if gone and done else FAIL,
                   f"off Lighter's book {'yes' if gone else 'NO'}, the bot's order stream said done {'yes' if done else 'NO'}")
+
+    async def step_renewal(self) -> None:
+        """The engine replaces an order close to its expiry (a cancel and a new order in one request): its own diff
+        decides it here, on a clock moved to 2 minutes before the order's expiry, and the bot's own path sends it."""
+        name = "quote renewal"
+        cid, _px = await self.far_order(BUY, "test-renew")
+        if cid is None or not await self.until(lambda: self.ex.orders[cid].state == "open", 10.0):
+            self.note(name, FAIL, f"no resting order to renew: {self.last_error()}")
+            return
+        old = self.ex.orders[cid]
+        want = Quote(BUY, old.px, old.qty, "test-renew")
+        early = [c.kind for c in plan([want], [old], self.m.tick, old.expires - C.QUOTE_RENEW_S - 5)]
+        changes = plan([want], [old], self.m.tick, old.expires - C.QUOTE_RENEW_S + 5)
+        if early or [c.kind for c in changes] != ["cancel", "new"]:
+            self.note(name, FAIL, f"the engine's diff asked for {early or 'nothing'} before the time and "
+                                  f"{[c.kind for c in changes] or 'nothing'} at it (wanted nothing, then cancel + new)")
+            await self.send([Change("cancel", cid=cid)])
+            return
+        await self.sleep(1.0)       # so that the new order's expiry is visibly later
+        ok = await self.send(changes)
+        new = next((o for o in self.ex.orders.values() if o.tag == "test-renew" and o.cid != cid), None)
+        swapped = ok and new is not None and await self.until_venue(
+            lambda os_: not self.listed(os_, cid) and self.listed(os_, new.cid))
+        books = new is not None and await self.until(lambda: new.state == "open" and old.state == "done", 10.0)
+        self.note(name, PASS if swapped and books and new is not None and new.expires >= old.expires else FAIL,
+                  "the engine's diff left the order alone until 2 minutes before its expiry, then asked for cancel + new; "
+                  + ("one request did it: the old order is off Lighter's book, the new one is on it"
+                     if swapped else f"but Lighter's book does not show the swap ({self.last_error() if not ok else 'old or new order wrong'})")
+                  + f"; the bot's own books {'agree' if books else 'DO NOT AGREE'}")
+        if new is not None:
+            await self.send([Change("cancel", cid=new.cid)])
+            await self.until_venue(lambda os_: not self.listed(os_, new.cid))
 
     async def step_cancel_all(self) -> None:
         a, _ = await self.far_order(SELL, "test-ask")
@@ -433,6 +473,46 @@ class LiveTest:
         await self.ex.cancel_all()
         gone = await self.until_venue(lambda os_: not os_)
         self.note("cancel-all removes the stops", PASS if gone else FAIL, "none left" if gone else "SOME STILL LISTED")
+
+    async def step_venue_stop(self, pos: float) -> None:
+        """The stop-loss order the bot keeps on Lighter for an open position (lighter_bot/trade/live.py: protect).
+        The close that follows runs with it resting: a reduce-only exit order must be accepted beside it."""
+        name = "the bot's stop on Lighter"
+        loss = abs(pos) * (self.ex.acct.entry or sum(self.bbo()) / 2) * TRIGGER_AWAY      # a trigger 3% away
+        self.ex._last_vstop = 0.0
+        await self.ex.protect(time.time(), loss)
+        s = self.ex.vstop
+        if s is None:
+            self.note(name, FAIL, f"not placed: {self.last_error()}")
+            return
+        row: dict[str, Any] = {}
+
+        def there(os_: list[dict[str, Any]]) -> bool:
+            row.update(next((o for o in os_ if int(o.get("client_order_index") or 0) == s.cid), {}))
+            return bool(row)
+
+        listed = await self.until_venue(there, 10.0)
+        acked = await self.until(lambda: self.ex.vstop is not None and self.ex.vstop.state == "open", 10.0)
+        foreign = [o.cid for o in self.ex.live_orders() if o.tag == "foreign"]
+        self.note(name, PASS if listed and acked and not foreign else FAIL,
+                  f"a reduce-only stop-loss for {s.qty:g}, trigger {s.px:g}: Lighter lists it "
+                  + (f"({row.get('type')}/{row.get('status')}, trigger {row.get('trigger_price')})" if listed else "NO")
+                  + f"; the bot's stream confirmed it {'yes' if acked else 'NO'}; "
+                  + ("the engine does not see it as an order to cancel" if not foreign
+                     else "THE ENGINE WOULD CANCEL IT as someone else's order"))
+
+    async def step_venue_stop_gone(self) -> None:
+        """Flat again: the stop must go (Lighter may drop a reduce-only order itself; else the bot cancels it)."""
+        s = self.ex.vstop
+        if s is None:
+            return
+        by_itself = not self.listed(await self.venue_orders(), s.cid)
+        self.ex._last_vstop = 0.0
+        await self.ex.protect(time.time(), 1.0)
+        gone = await self.until_venue(lambda os_: not self.listed(os_, s.cid), 10.0)
+        self.note("the stop goes when the position is closed", PASS if gone and self.ex.vstop is None else FAIL,
+                  ("Lighter had already removed it by itself" if by_itself else "the bot cancelled it")
+                  if gone else "IT IS STILL LISTED")
 
     async def step_close(self, pos: float, name: str) -> None:
         """Close as the bot does: a reduce-only post-only order at the touch, then the reduce-only taker exit."""
@@ -581,6 +661,13 @@ class LiveTest:
         left = 1.0
         with contextlib.suppress(Exception):
             left = await self.flatten()
+        lev = ""
+        if self.lev_found and not self.dms_only:
+            lev = f", leverage NOT put back to {self.lev_found:g}x"
+            with contextlib.suppress(Exception):
+                if not left:
+                    await self.ex.set_leverage(self.lev_found)
+                    lev = f", leverage back to the {self.lev_found:g}x it was"
         orders: list[dict[str, Any]] = [{}]
         with contextlib.suppress(Exception):
             await self.sleep(2.0)
@@ -588,13 +675,14 @@ class LiveTest:
             self.rep.equity_end = (await self.venue_account())[0]
         self.rep.clean = not left and not orders
         self.note("end", PASS if self.rep.clean else FAIL,
-                  "flat, no orders, the scheduled cancel-all withdrawn" if self.rep.clean else
+                  f"flat, no orders, the scheduled cancel-all withdrawn{lev}" if self.rep.clean else
                   f"position {left:+g}, {len(orders)} order(s) STILL OPEN: close them in the Lighter app now")
 
     async def run(self) -> Report:
         steps: list[tuple[str, Callable[[], Awaitable[Any]]]] = [
             ("leverage", lambda: self.step_leverage(self.lev_low, f"leverage {self.lev_low:g}x")),
             ("limit order", self.step_limit_modify_cancel),
+            ("quote renewal", self.step_renewal),
             ("cancel-all", self.step_cancel_all),
             ("batch", self.step_batch),
             ("post-only", self.step_post_only_crossing),
@@ -634,7 +722,9 @@ class LiveTest:
         pos = await self.step_open(BUY, "buy")
         if pos:
             await self.step_stops(pos)
+            await self.step_venue_stop(pos)
             await self.step_close(pos, "sell to close")
+            await self.step_venue_stop_gone()
 
     async def _short(self) -> None:
         top = self.m.max_leverage
@@ -669,12 +759,12 @@ def plan_text(m: Any, lev_low: float, max_loss: float, dms: bool, dms_only: bool
         f"LIVE TEST on {m.symbol}: real orders, real money, the smallest size Lighter takes (about ${one:.2f} each).",
         f"  It sets the leverage ({min(lev_low, m.max_leverage):g}x, then {m.max_leverage:g}x), rests and moves and cancels "
         "orders far from the price,",
-        "  buys one minimum order and sells it, sells one short and buys it back, places a stop and a take-profit",
-        "  and removes them" + (", and lets Lighter's dead man's switch cancel one far order and expire another (up to 11 minutes)." if dms
+        "  replaces one as the bot does before an expiry, buys one minimum order and sells it with the bot's own stop",
+        "  resting on Lighter, sells one short and buys it back, places a stop and a take-profit and removes them" + (", and lets Lighter's dead man's switch cancel one far order and expire another (up to 11 minutes)." if dms
                                 else "."),
         f"  It stops and closes everything if the account falls ${max_loss:.2f} below where it started.",
         "  Expected cost with a zero-fee account: the spread on about four minimum orders (cents).",
-        "  It ends flat with no orders. Do not trade this market by hand while it runs."))
+        "  It ends flat with no orders and the leverage as it found it. Do not trade this market by hand while it runs."))
 
 
 def write_report(rep: Report, reports_dir: Path) -> Path:

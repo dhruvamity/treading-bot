@@ -12,6 +12,10 @@
 - The scheduled cancel-all ("dead man's switch", moved 5.5 minutes ahead every 60 s) is kept, but it is not that
   protection: the same test showed Lighter acts on it only when the account's next request arrives, and a dead bot
   sends none.
+- A dead bot's position: while the bot holds one, a reduce-only stop-loss order rests on Lighter for it (`protect`),
+  triggered at twice the bot's own position stop (consts.VENUE_STOP_X), so the bot's own exit comes first while it lives. It carries
+  the 28-day expiry: it is what is left when the quotes have expired. It is not one of the engine's orders: the
+  order diff never sees it.
 - At start the market's orders are cancelled (the bot treats the account's orders on its market as its own) and the
   leverage is set (cross margin).
 """
@@ -39,7 +43,10 @@ log = Log("live")
 AUTH_LIFETIME_S = 7 * 3600
 DMS_EVERY_S = 60.0
 DMS_AHEAD_MS = C.CANCEL_ALL_MIN_MS + 30_000
-QUOTE_EXPIRY_MS = 5 * 60_000 + 30_000      # Lighter takes an expiry from 5 minutes ahead; 30 s of room for the clocks
+QUOTE_EXPIRY_MS = int(C.QUOTE_EXPIRY_S * 1000)
+STOP_EVERY_S = 10.0          # at most one change of it in this long (the position of a market maker moves all the time)
+STOP_SLIP = 0.05             # its worst price past the trigger (what the live test saw Lighter accept)
+STOP_MAX_AWAY = 0.10         # never further than this from the entry, however small the position
 RECONCILE_EVERY_S = 300.0
 UNACKED_S = 10.0
 
@@ -77,6 +84,9 @@ class LiveExchange(Exchange):
         self._tasks: list[asyncio.Task[Any]] = []
         self._last_dms = 0.0
         self._last_reconcile = 0.0
+        self.vstop: Order | None = None           # the stop-loss order resting on Lighter (px is its trigger)
+        self.stop_cids: set[int] = set()         # every stop this run placed: their frames are not quotes
+        self._last_vstop = 0.0
         self.taker_in_flight_until = 0.0
         self.errors: list[tuple[float, str]] = []
 
@@ -194,11 +204,77 @@ class LiveExchange(Exchange):
         tx = self.signer.cancel_all(tif=C.CANCEL_ALL_NOW, time_ms=0, nonce=self._n()[0], market=self.market.market_id)
         try:
             await self.rest.send([tx], kind=RESERVE, wait=True)
+            self.vstop, self._last_vstop = None, 0.0      # it went with the rest: `protect` places it again
         except ApiError as e:
             log.warn("cancel_all_refused", code=e.code, msg=e.message)
         for o in self.orders.values():
             if o.state in ("sent", "open"):
                 o.state = "cancelling"
+
+    def stop_wanted(self, loss_usd: float) -> tuple[int, float, float] | None:
+        """(side, size, trigger) of the stop that should rest on Lighter for the position, None when flat. The
+        trigger is where the position has lost `loss_usd` from its entry."""
+        pos, entry, m = self.acct.pos, self.acct.entry, self.market
+        if loss_usd <= 0 or abs(pos) < m.step / 2 or not entry:
+            return None
+        away = max(min(loss_usd / abs(pos), entry * STOP_MAX_AWAY), 2 * m.tick)
+        side = SELL if pos > 0 else BUY
+        return side, abs(pos), m.price_of(m.price_int(entry + side * away, side_buy=True))
+
+    async def protect(self, now: float, loss_usd: float) -> None:
+        """Keep the stop-loss on Lighter in step with the position: the right side, within 20% of its size, the
+        trigger within a tenth of its distance. One request replaces it (cancel + new)."""
+        cur = self.vstop
+        if now - self._last_vstop < STOP_EVERY_S or (cur is not None and cur.state == "sent"
+                                                    and now - cur.sent_at < UNACKED_S):
+            return
+        want = self.stop_wanted(loss_usd)
+        if want is None and cur is None:
+            return
+        m, bbo = self.market, self.feed.bbo()
+        if want is not None:
+            side, qty, trig = want
+            if bbo is None or (side == SELL and bbo[0] <= trig) or (side == BUY and bbo[1] >= trig):
+                return          # the price is already through it: the bot's own stop is at work, the old order stays
+            entry = self.acct.entry or trig
+            if cur is not None and cur.side == side and abs(cur.qty - qty) <= 0.2 * qty and \
+                    abs(cur.px - trig) <= max(2 * m.tick, 0.1 * abs(trig - entry)):
+                return
+        if not self.budget.allows(RESERVE):
+            return
+        txs: list[SignedTx] = []
+        new: Order | None = None
+        nonces = self._n(2)
+        if cur is not None:
+            txs.append(self.signer.cancel_order(market=m.market_id, index=cur.cid, nonce=nonces[0]))
+        if want is not None:
+            side, qty, trig = want
+            cid = self.ids.take()[0]
+            txs.append(self.signer.create_order(
+                market=m.market_id, client_index=cid, size=m.size_int(qty),
+                price=self._px(side, trig * (1 + side * STOP_SLIP)), is_ask=side == SELL,
+                order_type=C.ORDER_STOP_LOSS, tif=C.TIF_IOC, reduce_only=True, expiry=C.ORDER_EXPIRY_DEFAULT,
+                nonce=nonces[1], trigger_price=m.price_int(trig, side_buy=True)))
+            new = Order(cid, side, trig, m.size_of(m.size_int(qty)), "stop", True, "sent", now)
+            self.stop_cids.add(cid)
+        self._last_vstop = now
+        self.vstop = new         # before the request leaves: the stream can answer first (see `send`)
+        try:
+            r = await self.rest.send(txs, kind=RESERVE, wait=False)
+        except ApiError as e:
+            self.vstop = cur     # refused whole: what rested still rests
+            self.errors.append((time.time(), f"{e.code}: {e.message}"))
+            log.warn("stop_refused", code=e.code, msg=e.message)
+            return
+        except (TimeoutError, OSError) as e:
+            self.vstop = None    # unknown: the next reconcile lists what is there, and this runs again
+            self._last_reconcile = 0.0
+            log.warn("stop_failed", err=str(e))
+            return
+        if r is None:
+            self.vstop = cur
+            return
+        log.info("stop_set", side=new.side if new else 0, qty=new.qty if new else 0, trigger=new.px if new else 0)
 
     async def set_leverage(self, leverage: float) -> None:
         frac = self.market.leverage_fraction(leverage)
@@ -270,6 +346,16 @@ class LiveExchange(Exchange):
     def _on_order(self, od: dict[str, Any]) -> None:
         cid = int(od.get("client_order_index") or 0)
         status = str(od.get("status", ""))
+        if cid in self.stop_cids:       # the stop on Lighter: never one of the engine's orders
+            s = self.vstop
+            if s is not None and s.cid == cid:
+                if status in C.OPEN_STATUSES:
+                    s.state, s.oid = "open", int(od.get("order_index") or s.oid)
+                else:
+                    self.vstop, self._last_vstop = None, 0.0
+                    if status == "filled":
+                        log.warn("stop_fired", side=s.side, qty=s.qty, trigger=s.px)
+            return
         o = self.orders.get(cid) if cid else None
         if o is None:
             if status in C.OPEN_STATUSES:     # an order we did not place (the app, an older run): ours to cancel
@@ -348,6 +434,8 @@ class LiveExchange(Exchange):
         for cid, o in self.orders.items():
             if o.state in ("sent", "open", "cancelling") and cid not in live and time.time() - o.sent_at > UNACKED_S:
                 o.state, o.why_done = "done", "not on the book"
+        if self.vstop is not None and self.vstop.cid not in live and time.time() - self.vstop.sent_at > UNACKED_S:
+            self.vstop, self._last_vstop = None, 0.0      # not on Lighter: `protect` places it again
 
     def tick(self, now: float) -> None:
         self.orders = {k: o for k, o in self.orders.items() if o.state != "done" or now - o.sent_at < 60}

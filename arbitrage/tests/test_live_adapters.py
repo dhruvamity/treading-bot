@@ -172,6 +172,8 @@ async def test_lighter_orders_stops_and_leverage_as_they_would_be_signed(tmp_pat
     assert (o["order_type"], o["tif"], o["is_ask"], o["reduce_only"]) == (C.ORDER_LIMIT, C.TIF_POST_ONLY, False, False)
     assert (o["price"], o["size"], o["trigger_price"]) == (10640, 51851, 0)   # a bid rounds down; 4 size decimals
     assert o["client_index"] == int(cid) and len(sent) == 1
+    # it expires by itself in 5.5 minutes (what clears it if this program dies), and is replaced 2 minutes before
+    assert o["expiry"] == pytest.approx(time.time() * 1000 + 330_000, abs=5_000) and t.maker_life_s == 210.0
     await t.taker("BABA", SELL, 5.1851, 105.87, True)
     o = sg_.orders[-1]
     assert (o["order_type"], o["tif"], o["is_ask"], o["reduce_only"], o["expiry"]) == (
@@ -179,6 +181,7 @@ async def test_lighter_orders_stops_and_leverage_as_they_would_be_signed(tmp_pat
     assert await t.set_stops("BABA", 5.1851, 99.5632, 113.297)            # long: both legs sell
     stop, take = sg_.orders[-2], sg_.orders[-1]
     assert (stop["order_type"], take["order_type"]) == (C.ORDER_STOP_LOSS, C.ORDER_TAKE_PROFIT)
+    assert stop["expiry"] == take["expiry"] == C.ORDER_EXPIRY_DEFAULT     # 28 days: they must outlive a dead program
     assert stop["is_ask"] and take["is_ask"] and stop["reduce_only"] and take["reduce_only"]
     assert (stop["trigger_price"], take["trigger_price"], stop["size"]) == (9956, 11329, 51851)
     assert stop["price"] < stop["trigger_price"] and stop["tif"] == C.TIF_IOC  # may run 5% past the trigger, no more
