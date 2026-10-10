@@ -518,6 +518,48 @@ async def test_run_any_market_setting_and_leverage_from_the_command(tmp_path: Pa
     assert calls[-1] == ("BTC-USD", "Grid +3 Short", 20, False, "manual")
 
 
+async def test_a_trader_that_never_scans_runs_any_market_of_the_venues_own_list(tmp_path: Path) -> None:
+    """2026-10-11: on a trader VPS `/run SPY mid 0 max live sl=30` answered "Unknown market SPY" and /run showed no
+    market: both looked only at the last scan, and a trader never scans. The market list it reads from Arcus counts."""
+    bot, api, _pilot, calls = _with_pilot(tmp_path, [], top=[])         # a scan with nothing in it
+    await bot.handle(msg("/run SPY mid 0 max paper"))
+    assert "No market list on this machine yet" in api.texts()          # before the first read: say that, not "unknown"
+    await bot.handle(msg("/run"))
+    assert "No market list on this machine yet" in api.texts() and not [d for d in _buttons(api) if d.startswith("rm ")]
+    (tmp_path / "data" / "scout" / "markets.json").write_text(json.dumps({"markets": [
+        {"marketDisplayName": "SPY-USD", "status": "ONLINE", "initialMarginFraction": "0.02", "tickSize": "0.01",
+         "stepSize": "0.001", "minOrderNotional": "5", "minOrderSize": "0.001", "markPrice": "680"},
+        {"marketDisplayName": "OLD-USD", "status": "OFFLINE", "initialMarginFraction": "0.1", "tickSize": "0.01",
+         "stepSize": "0.001", "minOrderNotional": "5", "minOrderSize": "0.001", "markPrice": "1"}]}))
+    (tmp_path / "state" / "scout_capital.json").write_text(json.dumps({"usd": 240}))
+    await bot.handle(msg("/run"))
+    assert "rm SPY-USD" in _buttons(api) and "rm OLD-USD" not in _buttons(api)
+    await bot.handle(msg("/run spy"))
+    assert any(d.startswith("f SPY-USD ") for d in _buttons(api))       # its run form, with no scan behind it
+    await bot.handle(msg("/run SPY mid 0 max paper sl=30"))
+    await bot.handle(press(f"ok {list(bot.pending)[-1]}"))
+    await asyncio.sleep(0.05)
+    assert calls[-1] == ("SPY-USD", "Mid 0", 50, False, "manual")       # at Arcus's maximum for SPY
+    await bot.handle(msg("/run DOGE mid 0 paper"))
+    assert "Unknown market DOGE" in api.texts()
+    await bot.handle(msg("/run OLD mid 0 paper"))
+    assert "Unknown market OLD" in api.texts()
+
+
+async def test_a_trader_is_never_told_to_wait_for_a_scan_it_will_not_make(tmp_path: Path, monkeypatch: Any) -> None:
+    bot, api, _pilot, _calls = _with_pilot(tmp_path, [], top=[])
+    (tmp_path / "data" / "scout" / "latest.json").unlink()              # a trader has no scan at all
+    await bot.handle(msg("/top3"))
+    assert "NO SCAN YET" in api.texts()                                 # the one machine that does everything: wait
+    monkeypatch.setenv("BOT_ROLE", "trader")
+    for cmd in ("/top3", "/cheapest", "/maxvolume", "/pick 1", "/auto"):
+        n = len(api.sent)
+        await bot.handle(msg(cmd))
+        said = "\n".join(t for _, t, _ in api.sent[n:])
+        assert "trader" in said and "BOT_SYNC_FROM" in said, (cmd, said)
+        assert "tbot up" not in said and "scout run" not in said and "after its next scan" not in said, (cmd, said)
+
+
 async def test_run_with_a_loss_limit_replaces_the_running_live_bot(tmp_path: Path, monkeypatch: Any) -> None:
     """2026-09-26: /run while a live bot sat on its daily stop failed the "already running" check; and the owner
     wants to set the most a run may lose (sl=30)."""

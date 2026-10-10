@@ -402,7 +402,8 @@ has run with real money yet.
 What it then does by itself:
 - **Leverage.** Nothing sets it: the highest both venues allow at that hour, the same number on both. SPY is 50x
   while the stock market is open (Mon–Fri 04:00–20:00 New York) and 33x while it is closed, because Arcus allows
-  less then; Lighter is set to the same 33x. A position open at the close is kept as it is until its renewal, at
+  less then; Lighter's position is the same size. (Both venues take whole numbers for the leverage setting, so 34x
+  is what is sent; the position itself is sized at 33.3x.) A position open at the close is kept as it is until its renewal, at
   most 3 hours later. `/arb_lev 30` (or any number) asks for less, `/arb_lev max` for the highest again.
 - **Size.** The smaller of the two balances × 90% × that leverage, the same number of units on both legs. A margin
   in the line (`/arb_lev max 100 SPY`) caps what each venue puts up.
@@ -508,6 +509,17 @@ closed with maker orders in the 15 minutes after the next funding payment, and t
 default because in the history it cost more than it saved (section 2): the stop already closes a position at about
 30% / 70%. The bot cannot move the money itself (section 6a).
 
+**Arcus's off-hours price band** (`band_guard`, on). While the stock market is closed Arcus lets a market trade only
+inside a band around the last session's closing price (SPY ±1%, QQQ ±2%, NVDA ±2.5% at first; each side widens only
+after an hour of pressure) and **rejects any fill at or past the edge**. Lighter has no band. A stop on Arcus's leg
+that lies beyond the edge could therefore not be filled, while Lighter's leg would be closed by its own stop: one leg
+left open. So off-hours the bot opens nothing whose Arcus stop would sit outside the band on the side that leg loses
+on, and `arbitrage plan` says so. It opens again nearer the middle of the band or when the stock market reopens.
+On 11 Oct 2026 (a Sunday) SPY at 33x had 0.98% of room for a 0.83% stop; NVDA at 13x had 2.04% for a 2.08% stop and
+was refused. Lower leverage means a further stop, so `/arb_lev 10` opens nothing off-hours (SPY's stop is then 4.3%
+away). `arbitrage set band_guard 0` switches the check off. A position opened in the session and still open at the
+close is not checked again; with `cycle 3` it is renewed within three hours.
+
 **What it never does.** Hold one leg without the other beyond those limits; open over a position it did not make;
 keep a position the venues will not take stop orders for (it closes, pauses and says so); move money between venues.
 
@@ -524,7 +536,15 @@ Not started by anyone yet. Before the first run:
 
 1. **Money on both venues.** `arbitrage scan` shows each venue's free collateral; the smaller one sets the size.
 2. **An account of its own on each venue, or the market-making bots stopped.** Two programs trading one market on
-   one account each treat the other's position as theirs. On Lighter also use an API key of its own.
+   one account each treat the other's position as theirs. On Lighter also use an API key of its own. Nothing in
+   the code stops you from running both on one account (audit, 11 Oct 2026), and three things then go wrong:
+   - the Arcus bot's dead man's switch is **account-wide** on Arcus (so is a cancel-all without a market), and
+     both also cancel resting stop orders: they would take away the arbitrage's stop on its Arcus leg;
+   - the arbitrage's own cancel-all on a market removes the market-making bot's quotes there;
+   - Lighter allows a standard account 60 requests a minute in all, and each program budgets as if it had all 60.
+   The arbitrage does refuse to open over a position it did not make, and closes when a leg is not the size it
+   holds, so the damage is a closed position, not an unwatched one. On Arcus a second subaccount is enough:
+   `ARCUS_ACCOUNT_INDEX=1` in `.env`, with its own money.
 3. `ARB_LIVE=1` in `arcus/.env`, then `tbot down` and `tbot up` so the Telegram bot sees it.
 4. **Small first:** `arbitrage set max_notional_usd 30`, then `/arb_start live` in Telegram and type back the code it
    shows (or `arbitrage start --live` in a terminal and type LIVE). Watch `/arb_status`.

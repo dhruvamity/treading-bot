@@ -85,7 +85,9 @@ class Bot:
         sc = self.scan()
         emoji = {"most": "🚀", "cheapest": "💎", "max": "🔥"}[lst]
         if sc is None:
-            return card(emoji, LIST_NAMES[lst], lines("No scan yet: is the scout running? (lighter up)")), None
+            return card(emoji, LIST_NAMES[lst], lines(
+                "No scan yet: is the scout running? (lighter up)" if self.cfg.ranks else
+                pilot.NO_LISTS_HERE[0].upper() + pilot.NO_LISTS_HERE[1:])), None
         age = (time.time() - sc["t"]) / 60
         rows = sc["lists"].get(lst) or []
         head = lines(f"Capital ${sc['capital']:,.0f} · stops {'/'.join(f'{x:g}' for x in sc['stops'])}% · "

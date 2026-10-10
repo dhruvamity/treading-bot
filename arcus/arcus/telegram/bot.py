@@ -136,6 +136,9 @@ class Ctx:
     back: str = ""                 # menu layout: where ◀️ Back goes from the screen this command shows
 
 
+NO_MARKETS = ("No market list on this machine yet\nIt reads it from Arcus every 10 minutes\n"
+              "tbot status must show the scout service running · try again in a minute")
+
 class TelegramBot:
     def __init__(self, api: TelegramAPI, control: Control, *, owner_chat_id: int, allowed_user_ids: set[int],
                  prefs_path: Path, read_only: bool = False, daily_loss_pct: float = 3.0,
@@ -616,8 +619,9 @@ class TelegramBot:
             await self.reply(ctx, sessions_text(list(names.values()), self.control.runs()))
             return
         if not args:
-            await self.reply(ctx, card("🎛", "Run Form", codes("Pick a market")),
-                             markets_keyboard(self.pilot.latest_scan()))
+            known = self.pilot.markets()
+            await self.reply(ctx, card("🎛", "Run Form", codes("Pick a market" if known else NO_MARKETS)),
+                             markets_keyboard(self.pilot.latest_scan(), known))
             return
         args, limits = _take_limits(args)
         if isinstance(limits, str):
@@ -639,9 +643,12 @@ class TelegramBot:
         order after the market; a string is the error to show (plain lines)."""
         from arcus.strategies import setup as su
 
-        markets = {c["market"] for c in (self.pilot.latest_scan() or {}).get("all") or []} if self.pilot else set()
+        # the venue's own market list counts, not only what a scan backtested: a trader machine never scans
+        markets = set(self.pilot.markets()) if self.pilot else set()
         m = args[0].upper()
         market = m if "-" in m else f"{m}-USD"
+        if not markets:
+            return NO_MARKETS
         if market not in markets:
             return f"Unknown market {args[0]}\n/run lists them"
         mode: str | None = None
@@ -857,8 +864,12 @@ class TelegramBot:
         st = ap.load(self._state_dir())
         s = ap.settings_of(st)
         pb = pbk.load(self.pilot.root / "data" / "scout") if self.pilot is not None else {}
-        plan = ap.plan_lines(pb, ap.ceiling(s, pb)) if pb.get("markets") else ["No playbook yet: the scout builds it after "
-                                                                          "its next scan"]
+        from arcus.common import role as roles
+
+        none = (["No playbook on this machine: a trader builds none", "It arrives with the lists from the machine that "
+                 "scans (BOT_SYNC_FROM in .env)", "Until then the autopilot starts nothing"] if roles.is_trader()
+                else ["No playbook yet: the scout builds it after its next scan"])
+        plan = ap.plan_lines(pb, ap.ceiling(s, pb)) if pb.get("markets") else none
         return card(emoji, title, codes(*ap.status_lines(st, pb)),
                     section("Next 24 h at a usual market", codes(*plan)),
                     codes("Picks the most volume within the ceiling, per session and market state",

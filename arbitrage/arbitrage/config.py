@@ -100,6 +100,8 @@ ADJUSTABLE: dict[str, tuple[float, float, str]] = {
     "min_volume_24h": (0, 1e9, "skip markets that traded less than this many dollars in 24 h on either venue"),
     "fill_cost_bp": (0, 50, "what one fill is assumed to cost, in bp"),
     "stop_frac": (0.1, 0.8, "dynamic stop: share of the distance to liquidation"),
+    "band_guard": (0, 1, "1 = while the stock market is closed, open nothing whose Arcus stop would sit outside "
+                         "Arcus's off-hours price band (it could not be filled there); 0 = open anyway"),
     "stop_early": (0, 0.95, "share of the way to the stop at which it starts closing with limit orders; the stop "
                             "itself is always taker orders; 0 = off"),
     "stop_sigmas": (0, 10, "dynamic stop: at least this many daily moves from the entry, which lowers the leverage "

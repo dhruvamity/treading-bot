@@ -52,9 +52,13 @@ cat <<EOF
 
 Done. Next, from $BOT, one line at a time:
 
-  1. Your keys and the Telegram token (the README, section 2). On two machines also BOT_ROLE (the README,
-     section 3): trader on the one that trades; recorder or scout on the other, which needs no keys at all:
+  1. Your keys and the Telegram token (the README, section 2):
        nano .env
+     On two machines also say what this one is for (the README, section 3, "Two servers, step by step").
+     The one that trades, which holds the keys:
+       .venv/bin/tbot role trader
+     The one that records, which needs no keys at all:
+       .venv/bin/tbot role recorder
   2. May this server's address trade Arcus perps?
        .venv/bin/arcus region-check
   3. Credentials, account and clock (reads only):
