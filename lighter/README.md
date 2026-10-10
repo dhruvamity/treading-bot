@@ -262,6 +262,12 @@ wild in the last hour, its data fresh.
   the taker order did. A position under the minimum is now closed with a taker order at once, quotes under the minimum
   are not sent even to reduce, and after a refused request the bot waits 2 s before it asks for orders again. Paper and
   the backtest follow the same rules.
+
+  **A second run the same day, to see the replacement before an expiry** (`mid 5`, quotes 5 bps from the mid so that they
+  rest; 8 minutes, no fill, no cost): at 210.8 s and at 421.9 s the bot replaced both quotes in one request, each with 120 s
+  left; seconds later Lighter's stream showed the two new orders open with 328 s to live. None expired, nothing was
+  refused. The bot logs each replacement (`renewed`) and counts them in its status file, next to the orders Lighter
+  dropped at their expiry instead (`expired`, which should stay 0).
 - **Before the first quote,** the run cancels your orders on that market, sets the leverage (cross margin) and withdraws a scheduled cancel-all an older version may have left.
   It treats every order on that market as its own: trade by hand on another market, or use a sub-account (`LIGHTER_ACCOUNT_INDEX`).
 - **Control** (CLI, or Telegram): `lighter pause` / `unpause` (no new orders; closing orders keep working), `close` (close the position, maker
