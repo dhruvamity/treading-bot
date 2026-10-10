@@ -485,6 +485,7 @@ Then `/menu`, `/status`, `/l_status`, `/arb_status`. `/set telegram_ui menu` swa
 | I want to | Terminal | Telegram |
 |---|---|---|
 | See the lists | `cat data/scout/report.txt` · `.venv/bin/arcus pilot status` | `/top3` (most volume), `/cheapest`, `/maxvolume` |
+| What to run, as lines to paste | `.venv/bin/arcus recommend SPY` (add `--scan` after an import; [10.6](#106-recorder-vps--your-mac--trader-vps-the-workflow)) | |
 | Run the #1 setup on paper | `.venv/bin/arcus pilot approve 1` (`--list cheapest` or `--list max` for the other lists) | ▶️ on a list |
 | Run my own pick on paper | `.venv/bin/arcus run SESSION` (a file in `config/sessions/`) | `/run SPY smart 0 50x paper` |
 | Watch it | `.venv/bin/arcus dashboard` | `/dashboard`, `/status`, `/positions`, `/orders` |
@@ -558,15 +559,35 @@ and none of the recorders.
 .venv/bin/arbitrage close                         # maker first; `close --now` crosses at once
 .venv/bin/arbitrage stop                          # stops the program; the position and the venues' stop orders stay
 ```
-Run paper for several days first. **Live** (nothing but its Lighter leg has been tried with real money):
+Run paper for several days first. **Live**, in this order:
 ```bash
 echo 'ARB_LIVE=1' >> .env
 .venv/bin/arcus down && .venv/bin/arcus up        # so Telegram sees the switch
-.venv/bin/arbitrage livetest SPY                  # optional: the Lighter leg only, smallest size, type LIVE
-.venv/bin/arbitrage set max_notional_usd 30       # first run small
+.venv/bin/arbitrage livetest SPY                  # real money, smallest size, cents; type LIVE once
+```
+`livetest` runs three parts in turn and writes a report for each to `arbitrage/reports/`; a part runs only if the one before
+passed and ended flat:
+1. **lighter**: the Lighter adapter alone (proven on 2026-10-10: 9 of 9).
+2. **arcus**: the Arcus adapter alone: a resting post-only order and its replacement, an IOC order that opens a position, the
+   position stop and take-profit pair, cancel-all, the reduce-only close. This is the part never run on the venue before.
+3. **engine**: the executor itself on both venues: it opens a position (long Arcus, short Lighter), checks with each venue what it
+   holds, waits for the stops on both, holds 30 s, closes it with maker orders; then the same the other way round, closed with taker
+   orders at once (`close --now`).
+
+Both accounts must have no order and no position on that market and a few dollars of margin; Arcus's stock perps trade in the
+US session, so run it then (`arbitrage livetest ETH` if you want a 24 h market). One part alone: `--what arcus`, `--what engine`.
+
+Only then raise the size, one step at a time, and stay at each step until a full cycle (open, hold, a funding payment, close) has
+run and the money matches `/arb_status`:
+```bash
+.venv/bin/arbitrage set max_notional_usd 30       # a first real position
 .venv/bin/arbitrage start --live                  # type LIVE.  Phone: /arb_start live, then the code
 .venv/bin/arbitrage status --live
+# then 100, then 300, then 1000 ...; 0 means no limit, the last step
 ```
+**What no test here proves:** that a stop order actually fires and closes the other leg on the real venues; weeks of holding
+(funding credited, margin moving, the venues' rules changing); a venue going down while a position is open; fills at a size larger
+than the order book shows; and the money you must move by hand between the venues. Each size step is how you meet those.
 Moving money between the venues is yours; the bot tells you when one side is under 40% of the total. Use an account of its own
 on each venue (or stop the market-making bots), because two programs on one account each treat the other's position as theirs.
 
@@ -580,7 +601,7 @@ take over with your own `/run`, `/stop` or `/closeall`.
 .venv/bin/arcus auto off
 .venv/bin/lighter auto on --budget 5        # the same for Lighter
 ```
-On a trader machine the Arcus autopilot also needs the playbook from a machine with the tape ([section 10.6](#106-a-recorder-and-a-trader)).
+On a trader machine the Arcus autopilot also needs the playbook from a machine with the tape ([section 10.6](#106-recorder-vps--your-mac--trader-vps-the-workflow)).
 
 ### 9.7 Settings
 
@@ -619,9 +640,10 @@ and two 64 GiB disks. These terms change: read your account's "free services" pa
 
 ### 10.2 Can the arbitrage run alone on it? Yes, with these limits
 
-- **Paper: yes.** **Live: technically yes**, because the executor is one light Python process that checks the two venues every 10 to
-  15 seconds while it waits (every second while entering or leaving a position) and needs no recorder, no scan and no lists. But only its Lighter leg has traded real money; the Arcus leg and the
-  two-leg engine have not. Treat the first live days as a test with `max_notional_usd 30`.
+- **Paper: yes.** **Live: yes**, because the executor is one light Python process that checks the two venues every 10 to
+  15 seconds while it waits (every second while entering or leaving a position) and needs no recorder, no scan and no lists. Run
+  `arbitrage livetest` first (section 9.5): it tests each venue's side and then the engine on both, at the smallest size, and then
+  raise `max_notional_usd` step by step. Until you have run it, only the Lighter leg has traded real money.
 - **Its protection lives on the venues, not on the VM.** Both legs carry stop and take-profit orders placed on Arcus and Lighter, so
   a dead or rebooted VM does not leave a naked position. While the program is down nothing watches the exit rules (hold time, funding),
   so restart it after a reboot (10.4).
@@ -703,9 +725,67 @@ may open a new position on its own:
 | Telegram, runs, arbitrage | no | yes | no | yes |
 | Fits | 1 vCPU, 1 GiB, big disk | 1 vCPU, 1 GiB | 4 cores, 8 GiB | 4 cores, 8 GiB |
 
-### 10.6 A recorder and a trader
+### 10.6 Recorder VPS → your Mac → trader VPS (the workflow)
 
-Two 1 GiB servers: the recorder keeps the tape (about 0.3–0.5 GB a day for both venues; the two recorders took about 210 MB of memory on
+Three machines, one job each. The servers stay small because nothing heavy runs on them.
+
+| Machine | `BOT_ROLE` | Keys | Job |
+|---|---|---|---|
+| Recorder VPS (24/7) | `recorder` | none | Records both venues. Nothing else |
+| Your Mac | none (no `arcus up`) | none | Takes the recording in, runs the backtests, tells you what to run |
+| Trader VPS | `trader` | all of yours | Telegram, your runs, the arbitrage |
+
+**What the recorder keeps.** Not candles: finer data from which any candle can be made. Arcus: best bid and offer, every trade, the top
+10 book levels. Lighter: the same with the top 20 levels, plus mark, index and funding. About 0.3–0.5 GB a day for both.
+
+**1. Once: the recorder.** After the clone and bootstrap of 10.3:
+```bash
+cd ~/treading-bot/arcus
+echo 'BOT_ROLE=recorder' >> .env
+.venv/bin/arcus up
+.venv/bin/arcus status                     # THIS MACHINE: recorder; rows climbing
+```
+**2. Once: your Mac.** The normal install (section 2): `make install`. You need no keys and you do not run `arcus up` there.
+
+**3. Every few days (or whenever you want fresh advice).** On the recorder:
+```bash
+.venv/bin/arcus export                     # prints the file name and the scp line; only what is new since the last export
+```
+On your Mac, from `treading-bot/arcus`:
+```bash
+scp azureuser@RECORDER:treading-bot/exports/tb-XXXX.tar ~/Downloads/
+.venv/bin/arcus import                     # must end "N complete, 0 short"
+.venv/bin/arcus recommend --scan           # scans both bots, then prints the best setups of each list
+```
+`recommend` prints, for each list (🚀 Most Volume, 💎 Cheapest, 🔥 Max Volume) and each bot, the best setups with the line to paste:
+```
+ LIGHTER  (scan as of 2026-10-10 07:44 UTC, at $100 of capital)
+  1. SPY · Smart +0.5 · 50x   $3,714,790/day, cost $0.00 per $1,000, 4,615 fills/day
+       paper:  /l_run SPY smart +0.5 50x paper
+       live:   /l_run SPY smart +0.5 50x live sl=5
+```
+For one asset, name it: `.venv/bin/arcus recommend SPY QQQ` (add `--scan` after a new import; without it, it reprints the last scan).
+One list: `--list cheapest` (or `volume`, `max`). More per list: `-n 5`. Rank for the money the trader account will hold:
+`--scan --capital 500`.
+
+**4. On the phone.** Paste the line into the trader's Telegram chat: first the `paper` line, and when you like it the `live` line (it
+asks for the 6-digit code). `sl=` is the most that run may lose in dollars; the line suggests the daily stop at the scan's capital.
+Add `tp=5` (stop once up $5) or `vol=100k` (stop after that volume) if you want them.
+
+**What to know when reading it.**
+- The scan is made **as of the end of the recording** (`--as-of tape`): "is the market trending or wild right now" means then, not
+  now. Export fresh before you act; an export a day old is fine for the long-run numbers and stale for the "now" checks.
+- The numbers are backtests on recorded books, and Arcus's matched its largest live run within 11% on volume and 3% on cost. Lighter's
+  rest on fewer days. Not promises.
+- The first scan on a big import takes the longest; completed days are cached and later scans only redo the newest day.
+- The tape grows on the Mac by the same 10–15 GB a month: keep the room, and delete old tape on the servers only after an import ended
+  `0 short`.
+- `recommend` only reads. It starts nothing and uses no key.
+- The lists on the trader itself (`/top3`) stay empty in this workflow: it never scans. You get the advice from your Mac, as lines to paste.
+
+### 10.7 Linking a recorder and a trader (optional)
+
+This is the optional link between the two servers, for health alerts (or for lists from a `scout` machine). Two 1 GiB servers: the recorder keeps the tape (about 0.3–0.5 GB a day for both venues; the two recorders took about 210 MB of memory on
 2026-10-09) and the trader trades. **Read this first:** a recorder does not rank, so the link between them carries only its health,
 not lists. Lists come from a machine that scans, and a 1 GiB server cannot scan. You have three choices:
 
@@ -775,7 +855,7 @@ cd treading-bot/arcus
 warning, a Lighter list over 90 minutes old is refused. The tape also stays on the recorder: export weekly and copy the files home, because
 nothing deletes old days and the disk fills (recording pauses under 5 GB free).
 
-### 10.7 What has and has not been checked
+### 10.8 What has and has not been checked
 
 Checked on one computer (each role run from its own folder, lists handed over through the real commands), **not on two real servers**,
 and `bootstrap.sh` has not run on a real server. On the first day watch: `arcus status` on both, `arcus sync status` on the trader,

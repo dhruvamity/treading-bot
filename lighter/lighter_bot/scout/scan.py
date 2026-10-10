@@ -195,6 +195,21 @@ def checks(a: dict[str, Any], now: dict[str, Any], min_days: int) -> list[str]:
     return why
 
 
+def tape_end_us(data_dir: Path) -> int | None:
+    """When the newest book row on the tape was written (BTC's, else the first market's): what to scan "as of" for a
+    tape recorded somewhere else and brought here (`lighter scout scan --as-of tape`). None when there is no tape."""
+    tape = Tape(data_dir / "tape")
+    ms = tape.markets()
+    if not ms:
+        return None
+    m = "BTC" if "BTC" in ms else ms[0]
+    days = tape.days(m)
+    if not days:
+        return None
+    ts = tape.load_day(m, days[-1], ("bbo",)).bbo["ts"]
+    return int(ts.max()) if len(ts) else None
+
+
 class Scanner:
     def __init__(self, cfg: Config, *, workers: int | None = None) -> None:
         self.cfg = cfg
@@ -271,7 +286,7 @@ class Scanner:
         # ---- the last 24 hours for the ones that could make a list
         self._last24(table, plan, stops, volume_cost, now_us, full24)
         lists = self.lists(table, volume_cost, capital)
-        out = {"t": time.time(), "capital": capital, "stops": stops, "volume_cost": volume_cost, "lev_cap": lev_cap,
+        out = {"t": time.time(), "as_of": now_us / US, "capital": capital, "stops": stops, "volume_cost": volume_cost, "lev_cap": lev_cap,
                "lists": lists, "table": table, "took_s": round(time.time() - t0, 1),
                "markets": {k: {kk: vv for kk, vv in v.items() if kk != "rules"} for k, v in plan.items()},
                "sim_version": SIM_VERSION}
