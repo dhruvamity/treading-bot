@@ -8,6 +8,7 @@
 !/arcus/
 !/lighter/
 !/arbitrage/
+!/daytrade/
 
 # ---- credentials: never commit ---------------------------------------------------------------------------------
 .env
@@ -39,6 +40,9 @@
 /arbitrage/reports/
 /arbitrage/settings.json
 /arbitrage/OWNER_ACTIONS.md
+/daytrade/data/
+/daytrade/state/
+/daytrade/reports/
 *.sqlite
 *.sqlite-*
 *.npz
