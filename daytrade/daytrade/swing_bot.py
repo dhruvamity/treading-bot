@@ -193,6 +193,7 @@ class GoldMarket:
         self.venue = S.VENUES["XAU"]["lighter"]
         self.start_path = state_dir / f"{mode}_swing_start.json"
         self.last_hour: int | None = None
+        self.checked_reference = False
         self.cache: tuple[dict, list[dict]] = ({}, [])
 
     def key(self, rule: S.Rule) -> str:
@@ -219,12 +220,24 @@ class GoldMarket:
         both = B.concat(ref, ven)
         return B.resample(both, 60)[0] if len(both) else both
 
+    def ensure_reference(self) -> None:
+        """A new server has no gold perpetual history: fetch it once (Binance's public monthly files, about 25
+        requests), else the 50-day trend waits for 50 weekdays of Lighter's own gold."""
+        if self.checked_reference:
+            return
+        self.checked_reference = True
+        ven = B.load("lighter_XAU")
+        ref = B.load(self.reference)
+        if len(ven) and (not len(ref) or int(ref.t[-1]) < int(ven.t[0])):
+            fetch.binance("XAUUSDT", "futures", "2025-11")
+
     def update(self, now: int | None = None, fetch_prices: bool = True) -> tuple[dict, list[dict]]:
         now = int(time.time()) if now is None else now
         if now // 3600 == self.last_hour:
             return self.cache
         if fetch_prices:
             fetch.lighter(self.sym)
+            self.ensure_reference()
         start = self.start_hour(now)
         h = self.hours(now, start)
         if not len(h):

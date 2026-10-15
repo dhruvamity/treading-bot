@@ -122,3 +122,14 @@ def test_gold_paper_trades_weekdays_only_and_replays_like_the_backtest(tmp_path,
     assert [r["entry"] for r in rows] == [round(x.entry, 4) for x in want]
     assert all(r["side"] == "long" and r["stop_bp"] > 0 for r in rows)     # a stop: R is filled in too
     assert json.loads((tmp_path / "paper_swing_start.json").read_text())["XAU"].endswith(":00")
+
+
+def test_a_new_server_fetches_the_gold_reference_once(tmp_path, monkeypatch):
+    ven = B.from_rows(gold_hours_rows(MON - 10, 12, set()))
+    got: list = []
+    monkeypatch.setattr(SB.B, "load", lambda name: ven if name == "lighter_XAU" else B.empty())
+    monkeypatch.setattr(SB.fetch, "binance", lambda *a: got.append(a))
+    m = SB.GoldMarket(state_dir=tmp_path)
+    m.ensure_reference()
+    m.ensure_reference()
+    assert got == [("XAUUSDT", "futures", "2025-11")]
