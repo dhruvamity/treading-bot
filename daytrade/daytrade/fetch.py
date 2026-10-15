@@ -238,12 +238,153 @@ def arcus(sym: str) -> None:
     _store(name, have, [r for r in rows if since <= r[0] < now_min])
 
 
+# ---- longer history for the swing strategies (swing.py) ----------------------------------------------------------
+
+def duka_hours(sym: str = "XAUUSD", first_year: int = 2024, workers: int = 4) -> None:
+    """Dukascopy's hourly candles, one file a month (24-byte rows: second of the month, open, close, low, high,
+    volume), from `first_year` (2024: the backtests use at most the last two years, the owner's rule of 15 Oct 2026;
+    the file may also hold older years), `workers` at a time. Dukascopy's speed
+    varies from 1 to 30 s a request (Oct 2026), so each is tried up to 30 times; months already held are not asked
+    for again, and the file is saved after every twelve months fetched."""
+    from concurrent.futures import ThreadPoolExecutor
+
+    name = f"duka_{sym}_1h"
+    have = B.load(name)
+    scale = DUKA_SCALE[sym]
+    held = {time.strftime("%Y-%m", time.gmtime(int(x))) for x in have.t[::24]} if len(have) else set()
+    d = dt.date(first_year, 1, 1)
+    this_month = dt.datetime.now(dt.UTC).date().replace(day=1)
+    months = []
+    while d < this_month:                           # this month's file is incomplete until it ends
+        if f"{d:%Y-%m}" not in held:
+            months.append(d)
+        d = (d + dt.timedelta(days=32)).replace(day=1)
+
+    def one(m: dt.date) -> list[tuple]:
+        url = f"{DUKA}/{sym}/{m.year}/{m.month - 1:02d}/BID_candles_hour_1.bi5"
+        body = http(url, raw=True, pause=1.0, headers={"Accept": "*/*", "User-Agent": BROWSER}, timeout=60, tries=30)
+        start = int(dt.datetime(m.year, m.month, 1, tzinfo=dt.UTC).timestamp())
+        out = []
+        if body:
+            data = lzma.decompress(body)
+            for k in range(len(data) // 24):
+                s, o, c, lo, hi, v = struct.unpack(">iiiiif", data[k * 24:(k + 1) * 24])
+                if v > 0:
+                    out.append((start + s, o / scale, hi / scale, lo / scale, c / scale, v))
+        return out
+
+    rows: list[tuple] = []
+    with ThreadPoolExecutor(workers) as ex:
+        for k, (m, got) in enumerate(zip(months, ex.map(one, months), strict=True)):
+            rows += got
+            if (k + 1) % 12 == 0:                   # a stopped run keeps what it has
+                have = B.concat(have, B.from_rows(rows))
+                B.save(name, have)
+                rows = []
+                log(f"{name}: to {m:%Y-%m} ({len(have):,} hours)")
+    _store(name, have, rows)
+
+
+BROWSER = ("Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120 "
+           "Safari/537.36")
+DAILY = B.DATA / "daily"
+FUNDING = B.DATA / "funding"
+
+
+def yahoo_daily(sym: str) -> None:
+    """The whole daily history from Yahoo's chart API: prices as they traded (splits taken out, dividends NOT, which
+    is what a perpetual follows), with each dividend on its ex-date. Writes data/daily/yahoo_<sym>.csv."""
+    import csv
+
+    d = http(f"https://query1.finance.yahoo.com/v8/finance/chart/{sym}",
+             {"period1": 0, "period2": int(time.time()), "interval": "1d", "events": "div"},
+             pause=1.0)["chart"]["result"][0]                  # a plain user agent: Yahoo refuses a browser's
+    q = d["indicators"]["quote"][0]
+    tz = d["meta"].get("exchangeTimezoneName", "America/New_York")
+    from zoneinfo import ZoneInfo
+    day = [dt.datetime.fromtimestamp(t, ZoneInfo(tz)).date().isoformat() for t in d["timestamp"]]
+    div = {dt.datetime.fromtimestamp(int(x["date"]), ZoneInfo(tz)).date().isoformat(): x["amount"]
+           for x in (d.get("events", {}).get("dividends") or {}).values()}
+    DAILY.mkdir(parents=True, exist_ok=True)
+    path = DAILY / f"yahoo_{sym.replace('=', '')}.csv"
+    n = 0
+    with path.open("w", newline="") as fh:
+        w = csv.writer(fh)
+        w.writerow(["date", "open", "high", "low", "close", "dividend"])
+        for k, ds in enumerate(day):
+            o, h, lo, c = q["open"][k], q["high"][k], q["low"][k], q["close"][k]
+            if None in (o, h, lo, c) or not o:
+                continue
+            w.writerow([ds, f"{o:.4f}", f"{h:.4f}", f"{lo:.4f}", f"{c:.4f}", f"{div.get(ds, 0.0):.4f}"])
+            n += 1
+    log(f"{path.name}: {n:,} days {day[0]} .. {day[-1]}")
+
+
+def funding(venue: str, sym: str) -> None:
+    """Hourly funding as far back as the venue answers: data/funding/<venue>_<sym>.csv with ts (unix s, the hour) and
+    rate_per_hour (a fraction of the position's value; + = longs pay shorts). Binance pays every 8 hours (4 for some
+    markets): its rate is spread evenly over the hours it covers."""
+    import csv
+
+    out: dict[int, float] = {}
+    first = VENUES_OPEN - 30 * B.DAY
+    if venue == "lighter":
+        end = int(time.time())
+        while end > first:
+            rows = http(f"{LIGHTER}/fundings", {"market_id": LIGHTER_IDS[sym], "resolution": "1h",
+                                                "start_timestamp": first, "end_timestamp": end, "count_back": 750},
+                        pause=1.7).get("fundings") or []
+            for r in rows:
+                sign = 1 if r["direction"] == "long" else -1
+                out[int(r["timestamp"]) // 3600 * 3600] = float(r["rate"]) / 100 * sign
+            if len(rows) < 700:
+                break
+            end = min(int(r["timestamp"]) for r in rows) - 1
+    elif venue == "arcus":
+        us = 1_000_000
+        to = int(time.time() * us)
+        while to > first * us:
+            rows = http(f"{ARCUS}/fundingRates", {"market": f"{sym}-USD", "from": first * us, "to": to, "limit": 1000},
+                        pause=6.0).get("fundingRates") or []
+            for r in rows:
+                out[int(r["time"]) // us // 3600 * 3600] = float(r["fundingRate"])
+            if len(rows) < 1000:
+                break
+            to = min(int(r["time"]) for r in rows) - 1
+    elif venue == "binance":
+        start, pays = 1_700_000_000_000, []          # ms; startTime 0 returns only the latest
+        while True:
+            rows = http("https://fapi.binance.com/fapi/v1/fundingRate", {"symbol": sym, "startTime": start,
+                                                                         "limit": 1000}, pause=0.5)
+            pays += [(int(r["fundingTime"]) // 1000, float(r["fundingRate"])) for r in rows]
+            if len(rows) < 1000:
+                break
+            start = int(rows[-1]["fundingTime"]) + 1
+        for (t0, _), (t1, rate) in zip(pays, pays[1:], strict=False):
+            hours = max(1, round((t1 - t0) / 3600))
+            for k in range(hours):
+                out[(t1 - (k + 1) * 3600) // 3600 * 3600] = rate / hours
+    FUNDING.mkdir(parents=True, exist_ok=True)
+    path = FUNDING / f"{venue}_{sym}.csv"
+    with path.open("w", newline="") as fh:
+        w = csv.writer(fh)
+        w.writerow(["ts", "rate_per_hour"])
+        w.writerows(sorted(out.items()))
+    if out:
+        log(f"{path.name}: {len(out):,} hours from {time.strftime('%Y-%m-%d', time.gmtime(min(out)))}, "
+            f"mean {sum(out.values()) / len(out) * 1e4:+.3f} bp an hour")
+
+
 SOURCES = {
     "alpaca": lambda: [alpaca(s) for s in ("SPY", "QQQ")],
     "gold": lambda: [binance("PAXGUSDT"), binance("XAUUSDT", "futures", "2025-11")],
     "duka": lambda: dukascopy("XAUUSD", start=int(dt.datetime(2025, 9, 1, tzinfo=dt.UTC).timestamp())),
     "lighter": lambda: [lighter(s, backfill=True) for s in ("SPY", "QQQ", "XAU")],
     "arcus": lambda: [arcus(s) for s in ("SPY", "QQQ", "GLD")],
+    "daily": lambda: [yahoo_daily(s) for s in ("SPY", "QQQ", "GLD", "GC=F", "TLT", "EEM", "IEF", "SHY")],
+    "gold_hours": lambda: duka_hours("XAUUSD"),
+    "funding": lambda: [funding("lighter", s) for s in ("SPY", "QQQ", "XAU")]
+    + [funding("arcus", s) for s in ("SPY", "QQQ", "GLD")] + [funding("binance", "XAUUSDT")],
 }
 
 

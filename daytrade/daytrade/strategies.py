@@ -17,6 +17,7 @@ Every rule reads only closed bars. Times are on the market's own clock (New York
 
 from __future__ import annotations
 
+import datetime as dt
 import math
 
 import numpy as np
@@ -34,6 +35,19 @@ def hm(text: str) -> int:
     return int(h) * HOUR + int(m) * 60
 
 
+# New York's exchange holidays since the venues opened. Their SPY and QQQ perpetuals trade on these days and at
+# weekends, when there is no session to read; the reference (Alpaca) has no bars on them, so no earlier list is needed.
+NYSE_HOLIDAYS = ("2026-01-01", "2026-01-19", "2026-02-16", "2026-04-03", "2026-05-25", "2026-06-19", "2026-07-03",
+                 "2026-09-07", "2026-11-26", "2026-12-25", "2027-01-01", "2027-01-18", "2027-02-15", "2027-03-26",
+                 "2027-05-31", "2027-06-18", "2027-07-05", "2027-09-06", "2027-11-25", "2027-12-24")
+_HOLIDAY_DAYS = np.array([(dt.date.fromisoformat(d) - dt.date(1970, 1, 1)).days for d in NYSE_HOLIDAYS])
+
+
+def trading_day(local_day: np.ndarray) -> np.ndarray:
+    """True for New York's trading days: weekdays that are not exchange holidays."""
+    return ((local_day + 3) % 7 < 5) & ~np.isin(local_day, _HOLIDAY_DAYS)
+
+
 def _nan_except(values: np.ndarray, mask: np.ndarray) -> np.ndarray:
     out = np.full(len(mask), np.nan)
     out[mask] = values[mask]
@@ -46,10 +60,11 @@ def stock_days(b: B.Bars, tf: int, start: int | None = None, end: int | None = N
                emas: tuple[int, ...] = (13, 48, 200)) -> list[Day]:
     """One Day per New York trading day: its 09:30-16:00 one-minute bars, and in `ctx` the previous session's high,
     low and close, the signal bars (values only on the minute a signal bar closes; NaN elsewhere), EMAs of the signal
-    bars' closes (running across days, cash session only) and the session's VWAP."""
+    bars' closes (running across days, cash session only) and the session's VWAP. Weekends and exchange holidays are
+    left out (a venue's perpetual trades on them; the previous session of a Monday is the Friday's)."""
     lt = B.local(b.t, B.NY)
     sod, dkey = lt % B.DAY, lt // B.DAY
-    keep = (sod >= RTH_OPEN) & (sod < RTH_CLOSE)
+    keep = (sod >= RTH_OPEN) & (sod < RTH_CLOSE) & trading_day(dkey)
     r, rsod, rday = b.take(keep), sod[keep], dkey[keep]
     if not len(r):
         return []

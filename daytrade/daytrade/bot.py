@@ -1,4 +1,5 @@
-"""The paper auto-trader: the three strategies, every trading day, on the venues' own prices. No order is sent.
+"""The paper auto-trader: the three strategies and the noise breakout (#7 of the third list, intraday2.py), every
+trading day, on the venues' own prices. No order is sent.
 
 Every minute it brings each market's one-minute history up to date from the venue it would trade on (Lighter's
 mark price; Arcus's oracle price), rebuilds today the way the backtest does (strategy.days), and replays the strategy
@@ -31,7 +32,8 @@ from .core import MARKETS, Strategy
 from .sim import Book, Trade
 from .strategies import EmaPullback, LondonSweep, OpeningRange
 
-HISTORY_DAYS = 20                     # one-minute history kept for the levels and the EMAs (EMA200 of 15m bars)
+HISTORY_DAYS = 30                     # one-minute history for the levels, the EMAs (EMA200 of 15m bars) and the noise
+                                      # breakout's 14 earlier sessions
 
 
 @dataclass
@@ -51,9 +53,12 @@ class Slot:
 
 def default_slots(tf: int = 5) -> list[Slot]:
     """The main version of each strategy (fixed before any backtest), on Lighter: no fees, and the only venue that
-    lists spot gold. Change them with --spy/--qqq/--xau on the command line."""
+    lists spot gold. The noise breakout on QQQ is the one intraday rule whose backtest made money after Lighter's
+    costs (reports/intraday2/REPORT.md); here it gets its forward test."""
+    from .intraday2 import NoiseBreakout
+
     return [Slot(OpeningRange("SPY", tf), "lighter"), Slot(EmaPullback("QQQ", tf), "lighter"),
-            Slot(LondonSweep(tf=tf), "lighter")]
+            Slot(LondonSweep(tf=tf), "lighter"), Slot(NoiseBreakout("QQQ"), "lighter")]
 
 
 def update_bars(slot: Slot) -> B.Bars:
@@ -94,12 +99,13 @@ def trade_row(slot: Slot, tr: Trade) -> dict:
             "entry_utc": f(tr.t_entry), "entry": round(tr.entry, 4), "stop": round(tr.stop0, 4),
             "target": round(tr.target, 4) if tr.target else None, "exit_utc": f(tr.t_exit),
             "exit": round(tr.exit, 4), "reason": tr.reason, "r": round(tr.r, 4), "r_gross": round(tr.r_gross, 4),
-            "stop_bp": round(tr.dist * 1e4, 2)}
+            "stop_bp": round(tr.dist * 1e4, 2), "bp": round(tr.r * tr.dist * 1e4, 2)}
 
 
 class Runner:
-    def __init__(self, slots: list[Slot], state_dir: Path = STATE, mode: str = "paper"):
+    def __init__(self, slots: list[Slot], state_dir: Path = STATE, mode: str = "paper", swing: list | None = None):
         self.slots, self.dir, self.mode = slots, state_dir, mode
+        self.swing = swing or []                       # swing_bot: the daily SPY/QQQ rules (15:59 NY) and hourly gold
         self.dir.mkdir(parents=True, exist_ok=True)
         self.trades_path = self.dir / f"{mode}_trades.jsonl"
         self.status_path = self.dir / f"{mode}_status.json"
@@ -160,6 +166,25 @@ class Runner:
                 self.event("state", slot=slot.key, now=state)
             status["slots"][slot.key] = {"state": state, "day": B.day_str(day), "trades_today": book.n,
                                          "last_bar_utc": last_bar}
+        for m in self.swing:
+            try:
+                st, rows = m.update()
+            except Exception as e:      # a venue read failing: say so, try again next minute
+                status["slots"][f"{m.sym.lower()}-daily@lighter"] = {"error": f"{type(e).__name__}: {e}"[:200]}
+                self.event("error", slot=f"{m.sym.lower()}-daily", error=f"{type(e).__name__}: {e}"[:200])
+                continue
+            for row in rows:
+                k = f"{row['slot']}|{row['entry_utc']}"
+                if k not in self.seen:
+                    self.seen.add(k)
+                    with self.trades_path.open("a") as fh:
+                        fh.write(json.dumps(row) + "\n")
+                    self.event("trade closed", **{x: row[x] for x in ("slot", "side", "entry", "exit", "reason", "bp")})
+            for k, v in st.items():
+                if self.last.get(k) != v["state"]:
+                    self.last[k] = v["state"]
+                    self.event("state", slot=k, now=v["state"])
+            status["slots"].update(st)
         tmp = self.status_path.with_suffix(".tmp")
         tmp.write_text(json.dumps(status, indent=1))
         tmp.replace(self.status_path)
@@ -198,11 +223,18 @@ def summary(mode: str = "paper", state_dir: Path = STATE) -> str:
         lines.append(f"{mode.upper()}: never started")
     tp = state_dir / f"{mode}_trades.jsonl"
     rows = [json.loads(x) for x in tp.read_text().splitlines()] if tp.exists() else []
-    by: dict[str, list[float]] = {}
+    by: dict[str, list[dict]] = {}
     for r in rows:
-        by.setdefault(r["slot"], []).append(r["r"])
+        by.setdefault(r["slot"], []).append(r)
     for k, rs in by.items():
-        lines.append(f"  {k}: {len(rs)} trades, {sum(x > 0 for x in rs)} won, {sum(rs):+.2f}R in all")
+        # a day trade has R (its stop's distance) and bp; a daily rule's trade has no stop, so bp only
+        won = sum((x["bp"] if "bp" in x else x["r"]) > 0 for x in rs)
+        parts = [f"{len(rs)} trades", f"{won} won"]
+        if any(x.get("stop_bp") or "bp" not in x for x in rs):
+            parts.append(f"{sum(x['r'] for x in rs):+.2f}R in all")
+        if all("bp" in x for x in rs):
+            parts.append(f"{sum(x['bp'] for x in rs) / len(rs):+.1f} bp a trade")
+        lines.append(f"  {k}: " + ", ".join(parts))
     return "\n".join(lines)
 
 

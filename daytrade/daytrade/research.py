@@ -3,8 +3,9 @@
     python -m daytrade.research [spy] [qqq] [xau] [venues]
 
 The main version of each strategy (the first in each list below) was fixed before any result was seen. The other
-versions change one or two rules at a time. Choosing among them is done on the years before the last twelve months
-("earlier"), and the choice is then judged on the last twelve months ("last 12m"), which no choice has seen.
+versions change one or two rules at a time. Only the last two years count (the owner's rule, `daytrade.PERIODS`):
+choosing among the versions is done on the first of them ("first year"), and the choice is then judged on the last
+twelve months ("last 12m"), which no choice has seen.
 Writes reports/research/: summary.csv (every run), trades_<name>.csv (the main versions), REPORT.md.
 """
 
@@ -20,14 +21,13 @@ from dataclasses import dataclass
 
 import numpy as np
 
-from . import REPORTS
+from . import PERIODS, REPORTS, WARMUP_START, WINDOW_START
 from . import bars as B
 from .core import MARKETS
 from .sim import Trade, run
 from .strategies import EmaPullback, LondonSweep, OpeningRange, VwapTrend
 
 NOW = int(time.time())
-LAST12 = int(dt.datetime(2025, 10, 15, tzinfo=dt.UTC).timestamp())
 OUT = REPORTS / "research"
 
 
@@ -142,11 +142,12 @@ def days_for(s, bars, key: str):
 
 def evaluate(versions: list, data: str, venues: list[str], rows: list[dict], keep: dict, first: int | None = None):
     bars = B.load(data)
+    bars = bars.between(WARMUP_START, 2**40) if len(bars) else bars
     if not len(bars):
         print(f"no data: {data}")
         return
-    first = first or int(bars.t[0])
-    last = int(bars.t[-1])
+    first = max(first or int(bars.t[0]), WINDOW_START)
+    last = int(bars.t[-1]) + 60
     for i, s in enumerate(versions):
         m = MARKETS[s.market]
         days = days_for(s, bars, data)
@@ -155,7 +156,8 @@ def evaluate(versions: list, data: str, venues: list[str], rows: list[dict], kee
             trades = run(s, days, v, m.tick)
             if i < 3:
                 keep[(s.name, vname, data)] = trades
-            for period, a, b in (("all", first, last), ("earlier", first, LAST12), ("last 12m", LAST12, last)):
+            for period, a, b in PERIODS:
+                a, b = max(a, first), min(b, last)
                 tr = [x for x in trades if a <= x.t_entry < b]
                 st = stats(tr, v.max_lev, months_between(a, b))
                 rows.append({"strategy": s.name, "market": s.market, "tf": s.tf, "venue": vname, "data": data,

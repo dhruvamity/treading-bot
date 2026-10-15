@@ -252,8 +252,8 @@ def _parts(names: list[str]) -> tuple[str, ...]:
         return ops.PARTS
     bad = [n for n in names if n not in (*ops.PARTS, "scouts", "both", "all")]
     if bad:
-        sys.exit(f"tbot: unknown part {bad[0]!r}: arcus, lighter, telegram, scouts (= arcus and lighter), or nothing "
-                 "for all of them")
+        sys.exit(f"tbot: unknown part {bad[0]!r}: arcus, lighter, telegram, daytrade, scouts (= arcus and lighter), "
+                 "or nothing for all of them")
     out: list[str] = []
     for n in names:
         out += ["arcus", "lighter"] if n in ("scouts", "both") else list(ops.PARTS) if n == "all" else [n]
@@ -261,7 +261,7 @@ def _parts(names: list[str]) -> tuple[str, ...]:
 
 
 def cmd_tbot_up(a: argparse.Namespace) -> None:
-    """`tbot up [arcus] [lighter] [telegram] [scouts]`: start those parts (none named: all of them)."""
+    """`tbot up [arcus] [lighter] [telegram] [daytrade] [scouts]`: start those parts (none named: all of them)."""
     _up(_parts(a.parts))
 
 
@@ -1192,7 +1192,7 @@ def build_parser() -> argparse.ArgumentParser:
 TBOT_DELEGATED = ("telegram", "export", "import", "sync", "recommend")
 TBOT_HELP = """tbot: the commands that belong to no single bot (one install, three bots, one Telegram bot)
 
-  tbot up [arcus] [lighter] [telegram]   start those parts; with none named, all of them (BOT_ROLE decides what a part is)
+  tbot up [parts]                        start those parts; with none named, all of them (BOT_ROLE decides what a part is)
   tbot down [parts] [--all]              stop them; --all also stops their runs (quotes cancelled, positions kept)
   tbot status                            one screen for the whole machine
   tbot role [trader|recorder|scout|all]  what this machine is for (BOT_ROLE in .env): say it, or set it
@@ -1201,8 +1201,9 @@ TBOT_HELP = """tbot: the commands that belong to no single bot (one install, thr
   tbot recommend [MARKET ...] [--scan]   the best setups of each list, as the Telegram lines to paste
   tbot export / import / sync            one file with everything recorded and traded / take it in / two machines
 
-parts: arcus = its scout (and the guardian while a live run exists), lighter = its scout, telegram = the bot, scouts =
-arcus + lighter. Each bot also has its own: `arcus up|down|status|scout`, `lighter up|down|status|scout`, `arbitrage start|stop|status`.
+parts: arcus = its scout (and the guardian while a live run exists), lighter = its scout, telegram = the bot, daytrade =
+its paper bot (no orders; only where BOT_ROLE is all or trader), scouts = arcus + lighter. Each bot also has its own:
+`arcus up|down|status|scout`, `lighter up|down|status|scout`, `arbitrage start|stop|status`.
 """
 
 
@@ -1217,7 +1218,7 @@ def main_tbot(argv: list[str] | None = None) -> None:
     p = argparse.ArgumentParser(prog="tbot", description=TBOT_HELP, formatter_class=argparse.RawDescriptionHelpFormatter)
     sub = p.add_subparsers(dest="cmd", required=True, metavar="up|down|status|role|scout|telegram|recommend|export|import|sync")
     sp = sub.add_parser("up", help="start parts")
-    sp.add_argument("parts", nargs="*", help="arcus, lighter, telegram, scouts; none = all")
+    sp.add_argument("parts", nargs="*", help="arcus, lighter, telegram, daytrade, scouts; none = all")
     sp.set_defaults(fn=cmd_tbot_up)
     sp = sub.add_parser("down", help="stop parts")
     sp.add_argument("parts", nargs="*")

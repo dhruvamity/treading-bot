@@ -4,7 +4,7 @@
     daytrade backtest spy|qqq|xau [--tf 5] [--venue lighter] [--data NAME] [--since 2025-10-15]
     daytrade research [spy] [qqq] [xau]                       every version, every timeframe, both venues
     daytrade check                                            the strategies on the venues' own prices vs the reference
-    daytrade run [--tf 5] [--seconds N]                       the paper auto-trader (a server job)
+    daytrade run [--tf 5] [--seconds N] [--no-swing]          the paper auto-trader (a server job), day and daily rules
     daytrade status                                           what it holds now and its paper results
 """
 
@@ -67,6 +67,8 @@ def main(argv: list[str] | None = None) -> None:
     p = sub.add_parser("run")
     p.add_argument("--tf", type=int, default=5, choices=[1, 5, 15])
     p.add_argument("--seconds", type=float, default=None)
+    p.add_argument("--no-swing", action="store_true",
+                   help="leave out the daily SPY/QQQ rules and the hourly gold rule (swing_bot.py)")
     sub.add_parser("status")
     a = ap.parse_args(argv)
 
@@ -86,8 +88,9 @@ def main(argv: list[str] | None = None) -> None:
         check.main()
     elif a.cmd == "run":
         from .bot import Runner, default_slots
+        from .swing_bot import default_markets
 
-        Runner(default_slots(a.tf)).run(a.seconds)
+        Runner(default_slots(a.tf), swing=[] if a.no_swing else default_markets()).run(a.seconds)
     elif a.cmd == "status":
         from .bot import summary
 

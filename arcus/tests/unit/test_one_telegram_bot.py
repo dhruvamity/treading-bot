@@ -1,5 +1,6 @@
 """One Telegram bot for the whole trading bot: Arcus as always, Lighter as /l_<command>, the funding arbitrage as
-/arb_<command> (arcus/telegram/others.py). Nothing here reaches Telegram, a venue or a real process."""
+/arb_<command>, daytrade as /dt_<command> (arcus/telegram/others.py). Nothing here reaches Telegram, a venue or a real
+process."""
 
 from __future__ import annotations
 
@@ -38,8 +39,9 @@ def test_which_part_a_command_belongs_to() -> None:
     p = others.part_of
     assert p("l") == ("l", "") and p("lighter") == ("l", "") and p("l_status") == ("l", "status")
     assert p("lighter_run") == ("l", "run") and p("arb") == ("arb", "") and p("arb_hold") == ("arb", "hold")
-    for arcus in ("status", "logs", "run", "closeall", "balance", "auto", "pilotclose"):     # never taken for a part
-        assert p(arcus) is None, arcus
+    assert p("dt") == ("dt", "") and p("dt_trades") == ("dt", "trades") and p("daytrade_status") == ("dt", "status")
+    for arcus in ("status", "logs", "run", "closeall", "balance", "auto", "pilotclose", "dashboard", "dashstop"):
+        assert p(arcus) is None, arcus                                      # never taken for a part
 
 
 async def test_lighter_commands_and_buttons_go_to_the_lighter_panel_and_nothing_else_does(tmp_path: Path) -> None:
@@ -115,9 +117,9 @@ async def test_the_menu_and_the_help_name_all_three_parts(tmp_path: Path) -> Non
     from arcus.telegram.views import COMMANDS, HELP, menu_keyboard
 
     data = [d for row in menu_keyboard() for _, d in row]
-    assert "l_menu" in data and "arb_menu" in data
-    assert "/l_status" in HELP and "/arb_status" in HELP
-    assert {"l", "arb"} <= {c for c, _ in COMMANDS}
+    assert "l_menu" in data and "arb_menu" in data and "dt_menu" in data
+    assert "/l_status" in HELP and "/arb_status" in HELP and "/dt_status" in HELP and "/dt_trades" in HELP
+    assert {"l", "arb", "dt"} <= {c for c, _ in COMMANDS}
     assert all(c.islower() and len(c) <= 32 and len(d) <= 256 for c, d in COMMANDS)     # Telegram's own limits
 
 
@@ -239,3 +241,76 @@ async def test_arb_start_and_stop(tmp_path: Path, arb_home: Path, monkeypatch: p
 
     await bot.handle(msg("/arb_stop"))
     assert "IS NOT RUNNING" in api.sent[-1][1]
+
+
+# ------------------------------------------------------------------------------------------------ daytrade (paper, reads only)
+@pytest.fixture
+def dt_home(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
+    """daytrade's state folder in a temporary place."""
+    pytest.importorskip("daytrade")
+    from daytrade import ops, telegram
+
+    state = tmp_path / "daytrade-state"
+    state.mkdir()
+    monkeypatch.setattr(ops, "STATE", state)
+    monkeypatch.setattr(telegram, "STATE", state)
+    return state
+
+
+def _dt_trade(i: int) -> str:
+    return json.dumps({"slot": "qqq-ema-tf5@lighter", "day": "2026-10-15", "side": "long", "tag": "pullback",
+                       "entry_utc": f"2026-10-{i + 1:02d} 14:05", "entry": 600.0 + i, "stop": 599.0,
+                       "target": None, "exit_utc": f"2026-10-{i + 1:02d} 15:00", "exit": 601.0 + i,
+                       "reason": "target", "r": 0.5 + i, "r_gross": 0.6, "stop_bp": 16.0}) + "\n"
+
+
+async def test_daytrade_answers_its_reads_with_its_own_label(tmp_path: Path, dt_home: Path,
+                                                             monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("BOT_ROLE", "trader")                                # where the Telegram bot and the runs are
+    bot, api, _ = _bot(tmp_path, _app(tmp_path))
+    await bot.handle(msg("/dt"))
+    menu_text = api.sent[-1][1]
+    assert menu_text.startswith("📈 <b>DAYTRADE</b>") and "PAPER: not running" in menu_text
+    assert "/dt_status" in menu_text and "/dt_trades" in menu_text and "tbot up daytrade" in menu_text
+    await bot.handle(msg("/dt_status"))
+    assert api.sent[-1][1].startswith("📈 <b>DAYTRADE · STATUS</b>") and "PAPER: never started" in api.sent[-1][1]
+    await bot.handle(msg("/dt_trades"))
+    assert api.sent[-1][1].startswith("📈 <b>DAYTRADE · TRADES</b>") and "no paper trades yet" in api.sent[-1][1]
+
+    (dt_home / "paper_trades.jsonl").write_text("".join(_dt_trade(i) for i in range(12)))
+    (dt_home / "paper_status.json").write_text(json.dumps({"utc": "2026-10-15 14:00:05", "slots": {
+        "qqq-ema-tf5@lighter": {"state": "LONG from 611.00 stop 610.00", "last_bar_utc": "13:59"}}}))
+    await bot.handle(msg("/dt trades"))                                     # "/dt trades" is "/dt_trades"
+    text = api.sent[-1][1]
+    assert "last 10 of 12 paper trades" in text and "2026-10-03 14:05 UTC QQQ long" in text
+    assert "2026-10-02 14:05" not in text and "611.0 -&gt; 612.0 target +11.50R" in text    # the 10 newest only
+    await bot.handle(msg("/dt_status"))
+    text = api.sent[-1][1]
+    assert "qqq-ema-tf5@lighter: LONG from 611.00 stop 610.00" in text and "12 trades, 12 won" in text
+
+    await bot.handle(press("dt_status"))                                    # its buttons come back to it
+    assert api.edits[-1][2].startswith("📈 <b>DAYTRADE · STATUS</b>")
+    await bot.handle(msg("/dt_run SPY"))                                    # nothing that trades: it only reads
+    assert "DAYTRADE · UNKNOWN COMMAND" in api.sent[-1][1]
+    await bot.handle(msg("/dashboard"))                                     # an Arcus command stays Arcus's
+    assert "DAYTRADE" not in api.sent[-1][1]
+
+
+async def test_a_read_only_bot_still_answers_daytrade(tmp_path: Path, dt_home: Path) -> None:
+    bot, api, _ = _bot(tmp_path, _app(tmp_path), read_only=True)
+    await bot.handle(msg("/dt_status"))
+    assert "DAYTRADE · STATUS" in api.sent[-1][1]
+
+
+async def test_daytrade_that_cannot_be_imported_breaks_nothing_else(tmp_path: Path,
+                                                                     monkeypatch: pytest.MonkeyPatch) -> None:
+    import sys
+
+    monkeypatch.setitem(sys.modules, "daytrade", None)                      # `import daytrade` fails
+    bot, api, _ = _bot(tmp_path, _app(tmp_path))
+    await bot.handle(msg("/dt_status"))
+    assert "DAYTRADE IS NOT AVAILABLE" in api.sent[-1][1] and "import of daytrade halted" in api.sent[-1][1]
+    await bot.handle(msg("/dt"))
+    assert "DAYTRADE IS NOT AVAILABLE" in api.sent[-1][1]
+    await bot.handle(msg("/ping"))
+    assert "PONG" in api.sent[-1][1]

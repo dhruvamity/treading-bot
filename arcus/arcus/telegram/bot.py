@@ -1,5 +1,6 @@
 """The Telegram control bot: status, control and live alerts for the trading bot. ONE bot for all of it: Arcus
-(the commands below), Lighter (/l_<command>) and the funding arbitrage (/arb_<command>): arcus/telegram/others.py.
+(the commands below), Lighter (/l_<command>), the funding arbitrage (/arb_<command>) and the paper day-trading bot
+(/dt_<command>, read only): arcus/telegram/others.py.
 
 Security:
 - Only the owner's chat (TELEGRAM_CHAT_ID) is served; with TELEGRAM_ALLOWED_USER_IDS set, only those users, in the
@@ -163,6 +164,7 @@ class TelegramBot:
         self.lighter = others.Lighter(str(getattr(api, "token", "")), owner_chat_id, allowed_user_ids,
                                       home_if=lambda: self.ui() == "menu")
         self.arb = others.Arb()
+        self.daytrade = others.DayTrade()
         self.venues: dict[int, str] = {}     # menu layout: which part the Home buttons act on, per chat (default Arcus)
 
     # ------------------------------------------------------------------ plumbing
@@ -348,9 +350,10 @@ class TelegramBot:
     async def dispatch(self, ctx: Ctx, cmd: str, args: list[str]) -> None:
         cmd, args = others.arcus_spelling(cmd, args)      # /arcus_status, /a_status: Arcus, spelled like the others
         part = others.part_of(cmd)
-        if part is not None:      # /l_status, /l status, /arb_hold 72 ...: Lighter or the funding arbitrage
+        if part is not None:      # /l_status, /l status, /arb_hold 72, /dt_trades ...: Lighter, the arbitrage, daytrade
             name, rest = (part[1], args) if part[1] else ((args[0].lower(), args[1:]) if args else ("", []))
-            await (self.c_lighter if part[0] == others.LIGHTER else self.c_arb)(ctx, name, rest)
+            handler = {others.LIGHTER: self.c_lighter, others.ARB: self.c_arb, others.DAYTRADE: self.c_daytrade}
+            await handler[part[0]](ctx, name, rest)
             return
         cmd = ALIASES.get(cmd, cmd)
         if self.ui() == "menu":
@@ -366,7 +369,7 @@ class TelegramBot:
         else:
             await self.reply(ctx, card("❔", "UNKNOWN COMMAND", codes(f"/{cmd}"), codes("/help")))
 
-    # ------------------------------------------------------------------ Lighter and the funding arbitrage
+    # ------------------------------------------------------------------ Lighter, the funding arbitrage and daytrade
     async def c_lighter(self, ctx: Ctx, name: str, rest: list[str]) -> None:
         """/l_<name> ...: the same command on Lighter (/l or /l_menu lists them). The panel sends its own replies."""
         panel = self.lighter.load()
@@ -463,6 +466,26 @@ class TelegramBot:
             "📝", "FUNDING ARB · START PAPER",
             codes(f"Pretend ${money['arcus']:,.0f} on Arcus, ${money['lighter']:,.0f} on Lighter",
                   "Real prices and funding, no real orders")))
+
+    async def c_daytrade(self, ctx: Ctx, name: str, rest: list[str]) -> None:
+        """/dt_<name>: the paper day-trading bot (/dt lists the commands). Every one only reads: it sends no orders,
+        and it is started and stopped on the server (tbot up daytrade)."""
+        loaded = self.daytrade.load()
+        if loaded is None:
+            await self.reply(ctx, self.daytrade.missing())
+            return
+        tg, ops = loaded
+        if name in ("", "menu", "help"):
+            await self.reply(ctx, others.dt_menu(ops.running()), others.dt_keyboard())
+            return
+        try:
+            out = tg.reply(name)
+        except Exception as e:
+            out = f"{type(e).__name__}: {redact_str(str(e))[:300]}"
+        if out is None:
+            await self.reply(ctx, card("❔", "DAYTRADE · UNKNOWN COMMAND", codes(f"/dt_{name}"), codes("/dt lists them")))
+            return
+        await self.reply(ctx, others.dt_card(name, out), others.dt_keyboard())
 
     # ------------------------------------------------------------------ scout / pilot: the lists
     async def c_scout(self, ctx: Ctx, args: list[str]) -> None:

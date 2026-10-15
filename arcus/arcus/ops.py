@@ -12,11 +12,13 @@ in every role, so `tbot down` and `tbot status` are the same everywhere.
 The trading bot itself is started by the pilot (`arcus pilot approve 1 [--live]`, or Telegram's /top3 -> Run) and is
 not a service here; `tbot down --all` stops it too (quotes cancelled, positions kept).
 
-The bot's other two parts run under the same three commands:
+The bot's other parts run under the same three commands:
 - Lighter (treading-bot/lighter): `tbot up` starts its scout too (it records every Lighter market and ranks setups;
   no keys, no orders). Its runs are started from Telegram (/l_run) or `lighter run ...`.
 - The funding arbitrage (treading-bot/arbitrage): its executor is started on request (/arb_start, `arbitrage start`).
 `tbot down --all` stops their runs too; positions are kept, with the venues' own stop orders.
+daytrade (treading-bot/daytrade) is a paper bot: `tbot up` starts it (`daytrade run`) where the runs are (BOT_ROLE all
+or trader), `tbot down` stops it. It sends no orders.
 """
 
 from __future__ import annotations
@@ -211,8 +213,49 @@ def others_down(everything: bool, *, lighter: bool = True, arbitrage: bool = Tru
     return out
 
 
+def daytrade_up(role: str = "all") -> str:
+    """Start the daytrade paper bot unless it runs. It belongs where the runs are: a recorder or a scout machine
+    leaves it to the trader. Paper only: it sends no orders."""
+    if not roles.trades(role):
+        return f"daytrade: not started (this machine is a {role}: the trader runs it)"
+    try:
+        from daytrade import ops as dops
+
+        msg = dops.start()[1]
+    except Exception as e:   # not installed, or it fails to start: the other parts are not affected
+        return f"daytrade: not started ({type(e).__name__}: {e}). In treading-bot/arcus: make install"
+    return f"daytrade paper bot: {msg}  [paper only: it sends no orders]"
+
+
+def daytrade_down() -> str:
+    try:
+        from daytrade import ops as dops
+
+        return f"daytrade paper bot: {dops.stop()[1]}"
+    except Exception as e:
+        return f"daytrade: {type(e).__name__}: {e}"
+
+
+def daytrade_status(role: str = "all") -> list[str]:
+    """The daytrade lines of `tbot status`: the paper bot's own summary (daytrade/bot.py)."""
+    lines = ["", "DAYTRADE (paper only: it sends no orders)"]
+    try:
+        from daytrade import bot as dbot
+        from daytrade import ops as dops
+
+        pid = dops.running()
+        if not roles.trades(role) and not pid:
+            return [*lines, "  not here: it runs on the trader machine"]
+        lines += ["  " + x for x in dbot.summary().splitlines()]
+        if not pid:
+            lines.append("  start it: tbot up daytrade")
+    except Exception as e:
+        lines.append(f"  not available ({type(e).__name__}: {e}). In treading-bot/arcus: make install")
+    return lines
+
+
 def others_status(role: str = "all") -> list[str]:
-    """The Lighter and funding-arbitrage lines of `tbot status`."""
+    """The Lighter, funding-arbitrage and daytrade lines of `tbot status`."""
     lines = ["", "LIGHTER"]
     does = {"all": "records every Lighter market, ranks setups", "scout": "records every Lighter market, ranks setups",
             "recorder": "records every Lighter market", "trader": "follows the other machine's Lighter lists"}[role]
@@ -257,13 +300,14 @@ def others_status(role: str = "all") -> list[str]:
                          else "  not here: it runs on the trader machine")
     except Exception as e:
         lines.append(f"  not available ({type(e).__name__}: {e}). In treading-bot/arcus: make install")
-    return lines
+    return lines + daytrade_status(role)
 
 
-PARTS = ("arcus", "lighter", "telegram")
+PARTS = ("arcus", "lighter", "telegram", "daytrade")
 HINT = {"scout": "arcus up", "telegram": "tbot up telegram", "guardian": "arcus up"}
 PART_WHAT = {"arcus": "the Arcus scout (and the guardian while a live Arcus run exists)",
-             "lighter": "the Lighter scout", "telegram": "the one Telegram bot (all three bots)"}
+             "lighter": "the Lighter scout", "telegram": "the one Telegram bot (all three bots)",
+             "daytrade": "the daytrade paper bot (no orders)"}
 
 
 def up_parts(app: AppConfig, env: dict[str, str], live_running: bool, parts: tuple[str, ...]) -> list[str]:
@@ -287,12 +331,14 @@ def up_parts(app: AppConfig, env: dict[str, str], live_running: bool, parts: tup
             out.append(f"{start(app, 'telegram', r)[1]}  [{want['telegram']}]")
         else:
             out.append(f"telegram: not started ({skip.get('telegram', 'not set up')})")
+    if "daytrade" in parts:
+        out.append(daytrade_up(r))
     return out
 
 
 def down_parts(app: AppConfig, parts: tuple[str, ...], *, everything: bool, live_running: bool) -> list[str]:
     """Stop these parts. `everything` also stops the runs of the parts named (positions kept); the arbitrage's executors
-    stop only when all three parts are named."""
+    stop only when arcus, lighter and telegram are all named. The daytrade part is its paper bot: any down stops it."""
     out: list[str] = []
     if "telegram" in parts:
         out.append(stop(app, "telegram")[1])
@@ -304,7 +350,9 @@ def down_parts(app: AppConfig, parts: tuple[str, ...], *, everything: bool, live
             out.append("guardian: left running, it watches the live bot (`--all` stops both)")
     if "lighter" in parts:
         out += others_down(everything and "lighter" in parts, lighter="lighter" in parts,
-                           arbitrage=everything and set(parts) >= set(PARTS))
+                           arbitrage=everything and set(parts) >= {"arcus", "lighter", "telegram"})
+    if "daytrade" in parts:
+        out.append(daytrade_down())
     return out
 
 

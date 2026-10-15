@@ -128,3 +128,22 @@ def test_a_half_built_signal_bar_is_not_closed():
     assert not d.ctx["closes"][-1] and d.ctx["closes"][-3]                    # 09:44 closed the 09:40 bar
     cut = b.between(0, B.local_to_utc(DAY2, 9 * 3600 + 50 * 60, B.NY))       # up to 09:49: now it is closed
     assert OpeningRange("SPY", tf=5).days(cut)[-1].ctx["closes"][-1]
+
+
+def test_a_venues_weekend_and_holiday_sessions_are_not_trading_days():
+    import datetime as dt
+
+    from daytrade.strategies import stock_days
+
+    num = lambda s: (dt.date.fromisoformat(s) - dt.date(1970, 1, 1)).days     # noqa: E731
+    rows = []
+    for day in range(num("2026-10-02"), num("2026-10-07")):   # Fri 2 Oct 2026 .. Tue 6 Oct; Sat and Sun trade too
+        for k in range(390):
+            t = B.local_to_utc(day, 9 * 3600 + 1800 + 60 * k, B.NY)
+            px = 100.0 + day - num("2026-10-02")
+            rows.append((t, px, px, px, px, 1.0))
+    for k in range(390):                                       # Fri 3 Jul 2026, Independence Day observed
+        rows.append((B.local_to_utc(num("2026-07-03"), 9 * 3600 + 1800 + 60 * k, B.NY), 50.0, 50.0, 50.0, 50.0, 1.0))
+    days = stock_days(B.from_rows(rows), 5)
+    assert [B.day_str(d.key) for d in days] == ["2026-10-05", "2026-10-06"]   # the first Friday has no previous
+    assert days[0].ctx["pclose"] == 100.0                      # Monday's previous session is Friday's

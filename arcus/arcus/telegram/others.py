@@ -1,16 +1,18 @@
-"""Lighter and the funding arbitrage inside this ONE Telegram bot.
+"""Lighter, the funding arbitrage and daytrade inside this ONE Telegram bot.
 
 The trading bot is one bot with three parts: Arcus market making (this package), Lighter market making
 (treading-bot/lighter, package `lighter`) and the funding arbitrage between the two (treading-bot/arbitrage, package `arb`).
-`make install` puts all three into this one environment, and this one Telegram bot controls all of them:
+The paper day-trading bot (treading-bot/daytrade) is a fourth that only reads. `make install` puts them all into this
+one environment, and this one Telegram bot controls all of them:
 
     /status, /run, /closeall ...          Arcus, as always
     /l_status, /l_run, /l_closeall ...    the same commands for Lighter (`/l status` works too; /l lists them)
     /arb_status, /arb_scan, /arb_hold 72  the funding arbitrage (/arb lists them)
+    /dt_status, /dt_trades                daytrade, paper only (/dt lists them)
 
-Every Lighter message starts with LIGHTER and every arbitrage message with FUNDING ARB, so a reply can never be
-taken for another part's. A part that is not installed, or fails to load, says so when its command is sent; the
-rest of the bot is not affected.
+Every Lighter message starts with LIGHTER, every arbitrage message with FUNDING ARB and every daytrade message with
+DAYTRADE, so a reply can never be taken for another part's. A part that is not installed, or fails to load, says so
+when its command is sent; the rest of the bot is not affected.
 """
 
 from __future__ import annotations
@@ -23,7 +25,7 @@ from arcus.common.logging import Log
 from arcus.common.tgfmt import card, codes
 
 log = Log("telegram_parts")
-LIGHTER, ARB = "l", "arb"
+LIGHTER, ARB, DAYTRADE = "l", "arb", "dt"
 INSTALL_HINT = "In treading-bot/arcus: make install, then tbot down and tbot up"
 
 
@@ -39,9 +41,9 @@ def arcus_spelling(cmd: str, args: list[str]) -> tuple[str, list[str]]:
 
 
 def part_of(cmd: str) -> tuple[str, str] | None:
-    """("l" | "arb", the command inside that part) for /l, /l_status, /lighter, /arb, /arb_hold ...; else None.
-    "" means the part's own menu."""
-    for part, names in ((LIGHTER, ("l", "lighter")), (ARB, ("arb", "arbitrage"))):
+    """("l" | "arb" | "dt", the command inside that part) for /l, /l_status, /lighter, /arb, /arb_hold, /dt_trades ...;
+    else None. "" means the part's own menu."""
+    for part, names in ((LIGHTER, ("l", "lighter")), (ARB, ("arb", "arbitrage")), (DAYTRADE, ("dt", "daytrade"))):
         if cmd in names:
             return part, ""
         for n in names:
@@ -107,6 +109,28 @@ class Arb:
         return str(read_env().get("ARB_LIVE", "")).strip() == "1"
 
 
+class DayTrade:
+    """The paper day-trading bot's commands (daytrade/telegram.py) and its background process (daytrade/ops.py).
+    Every command only reads; the bot is started and stopped on the server (tbot up daytrade)."""
+
+    def __init__(self) -> None:
+        self.why = ""
+
+    def load(self) -> tuple[Any, Any] | None:
+        try:
+            from daytrade import ops, telegram
+
+            self.why = ""
+            return telegram, ops
+        except Exception as e:
+            self.why = f"{type(e).__name__}: {e}"
+            log.warning("daytrade_unavailable", reason=self.why[:200])
+            return None
+
+    def missing(self) -> str:
+        return card("⚠️", "DAYTRADE IS NOT AVAILABLE", codes(self.why[:300] or "not installed"), codes(INSTALL_HINT))
+
+
 def arb_card(title: str, out: str) -> str:
     """What an arbitrage command printed, as one message."""
     out = out.strip() or "done"
@@ -141,3 +165,22 @@ def arb_home(mode: str, running: dict[str, int | None], live_allowed: bool) -> s
 def arb_keyboard() -> list[list[tuple[str, str]]]:
     return [[("📊 Status", "arb_status"), ("🔎 Scan", "arb_scan")],
             [("⚙️ Settings", "arb_settings"), ("☰ Menu", "menu")]]
+
+
+def dt_card(title: str, out: str) -> str:
+    """What a daytrade command answered, as one message."""
+    out = out.strip() or "nothing"
+    if len(out) > 3400:
+        out = out[:3400].rsplit("\n", 1)[0] + "\n…"
+    return card("📈", f"DAYTRADE · {title.upper()}", f"<pre>{escape(out)}</pre>")
+
+
+def dt_menu(pid: int | None) -> str:
+    return card("📈", "DAYTRADE",
+                codes(f"PAPER: running (pid {pid})" if pid else "PAPER: not running", "Paper only: it sends no orders"),
+                "/dt_status · /dt_trades",
+                codes("Start and stop it on the server:", "tbot up daytrade · tbot down daytrade"))
+
+
+def dt_keyboard() -> list[list[tuple[str, str]]]:
+    return [[("📊 Status", "dt_status"), ("📜 Trades", "dt_trades")], [("☰ Menu", "menu")]]
