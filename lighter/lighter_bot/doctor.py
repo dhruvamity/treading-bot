@@ -63,7 +63,7 @@ async def check(cfg: Config, market: str | None = None, leverage: float | None =
                     err = s.check()
                     add("PASS" if err is None else "FAIL", "key registered",
                         "Lighter holds this key's public key" if err is None
-                        else f"{err} (register it: scripts/register_key.py, README section 3)")
+                        else f"{err} (register it: scripts/register_key.py, lighter/README.md section 2)")
                     if err is None:
                         rest.auth = s.auth_token(int(time.time()) + 600)
                         lim = await rest.account_limits(account)

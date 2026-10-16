@@ -297,8 +297,9 @@ position closed on a clock takes whatever the gap did each time; one held until 
   furthest 3-hour move at a weekend was 0.69%). A 50x position carried over from Friday would have been stopped on
   six of the ten, which a 3-hour cycle avoids: the renewal after the close is at 33x on both venues.
 - **The one violent print was on a weekday.** On 17 Sep at 13:14 New York, Lighter's SPY traded down to 717.68 from 763
-  (−5.9%) and back within the same minute, on $4 million. Nothing in the history says how the bot's stop on Lighter
-  or Lighter's own mark price behaved in that minute. A leg at 50x has 1% of room.
+  (−5.9%) and back within the same minute, on $4 million. Lighter's mark price, which its liquidations and stop
+  orders go by, did not follow: its lowest in that minute was 762.60 (its mark-price candles, read 11 Oct 2026). What
+  the bot's own check saw is not known: it reads the best bid and ask, which the history does not hold.
 
 **What was decided (10 Oct 2026, the owner).** SPY, at the venues' highest leverage, closed and reopened every three
 funding payments, the side taken from ProFunding. The highest leverage is now the default; the rest is three commands

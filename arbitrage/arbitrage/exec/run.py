@@ -27,7 +27,7 @@ import aiohttp
 from arbitrage import scan as scanner
 from arbitrage.config import ROOT, STATE, Config, load, read_env
 from arbitrage.exec.engine import Engine, State
-from arbitrage.exec.venue import PaperVenue, Spec, TradeVenue
+from arbitrage.exec.venue import PaperVenue, Spec, TradeVenue, VenueDown
 from arbitrage.rank import Plan
 from arbitrage.venues import Arcus, Lighter
 
@@ -100,14 +100,23 @@ class LivePlanner:
                  only: Callable[[], set[str]] = set) -> None:
         self.cfg, self.skip, self.only = cfg, skip, only
 
+    async def _scan(self, **kw: Any) -> scanner.Scan:
+        """One scan. A public read that fails (a timeout, a 5xx, a rate limit past its retries, a broken answer) is
+        a venue being down for this loop: the engine says so and looks again at its next scan. Left to rise, it
+        ended the whole program, with the position still open."""
+        try:
+            return await scanner.run(self.cfg(), **kw)
+        except (RuntimeError, aiohttp.ClientError, TimeoutError, OSError, ValueError) as e:
+            raise VenueDown(f"the scan could not read the venues: {type(e).__name__} {str(e)[:120]}") from e
+
     async def best(self, collateral: dict[str, float]) -> Plan | None:
         only = self.only()                         # `arbitrage only SPY QQQ`: nothing else is looked at
-        res = await scanner.run(self.cfg(), top=12, collateral=collateral, symbols=sorted(only) or None)
+        res = await self._scan(top=12, collateral=collateral, symbols=sorted(only) or None)
         skip = self.skip()
         return next((p for p in res.plans if p.go and p.symbol not in skip and (not only or p.symbol in only)), None)
 
     async def edges(self, symbol: str, short_venue: str) -> tuple[float, float] | None:
-        res = await scanner.run(self.cfg(), symbols=[symbol], collateral={"arcus": 1.0, "lighter": 1.0})
+        res = await self._scan(symbols=[symbol], collateral={"arcus": 1.0, "lighter": 1.0})
         if not res.plans:
             return None
         p = res.plans[0]

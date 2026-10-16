@@ -358,7 +358,7 @@ message mentions is written `/l_…`, so tapping it stays on Lighter: `/closeall
 | `arcus up` / `arcus scout` | Start the Arcus part: its scout, and the guardian while a live bot runs. Only Arcus |
 | `arcus down [--all]` / `arcus scout stop` | Stop it. `--all` also stops the Arcus runs (quotes cancelled, positions kept) |
 | `arcus status [--json]` | The Arcus part on one screen: services, runs, last scan, balance |
-| `tbot up [arcus] [lighter] [telegram]` | The whole machine (`BOT_ROLE` decides): all three, or only the parts named; `tbot up scouts` or `tbot scout` = both scouts |
+| `tbot up [arcus] [lighter] [telegram] [daytrade] [deltaneutral]` | The whole machine (`BOT_ROLE` decides): every part but deltaneutral (which starts only when named), or only the parts named; `tbot up scouts` or `tbot scout` = both scouts |
 | `tbot down [parts] [--all]` / `tbot status` | Stop them / one screen for all three bots, the Telegram bot, Lighter and the arbitrage |
 | `arcus dashboard [--once]` | Live screen every 10 s: today's volume, PnL, position |
 | **Trade** | |

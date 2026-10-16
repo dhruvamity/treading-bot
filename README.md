@@ -1,73 +1,57 @@
 # treading-bot
 
-Three maker (limit-order) bots for perpetual futures. Their aim is as much **maker volume** as possible at the lowest
-cost per dollar traded. They share one install, one `.env`, one Telegram chat and one start command.
+Three maker (limit-order) bots for perpetual futures, and two strategies beside them. The bots' aim is as much **maker
+volume** as possible at the lowest cost per dollar traded. All five share one install, one `.env`, one Telegram chat
+and one start command.
 
 | Bot | Folder | Terminal | Telegram | What it does | Guide |
 |---|---|---|---|---|---|
-| **Arcus** | [`arcus/`](arcus) | `arcus …` | `/status`, `/run`, `/closeall` … | Quotes both sides of one Arcus perp at a time. Its own start and stop: `arcus up`, `arcus down`, `arcus scout` | [arcus/README.md](arcus/README.md), [RUNBOOK](arcus/RUNBOOK.md) |
+| **Arcus** | [`arcus/`](arcus) | `arcus …` | `/status`, `/run` … | Quotes both sides of one Arcus perp at a time | [arcus/README.md](arcus/README.md), [RUNBOOK](arcus/RUNBOOK.md) |
 | **Lighter** | [`lighter/`](lighter) | `lighter …` | the same with `l_`: `/l_status`, `/l_run` | The same setups on Lighter (Robinhood Chain), a zero-fee venue | [lighter/README.md](lighter/README.md) |
 | **Arbitrage** | [`arbitrage/`](arbitrage) | `arbitrage …` | `/arb_status`, `/arb_scan` … | Short the venue that pays more funding, long the other, equal size | [arbitrage/README.md](arbitrage/README.md) |
+| **Daytrade** | [`daytrade/`](daytrade) | `daytrade …` | `/dt_status`, `/dt_trades` | SPY, QQQ and gold strategies, each with its own backtest, and a paper bot | [daytrade/README.md](daytrade/README.md) |
+| **Delta neutral** | [`deltaneutral/`](deltaneutral) | `deltaneutral …` | `/dn_status`, `/dn_transfer` … | Two markets, long on one venue and short on the other, renewed every 24 hours | [deltaneutral/README.md](deltaneutral/README.md) |
 
 Where each stands (October 2026):
 - **Arcus:** traded live with real money; the backtest matched the largest live run on cost.
-- **Lighter:** live-tested on 2026-10-10 at the smallest size (a request-by-request test, then a ten-minute run that ended
-  flat, [lighter/README.md](lighter/README.md) section 6). Not yet run for hours or days.
-- **Arbitrage:** paper for the whole executor. Its Lighter leg passed a real-money test the same day; its Arcus leg and the
-  two-leg engine have never run live. The live switch is off.
+- **Lighter:** live-tested on 2026-10-10 at the smallest size (a ten-minute run that ended flat). Not yet run for hours.
+- **Arbitrage:** paper for the whole executor. Its Lighter leg passed a real-money test; its Arcus leg and the two-leg
+  engine have never run live. The live switch is off.
+- **Daytrade:** paper only; it has no live mode. Only buying short dips in SPY and QQQ passed its backtests.
+- **Delta neutral:** built 16 Oct 2026, paper only so far; its 30-day backtest lost money on every pair.
 
 > **Risk warning.** Experimental software that can place real orders with real money. Backtests are estimates, not
 > promises. Nothing here is financial advice. Run paper first, then small, and only with money you can lose.
 
-**The five commands** (from `treading-bot/arcus`; `arcus` is `.venv/bin/arcus`):
+**The five commands** (every command in this guide runs from `treading-bot/arcus`):
 
 ```bash
-.venv/bin/tbot up
-.venv/bin/tbot status
-.venv/bin/arcus pilot approve 1
-.venv/bin/arcus pilot close
-.venv/bin/tbot export
+.venv/bin/tbot up                  # start everything this machine is for
+.venv/bin/tbot status              # one status screen
+.venv/bin/arcus pilot approve 1    # run the best Arcus setup on paper
+.venv/bin/arcus pilot close        # close it
+.venv/bin/tbot export              # pack everything recorded and traded into one file
 ```
 
-They start everything, show one status screen, run the best Arcus setup on paper, close it, and pack everything recorded
-and traded into one file ([Export and import](#4-export-and-import)).
-
-**Setting up servers?** [Two servers, step by step](#two-servers-step-by-step-one-records-one-trades) has every command
-in order for a recorder VPS and a trader VPS.
-
-**New here?** Section [9](#9-tutorial-the-commands-by-what-you-want-to-do) is the step-by-step guide with the exact
-command for each job, for all three bots. Section [10](#10-two-small-servers-azure-free-tier-and-the-arbitrage-alone)
-covers 1 GB servers (an Azure free-tier VM, the arbitrage on its own, a recorder plus a trader).
-
-**Which command starts what.** Each bot starts and stops only itself; `tbot` is for what belongs to the whole machine.
+`tbot` is for what belongs to the whole machine; each bot starts and stops only itself:
 
 | To | Command |
 |---|---|
-| Start everything this machine is for (`BOT_ROLE`) | `tbot up` |
-| Start one part | `arcus up` (or `arcus scout`), `lighter up` (or `lighter scout`), `tbot up telegram` |
-| Start both scouts, nothing else | `tbot scout` (or `tbot up scouts`) |
-| Stop them | `arcus down`, `lighter down`, `tbot down [parts]` (`--all` also stops the runs: positions are kept) |
-| Look | `arcus status`, `lighter status`, `arbitrage status`, and `tbot status` for the whole machine |
-| Say what this machine is for | `tbot role` shows it; `tbot role trader` (or `recorder`, `scout`, `all`) sets `BOT_ROLE` in `.env` |
-| The Telegram bot, in a terminal | `tbot telegram` (the one bot controls all three; it has no owner among them) |
+| Start everything this machine is for | `tbot up` |
+| Start one part | `arcus up`, `lighter up`, `tbot up telegram`, `tbot up daytrade`, `tbot up deltaneutral` (paper; only when named); both scouts and nothing else: `tbot scout` |
+| Stop | `arcus down`, `lighter down`, `tbot down [parts]` (`--all` also stops the runs; positions are kept) |
+| Look | `tbot status` (the machine), `arcus status`, `lighter status`, `arbitrage status` |
+| Say what this machine is for | `tbot role` shows it; `tbot role trader` (or `recorder`, `scout`, `all`) sets it |
 | Export, import, sync, recommend | `tbot export`, `tbot import`, `tbot sync`, `tbot recommend` |
 
-The old spellings `arcus telegram|export|import|sync|recommend` keep working. `arcus up|down|status` now mean the Arcus part only.
-In Telegram, Arcus is spelled like the other two: `/arcus_status` (or `/a_status`), `/lighter_status` (or `/l_status`), `/arb_status`;
-the bare `/status` is still Arcus's.
+In Telegram they are all spelled alike: `/arcus_status` (or `/a_status`, or the bare `/status`), `/l_status`,
+`/arb_status`, `/dt_status`, `/dn_status`.
 
-## Contents
-
-1. [How it fits together](#1-how-it-fits-together)
-2. [Install](#2-install)
-3. [Run it on a server](#3-run-it-on-a-server)
-4. [Export and import](#4-export-and-import)
-5. [Where everything lives](#5-where-everything-lives)
-6. [Troubleshooting](#6-troubleshooting)
-7. [Development](#7-development)
-8. [Upgrading from the old layout](#8-upgrading-from-the-old-layout)
-9. [Tutorial: the commands, by what you want to do](#9-tutorial-the-commands-by-what-you-want-to-do)
-10. [Two small servers: Azure free tier and the arbitrage alone](#10-two-small-servers-azure-free-tier-and-the-arbitrage-alone)
+**Contents:** [1 How it fits together](#1-how-it-fits-together) · [2 Install](#2-install) ·
+[3 Run it on a server](#3-run-it-on-a-server) · [4 Export and import](#4-export-and-import) ·
+[5 The commands, by what you want to do](#5-the-commands-by-what-you-want-to-do) ·
+[6 Troubleshooting](#6-troubleshooting) · [7 Development](#7-development) ·
+[8 Where everything lives](#8-where-everything-lives)
 
 ---
 
@@ -94,25 +78,24 @@ flowchart LR
 
 The loop is: **record → backtest → rank → you pick → run → export → analyse → refine.**
 
-**What runs** (every process is an ordinary command in the background):
-
 | Process | Started by | What it does | Needs keys |
 |---|---|---|---|
-| Arcus scout | `arcus up` or `arcus scout` (or `tbot up`) | Records every Arcus perp (best bid/offer, trades, top-10 depth). Every 30 min it backtests 8 setups on every market and ranks them; it also checks the running setup and runs the autopilot | no |
-| Lighter scout | `lighter up` or `lighter scout` (or `tbot up`) | The same for every Lighter perp (36 setups) | no |
-| Telegram bot | `tbot up telegram` (or `tbot up`), when the token is in `.env` | The one chat that controls all three bots and posts alerts | the token |
+| Arcus scout | `tbot up`, `arcus up` | Records every Arcus perp (best bid/offer, trades, top-10 depth). Every 30 min it backtests 8 setups on every market, ranks them, checks the running setup and runs the autopilot | no |
+| Lighter scout | `tbot up`, `lighter up` | The same for every Lighter perp (36 setups) | no |
+| Telegram bot | `tbot up`, when the token is in `.env` | The one chat that controls every part and posts alerts | the token |
 | Guardian | by itself, with a live Arcus run | A separate process: cancels everything if the live bot is silent for 60 s | yes |
-| Arcus run | you (`/run`, `arcus pilot approve`) or the autopilot | Trades one setup on one market | live only |
-| Lighter run | you (`/l_run`, `lighter run`) or its autopilot | The same on Lighter | live only |
+| A run (Arcus, Lighter) | you (`/run`, `/l_run`, `pilot approve`) or an autopilot | Trades one setup on one market | live only |
 | Arbitrage executor | you (`/arb_start`, `arbitrage start`) | Holds one position across both venues | live only |
+| Daytrade paper bot | `tbot up` where `BOT_ROLE` is `all` or `trader`, `tbot up daytrade` | Replays its strategies on Lighter's prices; sends no orders | no |
+| Delta-neutral bot | you (`tbot up deltaneutral`, `/dn_start`, `deltaneutral start`) | Two markets across both venues, one cycle a day | live only |
 
-**Rules that hold everywhere:**
-- **Paper is the default.** Paper uses live market data and simulated orders, through the same code as live.
+The rules that hold everywhere:
+- **Paper is the default:** live market data, simulated orders, the same code as live.
 - **Live needs three things:** a switch in `.env`, a passing `doctor`, and a typed confirmation.
 - **One market-making setup per venue at a time.** Starting another closes the first.
+- **Stopping is not closing:** *stop* cancels the quotes and keeps the position; *close* also closes the position.
 - **The backtest and the live bot share their rules:** sizes, stops and quotes come from the same code.
-- **The three bots are independent packages.** None imports another's code at start-up; Arcus finds the other two by
-  their folder names (`../lighter`, `../arbitrage`) and the arbitrage uses the other two bots' venue clients.
+- **Settings are changed with commands** (`/set`, `/l_set`, `/arb_set`, or the terminal), never by editing files.
 
 ---
 
@@ -124,169 +107,110 @@ Needs macOS or Linux, Python 3.12 and [uv](https://docs.astral.sh/uv/) (`brew in
 ```bash
 git clone https://github.com/dhruvamity/treading-bot.git
 cd treading-bot/arcus
-make install
-cp .env.example .env
-chmod 600 .env
+make install                       # one environment (arcus/.venv) with every part
+cp .env.example .env && chmod 600 .env
+.venv/bin/arcus doctor             # reads only: says what is missing
+.venv/bin/tbot up                  # both scouts, and Telegram if its token is in .env
 ```
 
-`make install` builds `arcus/.venv` with all three bots. Every command in these guides runs from `treading-bot/arcus`
-(the `.env` is read from the folder you run in).
+Recording, backtests and paper need **no keys at all**. A market appears in a list after about 3 full recorded UTC
+days; `/run`, `/l_run` and the arbitrage work at once, because they never wait for a scan.
 
-**Credentials** (`arcus/.env`; fill in only what you use, and never commit it):
+**Credentials** (`arcus/.env`; fill in only what you use, never commit it; `arcus keys` shows what the venue sees):
 
 | Variable | What it is | Needed for |
 |---|---|---|
 | `ARCUS_ADDRESS`, `ARCUS_API_PRIVATE_KEY` | Your wallet address and an Arcus API key (Arcus web app → API Keys) | Arcus live, `doctor`, balance |
-| `TELEGRAM_BOT_TOKEN`, `TELEGRAM_CHAT_ID` | From @BotFather; your chat id (`/whoami` tells you) | Telegram |
-| `TELEGRAM_ALLOWED_USER_IDS` | Only these users may send commands | recommended |
+| `TELEGRAM_BOT_TOKEN`, `TELEGRAM_CHAT_ID`, `TELEGRAM_ALLOWED_USER_IDS` | From @BotFather; your chat id; the only users who may send commands | Telegram |
 | `BOT_PILOT_LIVE=1` | Allows live Arcus runs | Arcus live |
-| `LIGHTER_ADDRESS`, `LIGHTER_API_PRIVATE_KEY`, `LIGHTER_API_KEY_INDEX`, `LIGHTER_ACCOUNT_INDEX` | The Lighter key ([lighter/README.md](lighter/README.md), section 3) | Lighter live |
+| `LIGHTER_ADDRESS`, `LIGHTER_API_PRIVATE_KEY`, `LIGHTER_API_KEY_INDEX`, `LIGHTER_ACCOUNT_INDEX` | The Lighter key ([lighter/README.md](lighter/README.md), section 2) | Lighter live |
 | `LBOT_LIVE=1` | Allows live Lighter runs | Lighter live |
 | `ARB_LIVE=1`, `ARCUS_ACCOUNT_INDEX` | Allows the live arbitrage; the Arcus subaccount it uses | arbitrage live |
+| `DN_LIVE=1` | Allows the live delta-neutral bot (it reads `ARCUS_ADDRESS`, `ARCUS_ACCOUNT_INDEX`, `LIGHTER_ACCOUNT_INDEX` too) | delta neutral live |
 | `PROFUNDING_API_KEY` | ProFunding's data key (read-only; never give it an exchange key) | the arbitrage, when ProFunding decides the side or the market |
-| `BOT_ROLE` | What this machine is for: `all` (default), `trader`, `recorder` or `scout` ([two machines](#two-machines-one-records-one-trades)) | two machines |
-| `BOT_SYNC_FROM`, `BOT_SYNC_KEY` | On a trader: `user@host` of the machine that makes the lists, and the key file it fetches with (default `~/.ssh/treading_bot_sync`) | a trader that fetches lists |
-
-The switch names (`BOT_PILOT_LIVE`, `LBOT_LIVE`, `ARB_LIVE`) are unchanged from earlier versions on purpose, so an existing
-`.env` keeps working. Recording, backtests and paper need **no keys at all**. Check what you filled in (both only read):
-
-```bash
-.venv/bin/arcus doctor
-.venv/bin/arcus keys
-```
+| `BOT_ROLE` | What this machine is for: `all` (default), `trader`, `recorder`, `scout` | [two machines](#two-machines-one-records-one-trades) |
+| `BOT_SYNC_FROM`, `BOT_SYNC_KEY` | On a trader: `user@host` of the machine that makes the lists, and the key file it fetches with | a trader that fetches lists |
 
 **Telegram** (optional, once):
-1. In Telegram, message **@BotFather**, send `/newbot`, and put the token in `TELEGRAM_BOT_TOKEN`.
-2. Send your new bot any message, open `https://api.telegram.org/bot<TOKEN>/getUpdates` in a browser, and put
-   `chat.id` in `TELEGRAM_CHAT_ID`.
-3. `tbot up` starts it. Send `/whoami`, put your user id in `TELEGRAM_ALLOWED_USER_IDS`, then `tbot down` and `tbot up`.
+1. Message **@BotFather**, send `/newbot`, and put the token in `TELEGRAM_BOT_TOKEN`.
+2. Send your new bot any message, open `https://api.telegram.org/bot<TOKEN>/getUpdates`, and put `chat.id` in
+   `TELEGRAM_CHAT_ID`.
+3. `tbot up`, send `/whoami`, put your user id in `TELEGRAM_ALLOWED_USER_IDS`, then `tbot down` and `tbot up`.
 
-Then follow [arcus/README.md](arcus/README.md), section 2, from zero to a live run.
+Then `/menu`, `/status`, `/l_status`, `/arb_status`. Next: [section 5](#5-the-commands-by-what-you-want-to-do), or
+[arcus/README.md](arcus/README.md) section 2 for zero to a live run.
 
 ---
 
 ## 3. Run it on a server
 
-A server records around the clock and trades while your laptop is off. Recording needs no keys.
+A server records around the clock and trades while your laptop is off.
 
-**Pick the machine.** Ubuntu 24.04, 4 or more CPU cores, 8 GB of memory, and disk for the recording: about
-0.3–0.5 GB a day for both venues (10–15 GB a month). Pick a region both venues allow; `arcus region-check` asks Arcus,
-and `arcus/scripts/latency_map.py` shows how far the machine is from each venue.
-
-**Set it up** (once, as a normal user who can `sudo`). This is one machine that does everything; for a recorder and a
-trader on two small servers use [the step-by-step guide](#two-servers-step-by-step-one-records-one-trades) below.
+**One machine for everything:** Ubuntu 24.04, 4 or more cores, 8 GB of memory, and disk for the recording (about
+0.3–0.5 GB a day for both venues). It must be in a region Arcus allows.
 
 ```bash
 git clone https://github.com/dhruvamity/treading-bot.git
 cd treading-bot/arcus
-bash deploy/scripts/bootstrap.sh
-```
-
-The script installs the bots, keeps the clock in sync, closes the firewall to everything but SSH, creates `.env` from
-the template, and makes `tbot up` run after every reboot. It starts nothing and is safe to run again. (It has been
-syntax-checked but not yet run on a real server: read its 5 steps as they print.)
-
-**Fill in the keys, check, start:**
-
-```bash
-nano .env
-```
-
-```bash
-.venv/bin/arcus region-check
+bash deploy/scripts/bootstrap.sh   # installs, syncs the clock, firewall (SSH only), .env, `tbot up` after a reboot
+nano .env                          # or from your computer: scp arcus/.env USER@SERVER:treading-bot/arcus/.env
+.venv/bin/arcus region-check       # must say OK for Arcus perps
 .venv/bin/arcus doctor
 .venv/bin/tbot up
 ```
 
-To move your keys from the laptop instead of typing them: `scp arcus/.env USER@SERVER:treading-bot/arcus/.env`.
+The script starts nothing and is safe to run again. It has been syntax-checked but **not yet run on a real server**:
+read its five steps as they print.
 
-**Every day** (or from the phone: `/status`, `/l_status`): `.venv/bin/tbot status`.
-
-**Update the code:**
-
-```bash
-git pull
-make install
-.venv/bin/tbot down
-.venv/bin/tbot up
-```
-
-`tbot down` does not touch a running trade; `tbot down --all` stops the runs too (positions kept).
-
-**Things to know:**
-- **Gaps cannot be refilled.** Neither venue serves old order books, so what the recorder misses is gone. Keep a Mac
-  awake (plugged in, sleep off, lid open): a sleeping machine records nothing.
-- **Disk:** the recorders pause under 5 GB free. Nothing deletes old tape by itself. `tbot status` and every export
-  show the free space.
-- **Seed a new server** with the history you already have: `tbot export --full` on the old machine, copy the file,
-  `tbot import` on the new one.
+- **Every day:** `.venv/bin/tbot status` (or `/status`, `/l_status`, `/arb_status`), and `df -h`.
+- **Update:** `git pull && make install && .venv/bin/tbot down && .venv/bin/tbot up`. `tbot down` leaves a running
+  trade alone.
+- **Gaps cannot be refilled.** Neither venue serves old order books: what the recorder misses is gone.
+- **Disk:** the recorders pause under 5 GB free, and nothing deletes old tape by itself.
+- **After a reboot** `tbot up` comes back by itself; **the arbitrage executor does not** (start it again with
+  `/arb_start`; it picks its position up from its files).
 
 ### Two servers, step by step: one records, one trades
 
-Every command, in order. Two Ubuntu 24.04 servers, 1 vCPU and 1 GB each are enough: the **recorder** needs disk (10–15 GB a
-month for both venues) and no keys; the **trader** holds the keys and must be in a region Arcus allows. Log in with an SSH key.
-(`bootstrap.sh` and the link between two real servers have not been run on real servers yet: read what each step prints.)
+One small server cannot record, rank and trade at once (the two recorders took about 210 MB; one backtest of the
+busiest market's day peaked at 664 MB). Two Ubuntu 24.04 servers with 1 vCPU and 1 GB each are enough: the **recorder**
+needs disk (10–15 GB a month) and no keys; the **trader** holds the keys and must be in a region Arcus allows.
 
-**A. On both servers**, the same lines. A 1 GB machine gets a swap file first:
+**A. On both servers.** A 1 GB machine gets a swap file first:
 
 ```bash
 sudo fallocate -l 2G /swapfile && sudo chmod 600 /swapfile && sudo mkswap /swapfile && sudo swapon /swapfile
 echo '/swapfile none swap sw 0 0' | sudo tee -a /etc/fstab
-```
-```bash
 git clone https://github.com/dhruvamity/treading-bot.git
 cd treading-bot/arcus
 bash deploy/scripts/bootstrap.sh
 ```
 
-The script installs the three bots, keeps the clock in sync, closes the firewall to everything but SSH, creates `.env` from the
-template and makes `tbot up` run after every reboot. It starts nothing.
-
 **B. The recorder** (no keys go on this machine):
 
 ```bash
-cd ~/treading-bot/arcus
-.venv/bin/tbot role recorder               # writes BOT_ROLE=recorder into .env and says what this machine now is
-.venv/bin/tbot up                         # both recorders; no scans, no Telegram, no trading
-.venv/bin/tbot status                     # THIS MACHINE: recorder (records only); the rows climb
-cat data/scout/recorder.json              # last_msg_age_s a few seconds, paused_for_disk false
-df -h /                                   # recording pauses under 5 GB free
+.venv/bin/tbot role recorder       # writes BOT_ROLE=recorder into .env
+.venv/bin/tbot up                  # both recorders; no scans, no Telegram, no trading
+.venv/bin/tbot status              # "THIS MACHINE: recorder"; the rows climb
+cat data/scout/recorder.json       # last_msg_age_s a few seconds, paused_for_disk false
 ```
 
-**C. The trader.** Put the keys in `.env` first, either by typing them (`nano .env`) or by copying the file you already have,
-from your own computer: `scp arcus/.env USER@TRADER:treading-bot/arcus/.env`.
-
-| Line in `.env` | For |
-|---|---|
-| `ARCUS_ADDRESS`, `ARCUS_API_PRIVATE_KEY`, `ARCUS_ACCOUNT_INDEX` | Arcus, and the arbitrage's Arcus leg |
-| `LIGHTER_ADDRESS`, `LIGHTER_API_PRIVATE_KEY`, `LIGHTER_API_KEY_INDEX`, `LIGHTER_ACCOUNT_INDEX` | Lighter, and the arbitrage's Lighter leg |
-| `TELEGRAM_BOT_TOKEN`, `TELEGRAM_CHAT_ID`, `TELEGRAM_ALLOWED_USER_IDS` | control and alerts from the phone |
-| `PROFUNDING_API_KEY` | the arbitrage, when ProFunding decides the side or the market (`/arb_lev max max SPY`) |
-| `BOT_PILOT_LIVE`, `LBOT_LIVE`, `ARB_LIVE` | leave empty: paper. `1` only when you go live with that bot |
+**C. The trader.** Put your keys in `.env` first ([section 2](#2-install); leave the three live switches empty for
+paper), then:
 
 ```bash
-cd ~/treading-bot/arcus
-.venv/bin/tbot role trader                 # writes BOT_ROLE=trader into .env and says what this machine now is
-chmod 600 .env
-.venv/bin/arcus region-check              # must say OK for Arcus perps
-.venv/bin/arcus doctor                    # keys, account and clock; reads only
-.venv/bin/tbot up                         # the Telegram bot and the runs' guardian; no recording, no scans
-.venv/bin/tbot status                     # THIS MACHINE: trader (Telegram and trading)
+.venv/bin/tbot role trader         # writes BOT_ROLE=trader into .env
+.venv/bin/arcus region-check       # must say OK for Arcus perps
+.venv/bin/arcus doctor             # keys, account and clock; reads only
+.venv/bin/tbot up                  # the Telegram bot and the runs' guardian; no recording, no scans
+.venv/bin/tbot status              # "THIS MACHINE: trader"
 ```
 
-**Check it took.** `tbot up` prints `this machine: trader` as its first line and `tbot status` begins with
-`THIS MACHINE: trader`. A trader still starts two small `scout` processes, which watch its own runs and record nothing:
+Check that the role took: `tbot up` prints `this machine: trader` first, and its `scout: started …` line ends
+`[this machine is a trader: …]`, not `[always]`. If not: `tbot down`, `tbot role trader`, `tbot up`.
 
-| Line of `tbot up` | Right, on a trader | Wrong: the role was not set |
-|---|---|---|
-| `scout: started …` | `[this machine is a trader: …]` | `[always]` |
-| `lighter scout: started …` | `[it follows the other machine's lists; no recording here]` | `[it records, with no keys and no orders]` |
-
-If you see the right-hand column: `tbot down`, `tbot role trader`, `tbot up`. On a machine with under 3 GB of memory and no
-role, `tbot up` prints a warning saying so. (`tbot role` writes the line whatever the file looks like: an `.env` made before
-the roles existed has no `BOT_ROLE` line, and editing a line that is not there changes nothing.)
-
-**D. From the phone**, in the trader's Telegram chat: `/whoami`, then `/status`, `/l_status`, `/arb_status`. A paper run of each bot:
+**D. From the phone**, in the trader's Telegram chat: `/whoami`, `/status`, `/l_status`, `/arb_status`, then a paper
+run of each bot:
 
 ```
 /run SPY smart 0 50x paper
@@ -296,216 +220,230 @@ the roles existed has no `BOT_ROLE` line, and editing a line that is not there c
 /arb_start 120 120
 ```
 
-The last three are the funding arbitrage on SPY at the highest leverage, renewed every 3 funding payments, on paper with a
-pretend $120 a venue (section 9.5). Live runs come after each bot's own checks: sections 9.3 to 9.5.
+**E. Bring the recording home** every few days, for backtests and for the setups worth running. On the recorder
+`tbot export` prints the file and the `scp` line; on your own computer, from `treading-bot/arcus`:
 
-**E. Let the trader watch the recorder** (optional; it sends `⚠️ TWO MACHINES` to Telegram when the recorder goes quiet).
-On the **trader**:
-
-```bash
-.venv/bin/tbot sync key                   # prints one line starting ssh-ed25519
-```
-On the **recorder**, with that whole line in quotes:
-```bash
-.venv/bin/tbot sync allow 'ssh-ed25519 AAAA… treading-bot-sync'
-```
-Back on the **trader** (the recorder's user and address; its private address when both are in one network):
-```bash
-echo 'BOT_SYNC_FROM=USER@RECORDER-ADDRESS' >> .env
-.venv/bin/tbot sync pull                  # try it once
-.venv/bin/tbot sync status                # when it last worked
-.venv/bin/tbot down && .venv/bin/tbot up
-```
-The trader asks and nothing ever logs in to the trader; that key can run one command on the recorder and gets no shell. If it
-cannot connect, allow port 22 from the trader's address in the recorder's network rules.
-
-**F. Bring the recording home** every few days, for backtests and for the setups worth running. On the recorder:
-
-```bash
-.venv/bin/tbot export                     # prints the file name and the scp line
-```
-On your own computer, from `treading-bot/arcus`:
 ```bash
 scp USER@RECORDER:treading-bot/exports/tb-XXXX.tar ~/Downloads/
-.venv/bin/tbot import                     # must end "N complete, 0 short"
-.venv/bin/arcus recommend --scan          # the best setups, as lines to paste into Telegram
+.venv/bin/tbot import              # must end "N complete, 0 short"
+.venv/bin/arcus recommend --scan   # scans both bots; prints the best setups as lines to paste into Telegram
 ```
 
-**G. Update either server** after a change to the code:
+`recommend SPY QQQ` narrows it to markets, `--list cheapest` (or `volume`, `max`) to one list, `--capital 500` ranks
+for the money the trader holds. The scan is made as of the end of the recording, so export fresh before acting on it.
+
+**F. Let the trader watch the recorder** (optional: `⚠️ TWO MACHINES` in Telegram when the recorder goes quiet):
 
 ```bash
-cd ~/treading-bot/arcus
-git pull
-make install
-.venv/bin/tbot down
-.venv/bin/tbot up
+.venv/bin/tbot sync key                                       # on the trader: prints one line, ssh-ed25519 …
+.venv/bin/tbot sync allow 'ssh-ed25519 AAAA… treading-bot-sync'   # on the recorder: that line, in quotes
+echo 'BOT_SYNC_FROM=USER@RECORDER-ADDRESS' >> .env            # back on the trader
+.venv/bin/tbot sync pull && .venv/bin/tbot sync status && .venv/bin/tbot down && .venv/bin/tbot up
 ```
-
-`tbot down` leaves a running trade alone. After a reboot `tbot up` comes back by itself on both; **the arbitrage executor does
-not**: start it again with `/arb_start` (it picks its position up from its files; section 10.4).
 
 ### Two machines: one records, one trades
 
-One small server cannot record, rank and trade at once: on 2026-10-09 the two recorders together took about 210 MB,
-and a single backtest of the busiest market's day peaked at 664 MB. Split the work instead: put `BOT_ROLE` in each
-machine's `.env`, and `tbot up` starts only what that machine is for. All three bots follow it.
+`BOT_ROLE` in each machine's `.env` decides what `tbot up` starts there. Every part follows it.
 
-| `BOT_ROLE` | Records the tape | Ranks (scans, playbook) | Telegram, runs, guardian | Fits |
-|---|---|---|---|---|
-| `all` (default) | yes | yes | yes | 4 cores, 8 GB |
-| `trader` | no | no | yes | 1 core, 1 GB |
-| `recorder` | yes | no | no | 1 core, 1 GB plus disk |
-| `scout` | yes | yes | no | 4 cores, 8 GB |
+| `BOT_ROLE` | Records the tape | Ranks (scans, playbook) | Telegram, runs, arbitrage | Keys | Fits |
+|---|---|---|---|---|---|
+| `all` (default) | yes | yes | yes | yours | 4 cores, 8 GB |
+| `trader` | no | no | yes | yours | 1 core, 1 GB |
+| `recorder` | yes | no | no | none | 1 core, 1 GB plus disk |
+| `scout` | yes | yes | no | none | 4 cores, 8 GB |
 
-- **The keys live on the trader only.** A recorder or a scout machine needs none: leave its `.env` empty apart from
-  `BOT_ROLE`. It refuses to start a run, the autopilot or the arbitrage, and it never starts the Telegram bot
-  (Telegram hands each message to one poller, so two machines polling one bot would each see half of them).
-- **A trader needs nothing from the other machine to trade.** It reads the market list from the venues itself, so
-  `/run`, `/l_run`, the arbitrage, the stops and the guardian all work with the recorder switched off.
-- **What it does not have by itself is the lists** (`/top3`, the pilot's picks, both autopilots): they are worked out
-  from the tape, where the tape is. They reach the trader in one of two ways, below.
+- **The keys live on the trader only.** A recorder or scout refuses every run and never starts the Telegram bot.
+- **A trader needs nothing from the other machine to trade:** `/run`, `/l_run`, the arbitrage, the stops and the
+  guardian all work with the recorder switched off.
+- **What a trader lacks is the lists** (`/top3`, the pilot's picks, both autopilots): they come from the tape. Either
+  scan at home and paste the lines (step E), or hand the lists over: `arcus scout scan`, `arcus scout playbook`,
+  `tbot sync push USER@TRADER` from your computer; or run a `scout` machine and let the trader fetch them by itself
+  (step F with the scout's address; it then pulls about every two minutes). An old Arcus list is a warning; Lighter
+  refuses a pick from a scan over 90 minutes old.
+- **The link is one-way and narrow.** The trader asks; nothing ever logs in to the trader. Its key can run one command
+  on the other machine (`tbot sync serve`: a fixed list of small files, no shell). A broken-into recorder could hand
+  over wrong lists, nothing more: sizes and stops are worked out on the trader, and a live run still needs you.
+- **Not yet run between two real servers** (checked on one computer, each role in its own folder, 2026-10-10). On
+  the first day watch `tbot status` and `free -m` on both and `tbot sync status` on the trader.
 
-**A trader and a recorder (two small servers).** No connection between them is needed; the commands are in
-[the step-by-step guide above](#two-servers-step-by-step-one-records-one-trades). For lists, bring the tape to a bigger computer and scan
-there: `tbot export` on the recorder, `tbot import` at home ([section 4](#4-export-and-import)), then
+**A 1 GB server (for example Azure's free `Standard_B1s`).** One such VM runs free all month, a second one is paid.
+Pick a region Arcus allows and run `arcus region-check` before anything else. Add the swap file, set `BOT_ROLE=trader`
+(the default `all` would start recorders and scans, which 1 GB cannot hold), and never scan or backtest on it. The
+arbitrage alone runs on it: one light process that needs no recorder; its stop orders rest on the venues, so a dead VM
+does not leave a naked position, but nothing watches the holding rules until you start it again. To have it come back
+by itself after a reboot, add this to the crontab, knowing that `--yes` skips the typed `LIVE` and that a flat
+executor may open a position on its own:
 
-```bash
-.venv/bin/arcus scout scan
-.venv/bin/arcus scout playbook
-.venv/bin/tbot sync push USER@TRADER
+```
+@reboot sleep 60 && cd $HOME/treading-bot/arcus && .venv/bin/arbitrage start --live --yes >> logs/boot.out 2>&1
 ```
 
-`sync push` uses your own SSH login to the trader and hands it the lists you just made. The trader shows how old they
-are; an old Arcus list is a warning, not a refusal, and Lighter refuses a pick from a scan over 90 minutes old.
-
-**A trader and a scout machine.** The trader fetches the lists by itself, about every two minutes. Once:
-
-1. On the trader: `.venv/bin/tbot sync key` makes a key and prints its public half.
-2. On the scout machine: `.venv/bin/tbot sync allow 'ssh-ed25519 AAAA…'` (paste that line, in quotes).
-3. On the trader: put `BOT_SYNC_FROM=USER@SCOUT-ADDRESS` in `.env`, try `.venv/bin/tbot sync pull`, then
-   `tbot down` and `tbot up`. `.venv/bin/tbot sync status` (and `tbot status`) show when it last worked.
-
-**How the two are connected, and what could go wrong.**
-- The trader asks; nothing ever logs in to the trader. It opens no port for this.
-- The key from step 1 can do one thing on the other machine: run `tbot sync serve`, which sends a fixed list of
-  small files (the last scan and its report, the playbook, the markets' usual volatility, the Lighter lists and
-  ceilings, the recorders' health). It gets no shell and cannot read any other file, whatever it asks for.
-- The trader treats what arrives as untrusted: only those file names, each checked before it replaces the one here.
-- If the other machine were broken into, the attacker gets no key and no way into the trader. They could hand over
-  wrong lists. A run's sizes and stops are worked out on the trader from its own account and settings, a LIVE run
-  still needs you, and the autopilot stays inside its daily budget; treat a list as advice, as before.
-- If the other machine goes quiet for 20 minutes, or its recorder stops, the trader says so once in Telegram
-  (`⚠️ TWO MACHINES`) and again when it is back. It keeps trading; it starts no autopilot run on lists that stopped
-  arriving.
-- SSH's first connection trusts the address you typed (`accept-new`); after that a changed machine is refused.
-
-Checked on one computer on 2026-10-10 (each role run from its own folder, the lists handed over through the real
-commands); **not yet run between two real servers**. On the first try, watch `tbot sync status`.
-
-**A machine that only records (Docker).** The scout places no orders and needs no keys, so it can run anywhere with
-Docker. From `arcus/` (the Arcus scout, container `arcus-scout`) or `lighter/` (container `lighter-scout`):
-
-```bash
-docker compose up -d --build
-docker compose logs --tail 30 scout
-cat data/scout/recorder.json
-```
-
-Arcus's `data/scout/report.txt` is the latest ranking; `SCOUT_CAPITAL=500 docker compose up -d` ranks for a $500 account
-(the container has no keys, so the default is the $100 paper capital) and `SCOUT_WORKERS=2` caps the scan workers;
-`BOT_ROLE=recorder docker compose up -d` records without scanning (a small machine). The
-containers restart after a crash or reboot and report unhealthy if the recorder has not written for 15 minutes. **Do not
-use Docker on a machine that trades:** a container cannot see a native bot's process, so the pilot could not review,
-pause or resume a live run. Run `tbot up` there instead. To bring Docker results home:
-`docker compose exec scout tbot export --out data/exports`, then `tbot import` at home.
+**A machine that only records (Docker).** From `arcus/` (container `arcus-scout`) or `lighter/` (`lighter-scout`):
+`docker compose up -d --build`, then `cat data/scout/recorder.json`. `BOT_ROLE=recorder docker compose up -d` records
+without scanning; the other options are at the top of each `docker-compose.yml`. Bring its data home with
+`docker compose exec scout tbot export --out data/exports`. **Never use Docker on a machine that trades:** a container
+cannot see a native bot's process.
 
 ---
 
 ## 4. Export and import
 
-One command on the server packs the recordings, the trades, the state and the logs of all three bots into one file. One
-command at home takes it in. Use it to hand the data over for analysis, error hunting or refinement.
-
-**On the server:**
+One command on the server packs the recordings, the trades, the state and the logs of all three bots into one file;
+one command at home takes it in.
 
 ```bash
-.venv/bin/tbot export
+.venv/bin/tbot export              # on the server: prints the file (exports/tb-<date>-<time>Z.tar) and the scp line
+.venv/bin/tbot import              # at home, with the file in exports/ or ~/Downloads: must end "N complete, 0 short"
 ```
 
-It prints the file, for example `treading-bot/exports/tb-20261006-1612Z.tar` (the date and time are UTC), and the `scp`
-line to fetch it. **At home** (put the file in `treading-bot/exports/` or `~/Downloads`):
-
-```bash
-scp USER@SERVER:treading-bot/exports/tb-20261006-1612Z.tar ~/Downloads/
-```
-
-```bash
-.venv/bin/tbot import
-```
-
-It must end with `N complete, 0 short`. Then read `arcus/data/server-export/<name>/SUMMARY.md`.
+Then read `arcus/data/server-export/<name>/SUMMARY.md` first: the status screen, fills by day and market, runs and
+their cost, warnings and crashes, how complete the recording is.
 
 | Command | What it packs |
 |---|---|
 | `tbot export` | Everything **new since the last export** (the first time: everything) |
-| `tbot export --full` | Everything again |
-| `tbot export --days 2` | A small one: all state and trades, the logs and tape of the last 2 UTC days |
-| `tbot export --since 2026-10-01` | The same, from that UTC day on |
+| `tbot export --full` | Everything again (also how to seed a new server) |
+| `tbot export --days 2`, `--since 2026-10-01` | All state and trades, the logs and tape of those UTC days |
 | `tbot export --no-tape` | State, trades and logs only: a quick error report, a few MB |
-| `tbot export --tag tokyo` | Adds a word to the name: `tb-tokyo-20261006-1612Z.tar` |
-| `tbot export --out /mnt/disk` | Writes it somewhere else |
+| `tbot export --tag tokyo`, `--out /mnt/disk` | A word in the name; another folder |
 
-| Inside the file | What |
-|---|---|
-| `SUMMARY.md` | Read first: the status screen, the machine, how long a request takes to each venue, fills by day and market, runs and their cost, warnings and crashes in the logs, how complete the recording is |
-| `records.tar.gz` | For each bot (`arcus/`, `lighter/`, `arbitrage/`): state (databases, balances, settings), logs, scans, reports, config, fills and orders as CSV; plus `system/` (git commit and local changes, package versions, processes) |
-| `tape/` | The market tape of both venues, as recorded |
-| `coverage.csv`, `MANIFEST.json`, `files.csv` | Rows and hours per market and day; every tape file's size and SHA-256, written last so a cut-off copy is noticed |
-
-**What is never in it:** `.env`, `config/secrets.enc`, pid files. Every secret value in a `.env` is also blanked out of
-every log and database copy. The file does hold your trading history and wallet address, so do not post it.
-
-- **Safe while trading.** It only reads: databases through SQLite's own backup, each tape file through one handle.
-- **Disk.** It refuses to take the disk under 6 GB free, and keeps the newest 3 files in `exports/` (`--keep`).
-- **Import never touches this machine's own state or logs.** The tape is merged into the tape folders; a file already
-  there is kept, unless the incoming one is the same recorder part with more rows.
-- **Missed one?** Each plain export holds only what is new. If `tbot import` says the one before it was never
-  imported, import that one too, or run `tbot export --full`.
+- **Never in it:** `.env`, `config/secrets.enc`, pid files; every secret value is blanked out of the logs and
+  database copies. It does hold your trading history and wallet address, so do not post it.
+- **Safe while trading:** it only reads. It refuses to take the disk under 6 GB free and keeps the newest 3 files.
+- **Import never touches this machine's own state or logs.** The tape is merged; a file already there is kept.
+- **Missed one?** Each plain export holds only what is new: import the one before it too, or use `--full`.
+- **Not in it yet:** daytrade and delta neutral. Their state is small: copy `daytrade/state/` and
+  `deltaneutral/state/` by hand (`scp -r`).
 
 ---
 
-## 5. Where everything lives
+## 5. The commands, by what you want to do
 
+`.venv/bin/arcus`, `.venv/bin/lighter`, `.venv/bin/arbitrage`, `.venv/bin/daytrade` and `.venv/bin/deltaneutral` are
+the programs; the same jobs are `/…`, `/l_…`, `/arb_…`, `/dt_…` and `/dn_…` in the one Telegram bot. Each part's own
+guide has the detail.
+
+### Arcus
+
+| I want to | Terminal | Telegram |
+|---|---|---|
+| See the lists | `cat data/scout/report.txt` · `arcus pilot status` | `/top3`, `/cheapest`, `/maxvolume` |
+| Run the #1 setup on paper | `arcus pilot approve 1` (`--list cheapest` or `max`) | ▶️ on a list |
+| Run my own pick | `arcus run SESSION` (a file in `config/sessions/`) | `/run SPY smart 0 50x paper` |
+| Watch it | `arcus dashboard` | `/dashboard`, `/status`, `/positions`, `/orders` |
+| Stop, keep the position | `tbot down --all` | `/stop` |
+| Close the position and stop | `arcus pilot close` | `/closeall` (typed code) |
+| Cancel every order / close every position now | `arcus cancel-all --venue arcus` · `arcus flatten --venue arcus` (`--taker`) | `/cancelall` · `/closeall taker` |
+| Yesterday's result | `arcus report --date 2026-10-09` | `/yesterdayreport` |
+| Trade again after a safety stop | `arcus resume --venue arcus` | `/resumeaftersl` |
+
+A run's limits go on the same line: `/run BTC mid 0 40x live sl=10 tp=5 vol=100k` may lose $10, and stops once up $5
+or after $100,000 of volume. Setups are `mid`, `smart` or `grid`, a spread in bp, and optionally `long` or `short`.
+
+**Live** (real money; [arcus/README.md](arcus/README.md) section 2 has the reasons):
+
+```bash
+.venv/bin/arcus selftest                 # while the account is empty: every line PASS or INFO
+echo 'BOT_PILOT_LIVE=1' >> .env          # after depositing USDG into the subaccount the key is bound to
+.venv/bin/tbot down && .venv/bin/tbot up
+.venv/bin/arcus doctor pilot             # must end in READY
+.venv/bin/arcus pilot approve 1 --live   # prints the doctor's lines, then you type LIVE
 ```
-treading-bot/
-  README.md  Makefile  .github/workflows/ci.yml
-  arcus/             the Arcus bot, and where everything is installed, configured and started
-    arcus/           the code: scout/ core/ strategies/ venues/ telegram/ common/, cli.py, ops.py, export.py
-    config/          app.yaml (limits and sizing), sessions/, venues/, calendars/ (CPI, FOMC, earnings, holidays)
-    deploy/          the server setup script and the region check
-    scripts/         one-off tools: register an API key, move collateral, capture frames, latency map
-    tests/           offline tests          README.md  RUNBOOK.md  Dockerfile  docker-compose.yml  .env.example
-  lighter/           the Lighter bot (package lighter_bot): its engine, config, scripts, tests, README
-  arbitrage/         the funding arbitrage (package arbitrage): its code, tests, README
+
+From the phone: `/run SPY smart 0 50x live sl=10`, then type back the 6-digit code. Keep `sl=` small at first.
+
+### Lighter
+
+The same ideas on a zero-fee venue (the bot's cost is the spread). [lighter/README.md](lighter/README.md) has the rest.
+
+| I want to | Terminal | Telegram |
+|---|---|---|
+| Markets and lists | `lighter markets` · `lighter status` | `/l_top3`, `/l_cheapest`, `/l_maxvolume` |
+| Paper run, my pick | `lighter run SPY "smart +1"` (`--bg` for the background) | `/l_run SPY smart +1 50x paper sl=10` |
+| Paper run, list #1 | `lighter pilot approve 1` | ▶️ on a list |
+| Pause or resume new orders | `lighter pause` · `lighter unpause` | `/l_pause` · `/l_unpause` |
+| Stop (keep the position) / close | `lighter stop` · `lighter close` | `/l_stop` · `/l_closeall` |
+| Test one backtest by hand | `lighter backtest SPY "smart +1" --capital 100` | |
+
+**Live.** The key is registered on **your own computer**, never on a server (it asks for the wallet's private key once
+and does not store it):
+
+```bash
+.venv/bin/python ../lighter/scripts/register_key.py --slot 4    # prints three lines for .env
+echo 'LBOT_LIVE=1' >> .env               # after depositing USDG in the Lighter app
+.venv/bin/lighter doctor SPY             # READY, and "account tier" must say standard (0% fees)
+.venv/bin/lighter livetest               # real money, cents: every request the bot sends, once; you type LIVE
+.venv/bin/lighter run SPY "smart 0" --lev 2 --capital 16 --live --sl 1 --seconds 600 --flat   # the smallest real run
 ```
 
-Made at run time and never committed:
+### Arbitrage (funding between Arcus and Lighter)
 
-| Path | What |
-|---|---|
-| `arcus/.env` | Every credential and live switch |
-| `arcus/data/scout/tape/<MARKET>/<UTC day>/` | The Arcus tape: `bbo-`, `trades-`, `depth-*.npz` |
-| `arcus/data/scout/` | `report.txt` and `latest.json` (the last scan), `scans/`, `reports/`, `playbook.json`, `recorder.json` (recorder health) |
-| `arcus/state/` | `live.sqlite` and `paper.sqlite` (orders, fills, events), `balances.jsonl`, `settings.json`, `pilot.json`, `autopilot.json` |
-| `arcus/logs/` | `bot.jsonl` (everything), `decisions.jsonl` (why each order), `runs/` (one file a run), `scout.out`, `telegram.out` |
-| `lighter/data/tape/`, `lighter/data/scout/` | The Lighter tape and scans |
-| `lighter/state/`, `lighter/logs/` | Lighter runs (`run-<mode>.json`, `fills-<mode>.jsonl`, `status-<mode>.json`), settings, logs |
-| `arbitrage/state/`, `arbitrage/data/history/`, `arbitrage/settings.json` | The arbitrage's position and events, the funding history, your settings |
-| `arcus/data/server-export/<name>/` | What `tbot import` unpacked |
-| `exports/` | Files made by `tbot export` |
+One position: short where funding pays more, long on the other venue, the same size. It needs money on **both**
+venues and none of the recorders, trades stocks, indices and commodities only, and is held for days (a position needs
+about two days of funding to pay for its fills). The owner's mode instead renews SPY at the venues' highest leverage
+every three funding payments, which buys volume and open interest and **costs** about $35 per $1M traded.
+[arbitrage/README.md](arbitrage/README.md) has the numbers, the rules and every command.
 
-Run-time file names such as `bot.jsonl` are unchanged from earlier versions so an existing machine keeps its history.
-Anything else you keep at the top level of the repository (research folders, downloaded docs) is ignored by git.
+```bash
+.venv/bin/arbitrage scan                               # ranks the markets with your accounts' free collateral
+.venv/bin/arbitrage plan SPY --arcus 120 --lighter 120 # what it would open now: side, leverage, size, stop
+.venv/bin/arbitrage lev max max SPY                    # leverage, margin a venue, market, in one line
+.venv/bin/arbitrage cycle 3                            # close and reopen every 3 funding payments; `cycle off`
+.venv/bin/arbitrage start --arcus 120 --lighter 120    # PAPER, in the background, pretend $120 per venue
+.venv/bin/arbitrage status                             # what it does, funding paid, last events
+.venv/bin/arbitrage close                              # maker first; `close --now` crosses at once
+.venv/bin/arbitrage stop                               # stops the program; the position and its stop orders stay
+```
+
+**Live**, after several days on paper: `ARB_LIVE=1` in `.env`, `tbot down && tbot up`, then
+`arbitrage livetest SPY` (real money, smallest size; it tests the Lighter leg, the Arcus leg, then the engine on both,
+and each part runs only if the one before passed). Only then `arbitrage set max_notional_usd 30` and
+`arbitrage start --live`, raising the size one step at a time. Use an account of its own on each venue. The bot
+cannot move money between the venues: when they are uneven it opens nothing and sends
+`MOVE $50.00 from lighter to arcus` until it has arrived.
+
+### Daytrade and delta neutral
+
+**Daytrade** (SPY, QQQ, gold; paper only, it sends no orders; [daytrade/README.md](daytrade/README.md)):
+`tbot up daytrade` starts its paper bot (plain `tbot up` does too where `BOT_ROLE` is `all` or `trader`),
+`tbot down daytrade` stops it, `tbot status` or `/dt_status` shows it, `/dt_trades` lists its last 10 trades.
+
+**Delta neutral** (two markets: long on one venue, short on the other; [deltaneutral/README.md](deltaneutral/README.md)).
+Both venues rest limit orders, and stops sit at 75% of the way to liquidation. After each 24-hour cycle it says how
+much money to move, and from which venue to which.
+
+```bash
+.venv/bin/deltaneutral pair USO ORCL         # the two markets
+.venv/bin/deltaneutral start --now           # PAPER, in the background; the first cycle opens at once
+.venv/bin/deltaneutral status                # what it holds; `transfer` says what to move
+.venv/bin/deltaneutral skip 2026-10-22       # an earnings date: nothing is held over it
+.venv/bin/deltaneutral research              # the markets, every pair and the 30-day backtest
+```
+
+Live needs `DN_LIVE=1` in `.env`, an Arcus subaccount and a Lighter key that no other bot uses, then
+`deltaneutral start --live` with `LIVE` typed.
+
+### Autopilots, settings, routine
+
+```bash
+.venv/bin/arcus auto on --budget 5       # paper; --live for real money. Also: auto status, auto off
+.venv/bin/lighter auto on --budget 5
+```
+
+Off by default. Each spends a daily loss budget where the backtests say volume is cheapest now, and turns itself off
+when you take over with your own `/run`, `/stop` or `/closeall`. A trader machine's Arcus autopilot needs the
+playbook from a machine with the tape.
+
+| Settings of | Terminal | Telegram |
+|---|---|---|
+| Arcus (capital, stops, scan timing) | use Telegram | `/settings`, `/set daily_stop 5`, `/set NAME default` |
+| Lighter | `lighter set` · `lighter set position_stop 2` | `/l_settings`, `/l_set NAME VALUE` |
+| Arbitrage | `arbitrage settings` · `arbitrage set NAME VALUE` | `/arb_settings`, `/arb_set NAME VALUE` |
+| Delta neutral | `deltaneutral settings` · `deltaneutral set NAME VALUE` | `/dn_settings`, `/dn_set NAME VALUE` |
+| Live switches and keys | `.env` only, then `tbot down && tbot up` | never from Telegram |
+
+**Something looks wrong:** `tbot down --all`, then `arcus cancel-all --venue arcus` and `arcus flatten --venue arcus`
+(or `/closeall`). The [runbook](arcus/RUNBOOK.md), section 4, has the full emergency table.
 
 ---
 
@@ -515,25 +453,20 @@ Anything else you keep at the top level of the repository (research folders, dow
 |---|---|
 | A list is empty: "still recording" or "1 full day of data (needs 3)" | Each market needs 3 full recorded days. `/run` can still start it |
 | "Nothing passes all checks" | Normal in volatile hours. Wait for the next scan |
-| `report.txt` is old | Is the scout up? `tbot status`, then `tail logs/scout.out` |
-| The lists are old ("from a scan 3.2 h old") | Is the scout up (`tbot status`)? An old Arcus list is a warning and still runs; Lighter refuses a pick from a scan over 90 minutes old |
-| "not started: this machine is a recorder" | `BOT_ROLE` in `.env` says this machine does not trade. Start the run on the trader |
-| `sync: ssh failed (255)` on a trader | Can this machine reach the other on its SSH port? Was `tbot sync allow` run there with this machine's key (`tbot sync key` prints it again)? |
-| `⚠️ TWO MACHINES` in Telegram | The trader cannot fetch the lists, or the other machine's recorder is silent. Look at that machine: `tbot status` there |
+| `report.txt` or the lists are old | Is the scout up? `tbot status`, then `tail logs/scout.out` |
+| "not started: this machine is a recorder" | `BOT_ROLE` says this machine does not trade. Start the run on the trader |
+| `sync: ssh failed (255)` on a trader | Can it reach the other machine's SSH port? Was `tbot sync allow` run there with this machine's key? |
+| `⚠️ TWO MACHINES` in Telegram | The trader cannot fetch the lists, or the other machine's recorder is silent: `tbot status` there |
 | `doctor` says "never funded" | Deposit USDG to the subaccount the key is bound to |
 | Repeated `UNDERCOLLATERALIZED` | Not enough margin for the order size. The bot pauses that market by itself |
 | A run was paused | `/openpositions` shows why. It resumes after two passing scans |
 | The bot stopped after a loss | A kill or safe mode needs you: read `/logs`, then `/resumeaftersl` |
 | Lighter: "rate limited" | Lighter answered 429. The bot paused 60 s and requotes less |
-| After a reboot nothing runs | `tbot up`. The server setup script adds it to the crontab |
+| After a reboot nothing runs | `tbot up` (the server setup script adds it to the crontab) |
 | `tbot import` says SHORT or DAMAGED | Copy the file again; if it repeats, `tbot export --full` on the server |
-| `make install` fails building `cryptography` on an Intel Mac | The pin below 49 is in `arcus/pyproject.toml`: pull the latest code and run `make install` again |
-| `ws_error KeyError` reconnecting every few seconds | An old copy of the code meeting a market that went OFFLINE. Update the code |
-| `ws_degraded` in the log | Arcus marked a stream stale; the bot re-subscribes by itself. Occasional is normal, constant means venue trouble |
-| Something else | `tbot export --no-tape`, and read its `SUMMARY.md`, section 4 |
-
-Emergencies (orders must go now, the server is unreachable, a key leaked): [arcus/RUNBOOK.md](arcus/RUNBOOK.md),
-section 4.
+| `make install` fails building `cryptography` on an Intel Mac | Pull the latest code (the pin is in `arcus/pyproject.toml`) and install again |
+| `ws_degraded` in the log | Arcus marked a stream stale; the bot re-subscribes. Constant means venue trouble |
+| Something else | `tbot export --no-tape`, and read its `SUMMARY.md` |
 
 ---
 
@@ -542,25 +475,54 @@ section 4.
 From the repository root, with `make install` done:
 
 ```bash
-make test
-make lint
-make -C arcus type
+make test             # offline tests for every part (no network, no keys)
+make lint             # ruff
+make -C arcus type    # strict mypy on Arcus's core
 ```
 
-Offline tests for all three bots (no network, no keys), ruff, and strict mypy on Arcus's core. CI
-(`.github/workflows/ci.yml`) runs the same, and fails if a credential file or a Telegram token is tracked.
+CI (`.github/workflows/ci.yml`) runs the same, and fails if a credential file or a Telegram token is tracked.
 
 - Strategies return desired orders and never call a venue; the same objects run in the backtest, paper and live.
 - After changing the Arcus simulator, bump `SIM_VERSION` in `arcus/arcus/scout/scan.py` so cached days are recomputed.
-- No test may start a real `arcus`, `lighter` or `arbitrage` process: `arcus/tests/conftest.py` refuses it.
+- No test may start a real bot process (`arcus`, `lighter`, `arbitrage`, `daytrade`, `deltaneutral`):
+  `arcus/tests/conftest.py` refuses it.
 
 ---
 
-## 8. Upgrading from the old layout
+## 8. Where everything lives
 
-Before this layout the folders were `bot/` and `arb/`, the packages `bot`, `lbot` and `arb`, and the commands `bot …`,
-`bot lighter …`, `bot arb …`. `lighter/` kept its name. Data, state, logs, `.env` and settings are **not** tracked, so
-they stay where they were and must be moved. On each machine that has the old layout (this assumes the bots are stopped):
+```
+treading-bot/
+  README.md  Makefile  .github/workflows/ci.yml
+  arcus/         the Arcus bot, and where everything is installed, configured and started
+    arcus/       the code: scout/ core/ strategies/ venues/ telegram/ common/, cli.py, ops.py, export.py
+    config/      app.yaml (limits and sizing), sessions/, venues/, calendars/ (CPI, FOMC, earnings, holidays)
+    deploy/ scripts/ tests/   README.md  RUNBOOK.md  Dockerfile  docker-compose.yml  .env.example
+  lighter/       the Lighter bot (package lighter_bot): its engine, config, scripts, tests, README
+  arbitrage/     the funding arbitrage (package arbitrage): its code, tests, README
+  daytrade/      the SPY, QQQ and gold strategies, their backtests and the paper bot
+  deltaneutral/  the delta-neutral pair bot, its research and backtest
+```
+
+Made at run time and never committed:
+
+| Path | What |
+|---|---|
+| `arcus/.env` | Every credential and live switch |
+| `arcus/data/scout/` | `tape/<MARKET>/<UTC day>/` (the recording), `report.txt` and `latest.json` (the last scan), `playbook.json`, `recorder.json` |
+| `arcus/state/`, `arcus/logs/` | `live.sqlite` and `paper.sqlite` (orders, fills, events), settings, pilot and autopilot state; `bot.jsonl`, `decisions.jsonl` (why each order), `runs/` |
+| `lighter/data/`, `lighter/state/`, `lighter/logs/` | The Lighter tape and scans; its runs (`run-<mode>.json`, `fills-<mode>.jsonl`), settings, logs |
+| `arbitrage/state/`, `arbitrage/data/history/`, `arbitrage/settings.json` | The arbitrage's position and events, the funding history, your settings |
+| `daytrade/data/`, `daytrade/state/`, `daytrade/reports/` | Daytrade's price history, its paper trades and status, its study reports |
+| `deltaneutral/data/`, `deltaneutral/state/`, `deltaneutral/reports/`, `deltaneutral/settings.json` | The delta-neutral bot's prices, funding and costs; its state, cycles and events; its report; your settings |
+| `arcus/data/server-export/<name>/`, `exports/` | What `tbot import` unpacked; files made by `tbot export` |
+
+Anything else you keep at the top level of the repository (research folders, downloaded docs) is ignored by git.
+
+<details>
+<summary>Upgrading a machine from the old layout (<code>bot/</code>, <code>arb/</code>, before 8 Oct 2026)</summary>
+
+Data, state, logs, `.env` and settings are not tracked, so they must be moved by hand, with the bots stopped:
 
 ```bash
 cd treading-bot/bot && .venv/bin/bot down --all   # with the OLD code, before the pull
@@ -572,458 +534,6 @@ mv arb/data arb/state arb/settings.json arb/.env arbitrage/ 2>/dev/null
 cd arcus && make install && .venv/bin/tbot up
 ```
 
-Then delete what is left of `bot/` and `arb/` (an old `.venv` and caches). On a server also run
-`bash deploy/scripts/bootstrap.sh` once: it replaces the `@reboot … bot up` crontab line with `… tbot up`. The `.env`
-variable names, the log and database file names, and the export format are unchanged. Older exports still import.
-
----
-
-## 9. Tutorial: the commands, by what you want to do
-
-Read this top to bottom once; after that use it as a menu. Every terminal command runs from `treading-bot/arcus`.
-`.venv/bin/arcus`, `.venv/bin/lighter` and `.venv/bin/arbitrage` are the three programs; the same jobs are `/…`,
-`/l_…` and `/arb_…` in the one Telegram bot.
-
-**The model in six lines**
-1. Each bot has a **recorder** (writes the market tape, no keys) and a **scout** (backtests setups on the tape and ranks
-   them into lists). Both are started by `tbot up`.
-2. A **run** trades one setup on one market. You start it (Telegram, `pilot approve`, or `run`); the autopilot can too.
-3. **Paper** is the default everywhere: real prices, simulated orders. **Live** needs a switch in `.env`
-   (`BOT_PILOT_LIVE`, `LBOT_LIVE`, `ARB_LIVE`), a passing `doctor`, and a typed `LIVE` (or a code typed back in Telegram).
-4. Stopping and closing are different: **stop** cancels quotes and keeps the position; **close** also closes the position.
-5. Settings are changed from Telegram (`/set`, `/l_set`, `/arb_set`) or the terminal, never by editing files.
-6. If a machine is not for trading (`BOT_ROLE`), it refuses every run. See [section 3](#two-machines-one-records-one-trades).
-
-### 9.1 First half hour (your laptop or a server)
-
-```bash
-git clone https://github.com/dhruvamity/treading-bot.git
-cd treading-bot/arcus
-make install                 # one venv, all three bots
-cp .env.example .env && chmod 600 .env
-.venv/bin/arcus doctor       # reads only: says what is missing (keys are not needed for paper)
-.venv/bin/tbot up           # both scouts, and Telegram if its token is in .env
-.venv/bin/tbot status       # one screen: services, runs, last scan, balance
-```
-
-The recorders need about **3 full UTC days** before a market can appear in a list. Until then `/run`, `/l_run` and the
-arbitrage work at once, because they never wait for a scan. To stop everything: `.venv/bin/tbot down` (add `--all` to
-stop the runs too; positions are kept).
-
-### 9.2 Telegram, once
-
-1. Message **@BotFather**, `/newbot`, copy the token into `TELEGRAM_BOT_TOKEN` in `.env`.
-2. Send your new bot any message, open `https://api.telegram.org/bot<TOKEN>/getUpdates`, copy `chat.id` into
-   `TELEGRAM_CHAT_ID`.
-3. `.venv/bin/tbot down && .venv/bin/tbot up`, send `/whoami`, put your id in `TELEGRAM_ALLOWED_USER_IDS`, then
-   `.venv/bin/tbot down && .venv/bin/tbot up` again.
-
-Then `/menu`, `/status`, `/l_status`, `/arb_status`. `/set telegram_ui menu` swaps the long command list for a Home card.
-
-### 9.3 Arcus
-
-| I want to | Terminal | Telegram |
-|---|---|---|
-| See the lists | `cat data/scout/report.txt` · `.venv/bin/arcus pilot status` | `/top3` (most volume), `/cheapest`, `/maxvolume` |
-| What to run, as lines to paste | `.venv/bin/arcus recommend SPY` (add `--scan` after an import; [10.6](#106-recorder-vps--your-mac--trader-vps-the-workflow)) | |
-| Run the #1 setup on paper | `.venv/bin/arcus pilot approve 1` (`--list cheapest` or `--list max` for the other lists) | ▶️ on a list |
-| Run my own pick on paper | `.venv/bin/arcus run SESSION` (a file in `config/sessions/`) | `/run SPY smart 0 50x paper` |
-| Watch it | `.venv/bin/arcus dashboard` | `/dashboard`, `/status`, `/positions`, `/orders` |
-| Stop, keep the position | `.venv/bin/tbot down --all` | `/stop` |
-| Close the position and stop | `.venv/bin/arcus pilot close` | `/closeall` (typed code) |
-| Cancel every order now | `.venv/bin/arcus cancel-all --venue arcus` | `/cancelall` |
-| Close every position now | `.venv/bin/arcus flatten --venue arcus` (add `--taker` for IOC) | `/closeall taker` |
-| Yesterday's result | `.venv/bin/arcus report --date 2026-10-09` | `/yesterdayreport` |
-| Trade again after a safety stop | `.venv/bin/arcus resume --venue arcus` | `/resumeaftersl` |
-
-A run's limits go on the same line: `/run BTC mid 0 40x live sl=10 tp=5 vol=100k` means it may lose $10, stops once up $5
-or once it traded $100,000. Setups are `mid`, `smart` or `grid`, a spread in bp, and optionally `long` or `short`.
-
-**Going live on Arcus, in this order** (real money; the Arcus README, section 2, has the reasons):
-```bash
-.venv/bin/arcus selftest                 # while the account is empty: every line PASS or INFO
-# deposit USDG into the subaccount your API key is bound to (use one the bot has to itself)
-echo 'BOT_PILOT_LIVE=1' >> .env
-.venv/bin/tbot down && .venv/bin/tbot up
-.venv/bin/arcus doctor pilot             # must end in READY
-.venv/bin/arcus pilot approve 1 --live   # prints the doctor's lines, then you type LIVE
-```
-From the phone: `/run SPY smart 0 50x live sl=10`, then type back the 6-digit code within 2 minutes. Keep `sl=` small
-for the first run. To turn live off again, change the line to `BOT_PILOT_LIVE=0` (the last line of a name wins).
-
-### 9.4 Lighter
-
-Same ideas, a different venue (0% fees, so the bot's cost is the spread). Paper needs no keys.
-
-| I want to | Terminal | Telegram |
-|---|---|---|
-| Markets and their minimum order | `.venv/bin/lighter markets` | |
-| Lists | `cat ../lighter/data/scout/report.txt` · `.venv/bin/lighter status` | `/l_top3`, `/l_cheapest`, `/l_maxvolume` |
-| Paper run, my pick | `.venv/bin/lighter run SPY "smart +1"` (Ctrl-C stops; `--bg` for the background) | `/l_run SPY smart +1 50x paper sl=10` |
-| Paper run, list #1 | `.venv/bin/lighter pilot approve 1` | ▶️ on a list |
-| Pause or resume new orders | `.venv/bin/lighter pause` · `unpause` | `/l_pause` · `/l_unpause` |
-| Stop (keep position) / close | `.venv/bin/lighter stop` · `.venv/bin/lighter close` | `/l_stop` · `/l_closeall` |
-| Autopilot | `.venv/bin/lighter auto on --budget 5` (paper unless `--live`) | `/l_auto` |
-| Test one backtest by hand | `.venv/bin/lighter backtest SPY "smart +1" --capital 100` | |
-
-**Going live on Lighter.** A Lighter key is registered on **your own computer** (it asks for your wallet's private key once and
-never stores it), never on a server:
-```bash
-.venv/bin/python ../lighter/scripts/register_key.py --slot 4    # prints three lines for .env
-# put them in .env, deposit USDG on Robinhood Chain in the Lighter app, then:
-echo 'LBOT_LIVE=1' >> .env
-.venv/bin/lighter doctor SPY             # READY, and "account tier" must say standard (0% fees)
-.venv/bin/lighter livetest               # real money, minimum size, ~cents: every request the bot sends, once; type LIVE
-```
-Read the `PASS`/`FAIL` report it prints (also in `lighter/reports/`). When it is clean, the smallest real run:
-```bash
-.venv/bin/lighter run SPY "smart 0" --lev 2 --capital 16 --live --sl 1 --seconds 600 --flat
-```
-That is $16 at 2x: orders of about $13, at most $26 held, ten minutes, closed at the end. Afterwards read
-`lighter/logs/run-live-<day>.jsonl` and `lighter/state/fills-live.jsonl`. `.venv/bin/lighter livetest --only limit,cancel-all`
-runs just the steps you name (`--help` lists them). `.venv/bin/lighter leverage SPY` shows the account's leverage on a market and
-`leverage SPY 2` sets it (needs `LBOT_LIVE=1`). If a `lighter/.env` exists it wins over `arcus/.env`.
-
-### 9.5 Arbitrage (funding between Arcus and Lighter)
-
-It holds one position: short where funding pays more, long on the other venue, the same size. It needs money on **both** venues,
-and none of the recorders. It trades stocks, indices and commodities only, never crypto (`arbitrage set rwa_only 0` lifts that).
-Both venues pay funding every hour and a position needs about two days to pay for its fills, so it is held for days, until the
-difference is gone (`arbitrage study` shows the numbers; arbitrage README, section 2).
-Since 10 Oct 2026 it uses the highest leverage both venues allow at that hour unless you set less (`arbitrage lev 10`,
-Telegram `/arb_lev 10`): SPY is 50x while the stock market is open and 33x while it is closed, the same number on both venues.
-For anything but SPY and QQQ set `stop_sigmas 3` first (arbitrage README, section 2).
-
-**The owner's mode: SPY, highest leverage, renewed every three funding payments, side from ProFunding.** `lev max max SPY` and
-`cycle 3` below (Telegram `/arb_lev max max SPY`, `/arb_cycle 3`). The line is leverage, margin a venue, market; with no market
-(`/arb_lev max max`) ProFunding's best stock, index or commodity is opened instead. It buys volume and open interest and
-costs money: at $240 about $141,000 of volume a day for about $4.90 a day, or $90,000 for $3.10 with `/arb_lev 30 max SPY` (arbitrage
-README, sections 2a and 3a). Near its stop (from 80% of the way, `stop_early`) it closes with limit orders, which pay no fee; at
-the stop itself it uses taker orders.
-```bash
-.venv/bin/arbitrage scan                          # ranks the markets with your accounts' free collateral
-.venv/bin/arbitrage plan SPY --arcus 120 --lighter 120
-.venv/bin/arbitrage history --update              # the funding history (the first time without --update: about an hour)
-.venv/bin/arbitrage backtest --capital 240        # the rules replayed on it
-.venv/bin/arbitrage history --profunding          # ProFunding's last 30 days of the same rates, as a check
-.venv/bin/arbitrage study --capital 240           # the best market of each hour: how long to hold, how much leverage
-.venv/bin/arbitrage fills SPY QQQ                 # what its orders cost on recorded order books
-.venv/bin/arbitrage cyclecost SPY QQQ                 # the highest leverage, closed and reopened on a clock: what that costs
-.venv/bin/arbitrage basis SPY QQQ                 # Arcus's price against Lighter's, by the minute and over each weekend
-.venv/bin/arbitrage lev max max SPY              # leverage, margin a venue, market in one line; no market = ProFunding's best
-.venv/bin/arbitrage only SPY QQQ                  # the markets it may open and no others (`only all` lifts it)
-.venv/bin/arbitrage cycle 3                       # close and reopen every 3 funding payments (hours); `cycle off`
-.venv/bin/arbitrage side profunding               # ProFunding decides which venue is short (`side venues` = their own rates)
-.venv/bin/arbitrage start --arcus 120 --lighter 120   # PAPER, in the background, pretend $120 per venue
-.venv/bin/arbitrage status                        # what it does, funding paid, last events
-.venv/bin/arbitrage set max_hold_h 72             # any setting, applied to the open position within ~10 s
-.venv/bin/arbitrage skip CASHCAT                  # a market it must never open
-.venv/bin/arbitrage close                         # maker first; `close --now` crosses at once
-.venv/bin/arbitrage stop                          # stops the program; the position and the venues' stop orders stay
-```
-Run paper for several days first. **Live**, in this order:
-```bash
-echo 'ARB_LIVE=1' >> .env
-.venv/bin/tbot down && .venv/bin/tbot up        # so Telegram sees the switch
-.venv/bin/arbitrage livetest SPY                  # real money, smallest size, cents; type LIVE once
-```
-`livetest` runs three parts in turn and writes a report for each to `arbitrage/reports/`; a part runs only if the one before
-passed and ended flat:
-1. **lighter**: the Lighter adapter alone (proven on 2026-10-10: 9 of 9).
-2. **arcus**: the Arcus adapter alone: a resting post-only order and its replacement, an IOC order that opens a position, the
-   position stop and take-profit pair, cancel-all, the reduce-only close. This is the part never run on the venue before.
-3. **engine**: the executor itself on both venues: it opens a position (long Arcus, short Lighter), checks with each venue what it
-   holds, waits for the stops on both, holds 30 s, closes it with maker orders; then the same the other way round, closed with taker
-   orders at once (`close --now`).
-
-Both accounts must have no order and no position on that market and a few dollars of margin; Arcus's stock perps trade in the
-US session, so run it then (`arbitrage livetest ETH` if you want a 24 h market). One part alone: `--what arcus`, `--what engine`.
-
-Only then raise the size, one step at a time, and stay at each step until a full cycle (open, hold, a funding payment, close) has
-run and the money matches `/arb_status`:
-```bash
-.venv/bin/arbitrage set max_notional_usd 30       # a first real position
-.venv/bin/arbitrage start --live                  # type LIVE.  Phone: /arb_start live, then the code
-.venv/bin/arbitrage status --live
-# then 100, then 300, then 1000 ...; 0 means no limit, the last step
-```
-**What no test here proves:** that a stop order actually fires and closes the other leg on the real venues; weeks of holding
-(funding credited, margin moving, the venues' rules changing); a venue going down while a position is open; fills at a size larger
-than the order book shows; and the money you must move by hand between the venues. Each size step is how you meet those.
-Moving money between the venues is yours: when a position closes and one side holds under 40% of the total (the two more than 20%
-apart), the bot opens nothing, sends the exact amount and direction to Telegram (`MOVE $50.00 from lighter to arcus`), repeats it
-every 30 minutes and goes on by itself once the money has arrived. The venues cannot send to each other (arbitrage README, 6a). Use an account of its own
-on each venue (or stop the market-making bots), because two programs on one account each treat the other's position as theirs.
-
-### 9.6 Autopilots
-
-Off by default. Each spends a daily loss budget only where the backtests say volume is cheapest now, and turns itself off when you
-take over with your own `/run`, `/stop` or `/closeall`.
-```bash
-.venv/bin/arcus auto on --budget 5          # paper; add --live for real money (needs BOT_PILOT_LIVE=1, then a typed confirmation)
-.venv/bin/arcus auto status
-.venv/bin/arcus auto off
-.venv/bin/lighter auto on --budget 5        # the same for Lighter
-```
-On a trader machine the Arcus autopilot also needs the playbook from a machine with the tape ([section 10.6](#106-recorder-vps--your-mac--trader-vps-the-workflow)).
-
-### 9.7 Settings
-
-| What | Terminal | Telegram |
-|---|---|---|
-| Arcus (capital, stops, scan timing, list cost) | edit nothing; use Telegram | `/settings`, `/set daily_stop 5`, `/set NAME default` |
-| Lighter | `.venv/bin/lighter set` · `lighter set position_stop 2` | `/l_settings`, `/l_set NAME VALUE` |
-| Arbitrage | `.venv/bin/arbitrage settings` · `arbitrage set NAME VALUE` | `/arb_settings`, `/arb_set NAME VALUE`, `/arb_hold 72` |
-| Live switches and keys | `.env` only (then `tbot down && tbot up`) | never from Telegram |
-
-### 9.8 Routine
-
-**Daily (2 minutes):** `.venv/bin/tbot status` (or `/status`, `/l_status`, `/arb_status`), then `df -h` on a server.
-**Weekly:** `.venv/bin/tbot export`, copy the file off the server (`scp`), `.venv/bin/tbot import` at home, read its `SUMMARY.md`.
-**After an update:** `git pull && make install && .venv/bin/tbot down && .venv/bin/tbot up`.
-**Something looks wrong:** `.venv/bin/tbot down --all`, then `cancel-all` and `flatten` (section 9.3), `/closeall`. The
-[runbook](arcus/RUNBOOK.md) has the full emergency table.
-
----
-
-## 10. Two small servers: Azure free tier and the arbitrage alone
-
-### 10.1 What the free tier gives, and three things to check first
-
-Azure's free account has offered, for the first 12 months, **750 hours a month of a `Standard_B1s` Linux VM (1 vCPU, 1 GiB)**
-and two 64 GiB disks. These terms change: read your account's "free services" page before you rely on them. Three consequences:
-
-1. **The 750 hours are shared by all your B1s VMs.** One VM running all month is about 744 hours, so it fits. A second VM
-   running all month does not: from the 31st day you pay for the second (a few dollars a month). One free server, not two.
-2. **Pick a region where Arcus is allowed.** Arcus is not available in the U.S., Canada, the United Kingdom and other restricted
-   places, and it checks the IP of the machine that trades. Choose an Azure region outside them, then run
-   `.venv/bin/arcus region-check` on the VM before anything else: it must say `OK for Arcus perps`. Lighter has no such check
-   here: read its terms for your location yourself. If B1s is "not available" in a region, try another allowed one.
-3. **A B1s earns CPU credits slowly (about 10% of the CPU).** Installing, `arbitrage history` and a backtest are bursts; the
-   executor itself mostly waits. Do not run scans or backtests on it.
-
-### 10.2 Can the arbitrage run alone on it? Yes, with these limits
-
-- **Paper: yes.** **Live: yes**, because the executor is one light Python process that checks the two venues every 10 to
-  15 seconds while it waits (every second while entering or leaving a position) and needs no recorder, no scan and no lists. Run
-  `arbitrage livetest` first (section 9.5): it tests each venue's side and then the engine on both, at the smallest size, and then
-  raise `max_notional_usd` step by step. Until you have run it, only the Lighter leg has traded real money.
-- **Its protection lives on the venues, not on the VM.** Both legs carry stop and take-profit orders placed on Arcus and Lighter, so
-  a dead or rebooted VM does not leave a naked position. While the program is down nothing watches the exit rules (hold time, funding),
-  so restart it after a reboot (10.4).
-- **Set `BOT_ROLE=trader`.** The default `all` would also start the recorders and scans, which a 1 GB machine cannot hold (one
-  backtest of the busiest market's day peaked at 664 MB). A trader starts none of that.
-- **Memory.** Not measured on a B1s. Importing the programs takes about 40 MB (arbitrage), 48 MB (Arcus), 27 MB (Lighter) and 57 MB
-  (the Telegram bot) on a Mac, and a running process grows beyond that. Four processes plus Ubuntu should fit in 1 GiB, with little
-  to spare, so **add a swap file first** (below) and measure with `free -m` and `ps -eo rss,cmd --sort=-rss | head` after a day.
-
-### 10.3 Set up the VM
-
-The whole two-server setup, command by command, is in [section 3](#two-servers-step-by-step-one-records-one-trades); this part is what is particular to Azure.
-
-In the Azure portal: **Create a virtual machine** → image **Ubuntu Server 24.04 LTS**, size **Standard_B1s**, authentication **SSH
-public key**, an allowed region, OS disk 64 GiB (it is free), inbound port **22 only**. After it exists, in its Networking page edit the
-SSH rule to allow only your own IP address. Then:
-
-```bash
-ssh azureuser@VM-ADDRESS
-```
-```bash
-sudo fallocate -l 2G /swapfile && sudo chmod 600 /swapfile && sudo mkswap /swapfile && sudo swapon /swapfile
-echo '/swapfile none swap sw 0 0' | sudo tee -a /etc/fstab
-free -m                                   # Swap: 2047 shows it worked
-```
-```bash
-git clone https://github.com/dhruvamity/treading-bot.git
-cd treading-bot/arcus
-bash deploy/scripts/bootstrap.sh          # packages, clock, uv, make install, firewall (SSH only), @reboot tbot up
-```
-The script has been syntax-checked but not yet run on a real server: read its five steps as they print.
-
-### 10.4 The arbitrage alone, step by step
-
-```bash
-cd ~/treading-bot/arcus
-nano .env
-```
-Fill in only what the arbitrage uses, and keep the file private (`chmod 600 .env`, done by the script):
-
-| Line | Value |
-|---|---|
-| `BOT_ROLE` | `trader` |
-| `ARCUS_ADDRESS`, `ARCUS_API_PRIVATE_KEY`, `ARCUS_ACCOUNT_INDEX` | your Arcus API key and the subaccount it trades |
-| `LIGHTER_ADDRESS`, `LIGHTER_API_PRIVATE_KEY`, `LIGHTER_API_KEY_INDEX`, `LIGHTER_ACCOUNT_INDEX` | your Lighter key (registered on your own computer, 9.4) |
-| `TELEGRAM_BOT_TOKEN`, `TELEGRAM_CHAT_ID`, `TELEGRAM_ALLOWED_USER_IDS` | for alerts and control from the phone |
-| `ARB_LIVE` | leave empty for paper; `1` only when you go live |
-
-For paper you need no keys at all (not even Telegram). Check, then start:
-```bash
-.venv/bin/arcus region-check              # OK for Arcus perps
-.venv/bin/arcus doctor                    # reads only
-.venv/bin/arbitrage scan                  # does the VM reach both venues?
-.venv/bin/arbitrage start --arcus 120 --lighter 120    # paper
-.venv/bin/arbitrage status
-```
-Choose one of two ways to run it:
-- **With Telegram** (control and alerts from the phone): `.venv/bin/tbot up telegram`. That starts the Telegram bot alone, with no
-  scouts; the executor itself is started with `arbitrage start` or `/arb_start`.
-- **Without Telegram**: skip `tbot up`. The executor posts its own alerts if the token is in `.env`; control it by `ssh` with
-  `arbitrage status`, `close`, `stop`.
-
-Live is the same as section 9.5 (`ARB_LIVE=1`, `arbitrage set max_notional_usd 30`, `arbitrage start --live`, type `LIVE`; or
-`/arb_start live` and the code). The cron line the script installed restarts `tbot up` after a reboot but **not the executor**. After a
-reboot, start it again (`/arb_start live` and the code, or `arbitrage start --live`): it picks up the position from its `state/` files.
-If you want it back by itself, add this line with `crontab -e`, knowing that `--yes` skips the typed `LIVE` and that a flat executor
-may open a new position on its own:
-
-```
-@reboot sleep 60 && cd /home/azureuser/treading-bot/arcus && .venv/bin/arbitrage start --live --yes >> logs/boot.out 2>&1
-```
-
-### 10.5 What each machine role needs
-
-| | Recorder | Trader | Scout | All |
-|---|---|---|---|---|
-| `BOT_ROLE` | `recorder` | `trader` | `scout` | empty |
-| Keys in `.env` | none | all of yours | none | all of yours |
-| Records the tape | yes | no | yes | yes |
-| Scans and ranks | no | no | yes | yes |
-| Telegram, runs, arbitrage | no | yes | no | yes |
-| Fits | 1 vCPU, 1 GiB, big disk | 1 vCPU, 1 GiB | 4 cores, 8 GiB | 4 cores, 8 GiB |
-
-### 10.6 Recorder VPS → your Mac → trader VPS (the workflow)
-
-Three machines, one job each. The servers stay small because nothing heavy runs on them.
-
-| Machine | `BOT_ROLE` | Keys | Job |
-|---|---|---|---|
-| Recorder VPS (24/7) | `recorder` | none | Records both venues. Nothing else |
-| Your Mac | none (no `tbot up`) | none | Takes the recording in, runs the backtests, tells you what to run |
-| Trader VPS | `trader` | all of yours | Telegram, your runs, the arbitrage |
-
-**What the recorder keeps.** Not candles: finer data from which any candle can be made. Arcus: best bid and offer, every trade, the top
-10 book levels. Lighter: the same with the top 20 levels, plus mark, index and funding. About 0.3–0.5 GB a day for both.
-
-**1. Once: the recorder.** After the clone and bootstrap of 10.3:
-```bash
-cd ~/treading-bot/arcus
-echo 'BOT_ROLE=recorder' >> .env
-.venv/bin/tbot up
-.venv/bin/tbot status                     # THIS MACHINE: recorder; rows climbing
-```
-**2. Once: your Mac.** The normal install (section 2): `make install`. You need no keys and you do not run `tbot up` there.
-
-**3. Every few days (or whenever you want fresh advice).** On the recorder:
-```bash
-.venv/bin/tbot export                     # prints the file name and the scp line; only what is new since the last export
-```
-On your Mac, from `treading-bot/arcus`:
-```bash
-scp azureuser@RECORDER:treading-bot/exports/tb-XXXX.tar ~/Downloads/
-.venv/bin/tbot import                     # must end "N complete, 0 short"
-.venv/bin/arcus recommend --scan           # scans both bots, then prints the best setups of each list
-```
-`recommend` prints, for each list (🚀 Most Volume, 💎 Cheapest, 🔥 Max Volume) and each bot, the best setups with the line to paste:
-```
- LIGHTER  (scan as of 2026-10-10 07:44 UTC, at $100 of capital)
-  1. SPY · Smart +0.5 · 50x   $3,714,790/day, cost $0.00 per $1,000, 4,615 fills/day
-       paper:  /l_run SPY smart +0.5 50x paper
-       live:   /l_run SPY smart +0.5 50x live sl=5
-```
-For one asset, name it: `.venv/bin/arcus recommend SPY QQQ` (add `--scan` after a new import; without it, it reprints the last scan).
-One list: `--list cheapest` (or `volume`, `max`). More per list: `-n 5`. Rank for the money the trader account will hold:
-`--scan --capital 500`.
-
-**4. On the phone.** Paste the line into the trader's Telegram chat: first the `paper` line, and when you like it the `live` line (it
-asks for the 6-digit code). `sl=` is the most that run may lose in dollars; the line suggests the daily stop at the scan's capital.
-Add `tp=5` (stop once up $5) or `vol=100k` (stop after that volume) if you want them.
-
-**What to know when reading it.**
-- The scan is made **as of the end of the recording** (`--as-of tape`): "is the market trending or wild right now" means then, not
-  now. Export fresh before you act; an export a day old is fine for the long-run numbers and stale for the "now" checks.
-- The numbers are backtests on recorded books, and Arcus's matched its largest live run within 11% on volume and 3% on cost. Lighter's
-  rest on fewer days. Not promises.
-- The first scan on a big import takes the longest; completed days are cached and later scans only redo the newest day.
-- The tape grows on the Mac by the same 10–15 GB a month: keep the room, and delete old tape on the servers only after an import ended
-  `0 short`.
-- `recommend` only reads. It starts nothing and uses no key.
-- The lists on the trader itself (`/top3`) stay empty in this workflow: it never scans. You get the advice from your Mac, as lines to paste.
-
-### 10.7 Linking a recorder and a trader (optional)
-
-This is the optional link between the two servers, for health alerts (or for lists from a `scout` machine). Two 1 GiB servers: the recorder keeps the tape (about 0.3–0.5 GB a day for both venues; the two recorders took about 210 MB of memory on
-2026-10-09) and the trader trades. **Read this first:** a recorder does not rank, so the link between them carries only its health,
-not lists. Lists come from a machine that scans, and a 1 GiB server cannot scan. You have three choices:
-
-| Lists for the trader | How | Cost |
-|---|---|---|
-| None | Run your own picks: `/run`, `/l_run`, the arbitrage. They never need a list | nothing |
-| From your computer | Export from the recorder, import, scan and push at home (below) | a few commands every day or two |
-| From a `scout` machine | A 4 core, 8 GiB server that records and scans; the trader fetches by itself ([section 3](#two-machines-one-records-one-trades)) | a bigger server |
-
-With the Azure free tier only one of the two is free (10.1), so expect to pay for one of them.
-
-**1. Put both in the same region and virtual network** (the portal's default network does this). Then they can talk on private addresses
-and the recorder never needs a public SSH rule for the trader. Note the recorder's private address (the VM's Networking page, for
-example `10.0.0.4`).
-
-**2. The recorder** (no keys). After the clone and the bootstrap of 10.3:
-```bash
-cd ~/treading-bot/arcus
-echo 'BOT_ROLE=recorder' >> .env
-.venv/bin/tbot up                         # both recorders, no scans, no Telegram
-.venv/bin/tbot status                     # "THIS MACHINE: recorder", rows climbing
-cat data/scout/recorder.json               # last_msg_age_s a few seconds, paused_for_disk false
-df -h /                                    # it pauses itself under 5 GB free
-```
-
-**3. The trader.** After the same clone and bootstrap:
-```bash
-cd ~/treading-bot/arcus
-nano .env                                  # your keys, Telegram, and the next line
-echo 'BOT_ROLE=trader' >> .env
-.venv/bin/tbot up
-```
-
-**4. Connect them** (the trader asks; nothing ever logs in to the trader). On the **trader**:
-```bash
-.venv/bin/tbot sync key                   # makes a key and prints its public line (ssh-ed25519 AAAA…)
-```
-On the **recorder**, paste that whole line in quotes:
-```bash
-.venv/bin/tbot sync allow 'ssh-ed25519 AAAA… treading-bot-sync'
-```
-That key can run one thing on the recorder, `tbot sync serve`, with no shell. Back on the **trader**:
-```bash
-echo 'BOT_SYNC_FROM=azureuser@10.0.0.4' >> .env      # the recorder's user and private address
-.venv/bin/tbot sync pull                  # try it once
-.venv/bin/tbot sync status                # when it last worked
-.venv/bin/tbot down && .venv/bin/tbot up # from now on it fetches by itself every ~2 minutes
-```
-What this gives you with a recorder at the other end: the trader sees the recorder's health and sends `⚠️ TWO MACHINES` to Telegram if the
-recorder goes silent for 20 minutes. If the SSH rule blocks the trader, allow port 22 from the trader's address in the recorder's
-network rules. The first connection trusts the address you typed; after that a changed machine is refused.
-
-**5. Get lists from your computer** (only if you want them). On the recorder, once a day or two:
-```bash
-.venv/bin/tbot export                     # prints the file and the scp line
-```
-At home:
-```bash
-scp azureuser@RECORDER:treading-bot/exports/tb-XXXX.tar ~/Downloads/
-cd treading-bot/arcus
-.venv/bin/tbot import                     # must end "N complete, 0 short"
-.venv/bin/arcus scout scan
-.venv/bin/arcus scout playbook
-.venv/bin/tbot sync push azureuser@TRADER-ADDRESS
-```
-`sync push` uses your own SSH login to the trader and hands it the lists. The trader shows how old they are; an old Arcus list is a
-warning, a Lighter list over 90 minutes old is refused. The tape also stays on the recorder: export weekly and copy the files home, because
-nothing deletes old days and the disk fills (recording pauses under 5 GB free).
-
-### 10.8 What has and has not been checked
-
-Checked on one computer (each role run from its own folder, lists handed over through the real commands), **not on two real servers**,
-and `bootstrap.sh` has not run on a real server. On the first day watch: `tbot status` on both, `tbot sync status` on the trader,
-`free -m` and `df -h` on both, and a `⚠️ TWO MACHINES` message in Telegram. If something is off, run `tbot export --no-tape` on either
-machine and read its `SUMMARY.md`.
+Then delete what is left of `bot/` and `arb/`, and on a server run `bash deploy/scripts/bootstrap.sh` once (it
+replaces the `@reboot … bot up` crontab line). Variable names, file names and the export format are unchanged.
+</details>

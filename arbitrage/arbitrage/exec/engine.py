@@ -618,9 +618,9 @@ class Engine:
                         self._begin_exit(f"{name} would not take the stop orders", urgent=False)
                         return
         held_h = (now - st.opened_at) / 3600
-        if s.max_hold_h > 0 and held_h >= s.max_hold_h:
-            # the time limit needs no market data: checked every loop, so `arbitrage set max_hold_h` acts at once and a
-            # venue that cannot be read does not keep the position past it
+        if (s.max_hold_h > 0 and held_h >= s.max_hold_h) or (s.cycle_h > 0 and held_h >= s.cycle_h):
+            # the time limit and the clock need no market data: checked every loop, so `arbitrage set max_hold_h` and
+            # `arbitrage cycle` act at once and a venue that cannot be read does not keep the position past them
             self._begin_exit(exit_reason(held_h, 0.0, 0.0, s), urgent=False)
             return
         if now - st.last_rules >= RULE_EVERY_S:

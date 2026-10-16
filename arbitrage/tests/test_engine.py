@@ -655,3 +655,46 @@ async def test_only_the_listed_markets_are_looked_at(tmp_path: Any, monkeypatch:
     assert best is not None and best.symbol == "SPY" and asked["symbols"] == ["QQQ", "SPY"]   # NVDA pays as much
     best = await run.LivePlanner(lambda: None).best(money)                                    # type: ignore[arg-type,return-value]
     assert best is not None and best.symbol == "NVDA" and asked["symbols"] is None            # no list: the first
+
+
+async def test_a_scan_that_cannot_read_the_venues_is_a_venue_down_and_the_bot_goes_on(
+        monkeypatch: pytest.MonkeyPatch) -> None:
+    """A public read failing inside a scan (a timeout, a 5xx, a rate limit past its retries) used to rise out of the
+    engine's step and end the program with the position still open. It is a venue being down for that loop."""
+    import aiohttp
+
+    from arbitrage.exec import run
+
+    for err in (RuntimeError("https://api.arcus.xyz/v1/markets: HTTP 502"), aiohttp.ClientConnectionError("reset"),
+                TimeoutError(), ValueError("not JSON")):
+        async def scan(cfg: Any, _err: Exception = err, **kw: Any) -> Any:
+            raise _err
+        monkeypatch.setattr(run.scanner, "run", scan)
+        p = run.LivePlanner(lambda: None)                  # type: ignore[arg-type,return-value]
+        with pytest.raises(VenueDown):
+            await p.best({"arcus": 120.0, "lighter": 120.0})
+        with pytest.raises(VenueDown):
+            await p.edges(SYM, "arcus")
+    r = Rig()
+    await r.to_open()
+
+    async def down(symbol: str, short_venue: str) -> None:
+        raise VenueDown("the scan could not read the venues: RuntimeError HTTP 502")
+    r.planner.edges = down                                 # type: ignore[method-assign,assignment]
+    await r.step(dt=eng.RULE_EVERY_S + 1)                  # the holding rules are due: the scan fails
+    assert r.e.st.phase == "open" and "venue_down" in r.store.kinds()      # still running, the position kept
+    await r.step()
+    assert r.e.st.phase == "open"
+
+
+async def test_the_clock_closes_a_cycled_position_in_the_next_loop_even_when_the_funding_cannot_be_read() -> None:
+    r = Rig(replace(BOTH, cycle_h=3.0))
+    await r.to_open()
+
+    async def no_edges(symbol: str, short_venue: str) -> None:      # the scan is failing
+        return None
+    r.planner.edges = no_edges                             # type: ignore[method-assign,assignment]
+    await r.step(dt=2.9 * 3600)
+    assert r.e.st.phase == "open"
+    await r.step(dt=0.1 * 3600)                            # three hours held: one loop later, not RULE_EVERY_S later
+    assert r.e.st.phase == "exiting" and not r.e.st.urgent and "cycle" in r.e.st.why
