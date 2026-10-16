@@ -30,21 +30,32 @@ def log_path(state: Path | None = None) -> Path:
 
 
 def alive(pid: int) -> bool:
-    """True if `pid` is a live process. Our own child that has exited is reaped first (a zombie is not alive)."""
+    """True if `pid` is a live process. `os.kill(pid, 0)` alone says yes for a zombie: a child that exited but was
+    never reaped (the Telegram bot starts this one and lives on). Reaps the pid first when it is our own child."""
     if pid <= 0:
         return False
-    with contextlib.suppress(ChildProcessError, OSError):
-        if os.waitpid(pid, os.WNOHANG)[0] == pid:
-            return False
+    try:
+        done, _ = os.waitpid(pid, os.WNOHANG)
+        if done == pid:
+            return False          # our child, exited: now reaped
+        if done == 0:
+            return True           # our child, still running
+    except ChildProcessError:
+        pass                      # someone else's child
+    except OSError:
+        return False
     try:
         os.kill(pid, 0)
     except ProcessLookupError:
         return False
     except PermissionError:
+        return True               # exists, owned by another user
+    try:                          # exists: a zombie (state Z) waiting for its parent is not running
+        state = subprocess.run(["ps", "-o", "stat=", "-p", str(pid)], capture_output=True, text=True,
+                               timeout=5).stdout.strip()
+    except (OSError, subprocess.SubprocessError):
         return True
-    except OSError:
-        return False
-    return True
+    return not state.startswith("Z")
 
 
 def running(state: Path | None = None) -> int | None:

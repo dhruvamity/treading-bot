@@ -1,0 +1,15 @@
+# One lint configuration for every part (`make lint`). Lines are kept under 120 characters; E501 is not enforced
+# because older code in arcus/ and lighter/ has about 270 lines a few characters longer.
+line-length = 120
+target-version = "py312"
+
+[lint]
+select = ["E", "F", "W", "I", "B", "UP", "SIM", "RUF", "ASYNC"]
+ignore = ["E501", "RUF001", "RUF002", "RUF003", "B008", "SIM108", "RUF012", "ASYNC109", "ASYNC110", "UP047"]
+
+[lint.per-file-ignores]
+"**/tests/**" = ["B011", "ASYNC240"]
+"**/scripts/**" = ["ASYNC250", "ASYNC240", "E402"]
+
+[lint.isort]
+known-first-party = ["arcus", "lighter_bot", "arbitrage", "daytrade", "deltaneutral"]

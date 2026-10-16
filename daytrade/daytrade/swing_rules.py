@@ -525,7 +525,7 @@ class Trend(Rule):
         if pos is None:
             return self._entry(i)
         if (self.long_out[i] if pos.side > 0 else self.short_out[i]):
-            return [Exit("open", "reverse")] + self._entry(i)
+            return [Exit("open", "reverse"), *self._entry(i)]
         if self.trail_atr and self.atr[i] > 0:
             new = pos.best - pos.side * self.trail_atr * self.atr[i]
             if (new - pos.stop) * pos.side > 0:
@@ -574,7 +574,7 @@ class DailyEmaRsi(Rule):
         if pos is None:
             return self._entry(i)
         if (self.dn[i] if pos.side > 0 else self.up[i]):
-            return [Exit("open", "reverse")] + self._entry(i)
+            return [Exit("open", "reverse"), *self._entry(i)]
         return []
 
 

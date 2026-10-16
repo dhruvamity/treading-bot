@@ -1,7 +1,8 @@
 """Where things are, the account ids and switches from the credentials file, and the owner's settings from
 arbitrage/settings.json (all optional).
 
-The trading bot has ONE credentials file, treading-bot/arcus/.env. What this part reads from it: ARCUS_ADDRESS,
+The trading bot has ONE credentials file, treading-bot/arcus/.env. What this part reads from it: ARCUS_ADDRESS
+(or ARCUS_WALLET_ADDRESS),
 ARCUS_ACCOUNT_INDEX, LIGHTER_ACCOUNT_INDEX (the accounts whose balances are read), PROFUNDING_API_KEY (a data
 feed's key), ARB_LIVE (the live switch) and TELEGRAM_BOT_TOKEN / TELEGRAM_CHAT_ID (where alerts go: the one
 Telegram bot). An arbitrage/.env, if there is one, is read too and wins.
@@ -15,6 +16,7 @@ from dataclasses import dataclass, fields
 from pathlib import Path
 
 from arbitrage.rank import Settings
+from lighter_bot.config import env_file
 
 ROOT = Path(os.environ.get("ARB_ROOT") or Path(__file__).resolve().parent.parent)
 STATE = ROOT / "state"
@@ -24,7 +26,7 @@ KEYS = ("ARCUS_ADDRESS", "ARCUS_ACCOUNT_INDEX", "LIGHTER_ACCOUNT_INDEX", "PROFUN
         "TELEGRAM_CHAT_ID")
 
 
-# What this machine is for (BOT_ROLE, one variable for the three bots; arcus/arcus/common/role.py says why). The
+# What this machine is for (BOT_ROLE, one variable for every part; arcus/arcus/common/role.py says why). The
 # arbitrage trades, so its executor starts on a machine that trades: "all" (the default) or "trader".
 ROLES = ("all", "trader", "recorder", "scout")
 
@@ -42,26 +44,16 @@ def no_trading(env: dict[str, str] | None = None) -> str:
                                               "starts on the trader machine")
 
 
-def _env_file(p: Path) -> dict[str, str]:
-    out: dict[str, str] = {}
-    try:
-        for line in p.read_text().splitlines():
-            line = line.strip()
-            if line and not line.startswith("#") and "=" in line:
-                k, v = line.split("=", 1)
-                if v.strip():
-                    out[k.strip()] = v.strip().strip('"').strip("'")
-    except OSError:
-        pass
-    return out
-
-
 def read_env(path: Path | None = None) -> dict[str, str]:
     """The bot's one file (treading-bot/arcus/.env, our keys only), then arbitrage/.env over it, then the process
     environment over both. Empty values count as not set."""
     p = path or ROOT / ".env"
-    shared = {k: v for k, v in _env_file(p.parent.parent / "arcus" / ".env").items() if _ours(k)}
-    return {**shared, **_env_file(p), **{k: v for k, v in os.environ.items() if _ours(k) and v}}
+    files = [env_file(p.parent.parent / "arcus" / ".env"), env_file(p)]
+    for f in files:                                 # the Arcus bot's name for the wallet address
+        if "ARCUS_WALLET_ADDRESS" in f:
+            f.setdefault("ARCUS_ADDRESS", f["ARCUS_WALLET_ADDRESS"])
+    shared = {k: v for k, v in files[0].items() if _ours(k)}
+    return {**shared, **files[1], **{k: v for k, v in os.environ.items() if _ours(k) and v}}
 
 
 # What `arbitrage set` accepts: name -> (lowest, highest, what it is). Everything else in Settings is a constant.
@@ -113,6 +105,12 @@ ADJUSTABLE: dict[str, tuple[float, float, str]] = {
     "enter_timeout_s": (10, 7200, "seconds after which an unfinished entry is left as it is and an unfinished exit is "
                                   "completed by crossing"),
 }
+
+
+def arcus_account(env: dict[str, str] | None = None) -> int | None:
+    """The Arcus subaccount the live executor trades (ARCUS_ACCOUNT_INDEX), None when it is not set."""
+    v = ((read_env() if env is None else env).get("ARCUS_ACCOUNT_INDEX") or "").strip()
+    return int(v) if v.isdigit() else None
 
 
 def settings_path() -> Path:

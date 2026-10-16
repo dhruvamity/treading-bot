@@ -59,7 +59,7 @@ def test_session_numbers_come_from_earlier_days_only():
 
 def test_atr_breakout_goes_with_the_break_and_holds_to_the_close():
     up = np.r_[np.linspace(100.0, 101.2, 30), np.full(360, 101.5)]          # through 100 + 1 ATR by 10:00
-    days = quiet_days(16) + [minutes(up)]
+    days = [*quiet_days(16), minutes(up)]
     s = I.AtrBreakout("QQQ")
     tr = run(s, I.session_days(bars_of(days), 5), MARKETS["QQQ"].venues["lighter"], 0.01)
     assert len(tr) == 1

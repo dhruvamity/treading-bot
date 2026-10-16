@@ -446,7 +446,7 @@ def report(series: dict[str, bt.Series], capital: float, st: Settings | None = N
     out = [f"HOLDING STUDY{title}: {len(series)} markets, {day(first)} to {day(last)} "
            f"({(last - first) / 86400:.0f} days), funding paid every hour on both venues", ""]
     if data is not None:
-        out += ["0. The data"] + sources(data, series) + [""]
+        out += ["0. The data", *sources(data, series), ""]
     picks, total = ranked(series, capital, st)
     began = starts(picks)
     out += ["1. The BEST market of each hour (the one the bot would open): funding one leg collected over the next H "
@@ -459,7 +459,7 @@ def report(series: dict[str, bt.Series], capital: float, st: Settings | None = N
             if picks else "   no hour had one"]
     if data is not None and picks:
         out.append(traded(data, picks))
-    out += ["", "   the best THREE of each hour"] + _forward_table(top_forward(series, picks, 3))
+    out += ["", "   the best THREE of each hour", *_forward_table(top_forward(series, picks, 3))]
     out += ["", "   EVERY market that passed the entry rule (last payment, 24 h and 7 days agree)"]
     out += _forward_table(forward(series, st))
     lv = lives(series, picks, st)

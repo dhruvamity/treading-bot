@@ -31,7 +31,7 @@ def test_a_day_counts_once_its_15_58_minute_has_closed_and_only_on_trading_days(
     end_mon = B.local_to_utc(MON, SB.DECIDE_S, B.NY)
     days = SB.venue_days(b, end_mon + 3600)
     assert [d[0] for d in days] == [MON]                     # Saturday is no session; Tuesday is not finished
-    day, o, h, lo, c = days[0]
+    _day, o, h, lo, c = days[0]
     assert o == 100.0 and abs(c - (100.0 + 0.01 * 388)) < 1e-9 and abs(h - (c + 0.5)) < 1e-9 and lo == 99.5
     assert SB.venue_days(b, end_mon - 1) == []               # 15:58's minute still running
 
@@ -44,7 +44,7 @@ def fake_history(n: int, start_day: int) -> list[tuple]:
             days.append(d)
         d -= 1
     days.reverse()
-    px = list(np.linspace(60, 100, n - 2)) + [99.0, 98.0]
+    px = [*list(np.linspace(60, 100, n - 2)), 99.0, 98.0]
     return [(x, p, p + 0.3, p - 0.3, p) for x, p in zip(days, px, strict=True)]
 
 

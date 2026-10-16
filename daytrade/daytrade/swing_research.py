@@ -1,7 +1,7 @@
 """Backtest the overnight and swing strategies (swing_rules.py) and their variants, on the longest history there is and
 on minute prices since 2020, at Lighter's and Arcus's costs and funding.
 
-    python -m daytrade.swing_research [spy] [qqq] [xau] [check]
+    daytrade research swing [spy] [qqq] [xau] [check] [tables]
 
 The main versions (first in each list, `MAIN`) were fixed before any result was seen. The variants change one rule at
 a time. They are ranked on everything before 15 Oct 2025 and the best are judged on the twelve months after.
@@ -462,10 +462,10 @@ def tables() -> str:
         M = m.upper()
         for data in ("minute", "daily"):
             out += [f"### {M}, {data} prices, Lighter's costs and funding", ""]
-            out += main_table(rows, M, data, MAIN[M]) + [""]
+            out += [*main_table(rows, M, data, MAIN[M]), ""]
             out += [f"### {M}, {data} prices: every version by family, ranked on the first year, judged on the last "
                     "12 months", ""]
-            out += oos_table(rows, M, data) + [""]
+            out += [*oos_table(rows, M, data), ""]
     p = OUT / "summary_xau.csv"
     if p.exists():
         rows = list(csv.DictReader(p.open()))
@@ -473,14 +473,14 @@ def tables() -> str:
         for data in datas:
             names = [n for n in MAIN["XAU"] if any(r["version"] == n and r["data"] == data for r in rows)]
             if names:
-                out += [f"### Gold, {data}, Lighter's costs and funding", ""] + main_table(rows, "XAU", data, names)
+                out += [f"### Gold, {data}, Lighter's costs and funding", "", *main_table(rows, "XAU", data, names)]
                 out += [""]
         for src in ("duka_XAUUSD_1h", "binance_PAXGUSDT"):
             for tf in ("D", "H4", "H1", "session"):
                 data = f"{src}:{tf}"
                 if data in datas:
                     out += [f"### Gold, {data}: every version by family", ""]
-                    out += oos_table(rows, "XAU", data) + [""]
+                    out += [*oos_table(rows, "XAU", data), ""]
     return "\n".join(out)
 
 

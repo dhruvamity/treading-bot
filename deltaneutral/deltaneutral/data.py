@@ -7,7 +7,7 @@ deltaneutral/data/:
                                 the stock market is open and Arcus's own mark while it is closed (docs: prices)
     arcus_<SYM>_perp1m.csv      ts, open, high, low, close, dollars, trades: the Arcus perp's own trades by the minute
     lighter_<SYM>_mark1h.csv,   the same marks and candles by the hour since both venues listed the markets (late June
-    arcus_<SYM>_oracle1h.csv    2026), for the longer look at liquidations (`fetch_hours`)
+    arcus_<SYM>_oracle1h.csv    2026), for the research's longer look at liquidations
     <venue>_<SYM>_funding.csv   ts (payment hour), rate_per_hour (a fraction, + = longs pay)
     markets.json                both venues' market details at the time of the download (leverage, margin, OI)
 
@@ -30,6 +30,7 @@ from . import DATA, TOKENS
 
 ARCUS, LIGHTER = H.ARCUS, H.LIGHTER
 DAY = 86_400
+LISTED = 1_782_777_600          # 30 Jun 2026 00:00 UTC: both venues trade these markets from about then
 FIVE = 300
 Row = tuple
 
@@ -131,7 +132,8 @@ PX = ["ts", "open", "high", "low", "close", "volume"]
 def fetch(symbols: list[str] | None = None, days: float = 35, root: Path | None = None,
           parts: tuple[str, ...] = ("lighter", "arcus", "trades"), say: Callable[[str], None] = log) -> None:
     """Everything above for `symbols` (default: the owner's eight), the last `days` days or since each file's end.
-    `parts`: "lighter" (its candles, mark and funding), "arcus" (candles and funding), "trades" (Arcus's trades)."""
+    `parts`: "lighter" (its candles, mark and funding, and its hourly mark since the listing), "arcus" (candles and
+    funding, and its hourly candles since the listing), "trades" (Arcus's trades)."""
     root = root or DATA
     root.mkdir(parents=True, exist_ok=True)
     syms = list(symbols or TOKENS)
@@ -142,6 +144,7 @@ def fetch(symbols: list[str] | None = None, days: float = 35, root: Path | None 
     syms = [s for s in syms if s in am and s in lm]
     first = int(time.time()) - int(days * DAY)
     now5 = int(time.time()) // FIVE * FIVE
+    now_h = int(time.time()) // 3600 * 3600
     errors: list[str] = []
 
     def guard(fn: Callable[[], None], what: str) -> Callable[[], None]:
@@ -162,7 +165,10 @@ def fetch(symbols: list[str] | None = None, days: float = 35, root: Path | None 
                       lighter_mark(mid, since_for(f"lighter_{s}_mark5m", first, root), now5), root)
             f = store(f"lighter_{s}_funding", ["ts", "rate_per_hour"],
                       H.lighter_funding(mid, since=since_for(f"lighter_{s}_funding", first, root)), root)
-            say(f"lighter {s}: {n:,} trade bars, {m:,} mark bars, {f:,} funding hours")
+            h = store(f"lighter_{s}_mark1h", ["ts", "open", "high", "low", "close", "samples"],
+                      lighter_walk("markPriceCandles", mid, since_for(f"lighter_{s}_mark1h", LISTED, root), now_h,
+                                   "1h"), root)
+            say(f"lighter {s}: {n:,} trade bars, {m:,} mark bars, {f:,} funding hours, {h:,} hourly marks")
 
     def arcus_bars() -> None:
         for s in syms:
@@ -171,7 +177,10 @@ def fetch(symbols: list[str] | None = None, days: float = 35, root: Path | None 
                                                                                          root)) if r[0] < now5], root)
             f = store(f"arcus_{s}_funding", ["ts", "rate_per_hour"],
                       H.arcus_funding(mk, since=since_for(f"arcus_{s}_funding", first, root)), root)
-            say(f"arcus {s}: {n:,} candles, {f:,} funding hours")
+            h = store(f"arcus_{s}_oracle1h", PX, [r for r in arcus_candles(mk, since_for(f"arcus_{s}_oracle1h", LISTED,
+                                                                                         root), "1h") if r[0] < now_h],
+                      root)
+            say(f"arcus {s}: {n:,} candles, {f:,} funding hours, {h:,} hourly candles")
 
     def arcus_trades() -> None:
         for s in syms:
@@ -190,25 +199,4 @@ def fetch(symbols: list[str] | None = None, days: float = 35, root: Path | None 
         t.join()
     if errors:
         raise RuntimeError("; ".join(errors))
-
-
-LISTED = 1_782_777_600          # 30 Jun 2026 00:00 UTC: both venues trade these markets from about then
-
-
-def fetch_hours(symbols: list[str] | None = None, root: Path | None = None, say: Callable[[str], None] = log) -> None:
-    """Hourly mark (Lighter) and candles (Arcus) since the markets were listed: about 2,600 hours a market."""
-    root = root or DATA
-    syms = list(symbols or TOKENS)
-    _, lm = save_markets(syms, root)
-    now_h = int(time.time()) // 3600 * 3600
-    for s in syms:
-        if s not in lm:
-            continue
-        n = store(f"lighter_{s}_mark1h", ["ts", "open", "high", "low", "close", "samples"],
-                  lighter_walk("markPriceCandles", int(lm[s]["market_id"]), since_for(f"lighter_{s}_mark1h", LISTED,
-                                                                                         root), now_h, "1h"), root)
-        m = store(f"arcus_{s}_oracle1h", PX, [r for r in arcus_candles(f"{s}-USD", since_for(f"arcus_{s}_oracle1h",
-                                                                                            LISTED, root), "1h")
-                                              if r[0] < now_h], root)
-        say(f"{s}: {n:,} Lighter hours, {m:,} Arcus hours")
 

@@ -19,41 +19,13 @@ import time
 from pathlib import Path
 
 from arbitrage.config import ROOT, STATE, no_trading, read_env
+from lighter_bot.ops import alive  # the one check: a zombie is not running
 
 MODES = ("paper", "live")
 
 
 def pid_path(mode: str, state: Path | None = None) -> Path:
     return (state or STATE) / f"run-{mode}.pid"
-
-
-def alive(pid: int) -> bool:
-    """True if `pid` is a live process. A child that exited but was never reaped (a zombie) is not: the Telegram bot
-    starts the executor and lives on. Reaps the pid first when it is our own child."""
-    if pid <= 0:
-        return False
-    try:
-        done, _ = os.waitpid(pid, os.WNOHANG)
-        if done == pid:
-            return False
-        if done == 0:
-            return True
-    except ChildProcessError:
-        pass
-    except OSError:
-        return False
-    try:
-        os.kill(pid, 0)
-    except ProcessLookupError:
-        return False
-    except PermissionError:
-        return True
-    try:
-        state = subprocess.run(["ps", "-o", "stat=", "-p", str(pid)], capture_output=True, text=True,
-                               timeout=5).stdout.strip()
-    except (OSError, subprocess.SubprocessError):
-        return True
-    return not state.startswith("Z")
 
 
 def running(mode: str, state: Path | None = None) -> int | None:

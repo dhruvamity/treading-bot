@@ -19,6 +19,8 @@ import sys
 import time
 from pathlib import Path
 
+from lighter_bot.ops import alive  # the one check: a zombie is not running
+
 from . import ROOT, STATE
 from . import venues as V
 
@@ -32,24 +34,6 @@ def pid_path(mode: str, state: Path | None = None) -> Path:
 
 def log_path(mode: str, state: Path | None = None) -> Path:
     return (state or STATE) / f"run-{mode}.out"
-
-
-def alive(pid: int) -> bool:
-    """True if `pid` is a live process. Our own child that has exited is reaped first (a zombie is not alive)."""
-    if pid <= 0:
-        return False
-    with contextlib.suppress(ChildProcessError, OSError):
-        if os.waitpid(pid, os.WNOHANG)[0] == pid:
-            return False
-    try:
-        os.kill(pid, 0)
-    except ProcessLookupError:
-        return False
-    except PermissionError:
-        return True
-    except OSError:
-        return False
-    return True
 
 
 def running(mode: str, state: Path | None = None) -> int | None:

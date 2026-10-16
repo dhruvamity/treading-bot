@@ -17,7 +17,7 @@ requests:
 loop_ms: 500                      # the bot decides twice a second (the budget caps how often it actually requotes)
 
 # The standard account's speed bump: post-only orders, modifies and cancels take effect 200 ms after Lighter receives
-# them, taker orders 300 ms. The network adds the trip to AWS Tokyo (measured by `lbot doctor`).
+# them, taker orders 300 ms. The network adds the trip to AWS Tokyo (measured by `lighter doctor`).
 latency:
   maker_ms: 200
   taker_ms: 300

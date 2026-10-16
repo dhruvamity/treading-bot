@@ -32,10 +32,12 @@ from typing import Any
 
 import numpy as np
 
+from arbitrage.hours import open_hours as arcus_open
+
 from . import plan as P
 from .costs import Costs
 from .plan import ARCUS, LIGHTER, VENUES, Pair
-from .series import FIVE, Market, arcus_open, blocked, cash_session, next_open
+from .series import FIVE, Market, blocked, cash_session, next_open
 
 HOUR = 3600
 DAY = 86_400

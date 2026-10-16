@@ -1,10 +1,10 @@
-"""Lighter, the funding arbitrage and daytrade inside this ONE Telegram bot.
+"""Lighter, the funding arbitrage, daytrade and delta neutral inside this ONE Telegram bot.
 
-The trading bot is one bot with three parts: Arcus market making (this package), Lighter market making
-(treading-bot/lighter, package `lighter`) and the funding arbitrage between the two (treading-bot/arbitrage, package `arb`).
-The paper day-trading bot (treading-bot/daytrade) is a fourth that only reads, and the delta-neutral pair bot
-(treading-bot/deltaneutral) a fifth. `make install` puts them all into this one environment, and this one Telegram bot
-controls all of them:
+The trading bot is one bot with five parts: Arcus market making (this package), Lighter market making
+(treading-bot/lighter, package `lighter_bot`), the funding arbitrage between the two (treading-bot/arbitrage, package
+`arbitrage`), the paper day-trading bot (treading-bot/daytrade), which only reads, and the delta-neutral pair bot
+(treading-bot/deltaneutral). `make install` puts them all into one environment, and this one Telegram bot controls
+all of them:
 
     /status, /run, /closeall ...          Arcus, as always
     /l_status, /l_run, /l_closeall ...    the same commands for Lighter (`/l status` works too; /l lists them)
@@ -13,8 +13,8 @@ controls all of them:
     /dn_status, /dn_cycles, /dn_transfer  the delta-neutral pair bot (/dn lists them)
 
 Every Lighter message starts with LIGHTER, every arbitrage message with FUNDING ARB, every daytrade message with
-DAYTRADE and every delta-neutral message with DELTA NEUTRAL, so a reply can never be taken for another part's. A part that is not installed, or fails to load, says so
-when its command is sent; the rest of the bot is not affected.
+DAYTRADE and every delta-neutral message with DELTA NEUTRAL, so a reply can never be taken for another part's. A
+part that is not installed, or fails to load, says so when its command is sent; the rest of the bot is not affected.
 """
 
 from __future__ import annotations
@@ -28,11 +28,11 @@ from arcus.common.tgfmt import card, codes
 
 log = Log("telegram_parts")
 LIGHTER, ARB, DAYTRADE, DELTA = "l", "arb", "dt", "dn"
-INSTALL_HINT = "In treading-bot/arcus: make install, then tbot down and tbot up"
+INSTALL_HINT = "make install in treading-bot, then tbot down and tbot up"
 
 
 def arcus_spelling(cmd: str, args: list[str]) -> tuple[str, list[str]]:
-    """Arcus is spelled like the other two: /arcus_status, /a_status, /arcus status all mean the bare /status. Anything
+    """Arcus is spelled like the other parts: /arcus_status, /a_status, /arcus status all mean the bare /status. Anything
     else comes back as it was."""
     if cmd in ("a", "arcus"):
         return (args[0].lower(), args[1:]) if args else ("menu", [])

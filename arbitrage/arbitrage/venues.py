@@ -14,6 +14,7 @@ minute, and the market-making bots share both limits.
 from __future__ import annotations
 
 import asyncio
+import itertools
 import math
 import time
 from typing import Any
@@ -110,7 +111,7 @@ def arcus_history(rows: list[dict[str, Any]]) -> dict[int, float]:
 def sigma_day(closes: list[float]) -> float:
     """One day's typical move (a fraction) from hourly closes, oldest first. Hours with no change at all are left out:
     a stock's oracle stands still while its market is closed, and counting those would understate a trading day."""
-    rets = [math.log(b / a) for a, b in zip(closes, closes[1:], strict=False) if a > 0 and b > 0 and a != b]
+    rets = [math.log(b / a) for a, b in itertools.pairwise(closes) if a > 0 and b > 0 and a != b]
     if len(rets) < 12:
         return 0.0
     return math.sqrt(sum(r * r for r in rets) / len(rets) * 24)

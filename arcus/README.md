@@ -1,11 +1,12 @@
 # Arcus
 
 The Arcus bot: maker (limit-order) trading on [Arcus](https://arcus.xyz) perpetuals, with the scout that records and
-backtests every market, the pilot and autopilot that run setups, and the services the other two bots share: `tbot up`,
+backtests every market, the pilot and autopilot that run setups, and the services every part shares: `tbot up`,
 the one Telegram bot, `tbot export` and `tbot import`. Install, credentials, servers and export are in the
 [main README](../README.md); operations (daily checks, emergencies, kill switches) are in the [RUNBOOK](RUNBOOK.md).
 
-Commands run from `treading-bot/arcus`; `arcus` is `.venv/bin/arcus`. Paths such as `data/scout/` are inside `arcus/`.
+Commands work from any folder once `make install` has put them on your PATH (main README, section 2). Paths such as
+`data/scout/` are inside `arcus/`.
 
 ## Contents
 
@@ -49,40 +50,41 @@ Arcus WebSocket ──► scout recorder ──► data/scout/tape/<MARKET>/<day
 **Step 0. Where it runs.** On your own computer: install it (main [README](../README.md), section 2) and go on to step 1.
 On servers, do the setup first: one machine for everything is the main README's section 3; **a recorder VPS and a trader
 VPS is [Two servers, step by step](../README.md#two-servers-step-by-step-one-records-one-trades)**, every command in order.
-In short, after the clone and `bash deploy/scripts/bootstrap.sh` on both:
+In short, after the clone and `bash treading-bot/arcus/deploy/scripts/bootstrap.sh` on both:
 
 ```bash
-.venv/bin/tbot role recorder                       # on the recorder (no keys); `tbot role trader` on the trader (your keys)
-.venv/bin/tbot up                                  # starts only what that machine is for, and says which that is
-.venv/bin/tbot status                              # THIS MACHINE: recorder / trader
+tbot role recorder                       # on the recorder (no keys); `tbot role trader` on the trader (your keys)
+tbot up                                  # starts only what that machine is for, and says which that is
+tbot status                              # THIS MACHINE: recorder / trader
 ```
 
 The steps below are then typed on the trader (or sent to its Telegram chat); the recorder only records, so on two servers
 `tbot up` in step 1 starts the Telegram bot and no scouts, and the lists of step 2 come from your own computer.
 
-**Step 1. Start it.** `.venv/bin/tbot up` starts both scouts and the Telegram bot. The first lists appear after about 3 days
+**Step 1. Start it.** `tbot up` starts both scouts and the Telegram bot. The first lists appear after about 3 days
 of recording; `/run` works at once and never waits for a scan.
 
-**Step 2. Look.** `.venv/bin/tbot status` is one screen for all three bots; `cat data/scout/report.txt` is the latest
+**Step 2. Look.** `tbot status` is one screen for every part; `cat data/scout/report.txt` is the latest
 ranking. On the phone: `/status`, `/top3`.
 
-**Step 3. Run the best setup on paper.** `.venv/bin/arcus pilot approve 1`, or your own pick from Telegram:
-`/run SPY smart 0 50x paper`. Watch it with `.venv/bin/arcus dashboard` (today's volume, PnL and position every 10 s; `/dashboard`
+**Step 3. Run the best setup on paper.** `arcus pilot approve 1`, or your own pick from Telegram:
+`/run SPY smart 0 50x paper`. Watch it with `arcus dashboard` (today's volume, PnL and position every 10 s; `/dashboard`
 on the phone).
 
-**Step 4. Stop it.** `.venv/bin/arcus pilot close` closes the position and stops. On the phone: `/closeall`, or `/stop` to stop
+**Step 4. Stop it.** `arcus pilot close` closes the position and stops. On the phone: `/closeall`, or `/stop` to stop
 and keep the position.
 
 **Step 5. Go live** (real money), in this order:
-1. `.venv/bin/arcus selftest` while the account is still empty: every line must say PASS or INFO.
+1. `arcus selftest` while the account is still empty: every line must say PASS or INFO.
 2. Deposit USDG into the Arcus subaccount your key is bound to. Use a subaccount the bot has to itself: it treats every
    order and position there as its own.
-3. Put `BOT_PILOT_LIVE=1` in `.env`, then `tbot down` and `tbot up`.
-4. `.venv/bin/arcus doctor pilot` must end in **READY**.
-5. `.venv/bin/arcus pilot approve 1 --live`, and type `LIVE` when asked. From Telegram: `/run SPY smart 0 50x live sl=10`, then
+3. Put `BOT_PILOT_LIVE=1` in `arcus/.env`, then `tbot down` and `tbot up`.
+4. `arcus doctor pilot` must end in **READY**.
+5. `arcus pilot approve 1 --live`, and type `LIVE` when asked. From Telegram: `/run SPY smart 0 50x live sl=10`, then
    type back the 6-digit code. `sl=10` means the run may lose $10 in all.
 
-**Step 6. The other two bots** work the same way: [lighter/README.md](../lighter/README.md), [arbitrage/README.md](../arbitrage/README.md).
+**Step 6. The other parts** work the same way: [lighter/README.md](../lighter/README.md), [arbitrage/README.md](../arbitrage/README.md),
+[daytrade/README.md](../daytrade/README.md), [deltaneutral/README.md](../deltaneutral/README.md).
 **Step 7. Bring the data home** for analysis: `tbot export` (main README, section 4).
 
 ---
@@ -274,7 +276,7 @@ The same BTC Mid 0 costs 0.6 bp in a calm weekend hour and 2.7 bp in a wild week
 
 ## 7. Telegram
 
-One Telegram bot controls all three bots (it is started by `tbot up telegram` or `tbot telegram`, not by any one bot): set it up once ([main README](../README.md), section 2). It reads the runner's state,
+One Telegram bot controls every part (it is started by `tbot up telegram` or `tbot telegram`, not by any one bot): set it up once ([main README](../README.md), section 2). It reads the runner's state,
 writes flags the runner applies on its next tick, and holds no trading state, so restarting it never touches a run. Every message
 has the same layout (an emoji and a bold title, then short monospace lines; `arcus/common/tgfmt.py`). Replies from Lighter start
 with **LIGHTER** and the arbitrage's with **FUNDING ARB**; an unlabelled one is Arcus. `/menu` shows buttons; `bot telegram
@@ -359,7 +361,7 @@ message mentions is written `/l_…`, so tapping it stays on Lighter: `/closeall
 | `arcus down [--all]` / `arcus scout stop` | Stop it. `--all` also stops the Arcus runs (quotes cancelled, positions kept) |
 | `arcus status [--json]` | The Arcus part on one screen: services, runs, last scan, balance |
 | `tbot up [arcus] [lighter] [telegram] [daytrade] [deltaneutral]` | The whole machine (`BOT_ROLE` decides): every part but deltaneutral (which starts only when named), or only the parts named; `tbot up scouts` or `tbot scout` = both scouts |
-| `tbot down [parts] [--all]` / `tbot status` | Stop them / one screen for all three bots, the Telegram bot, Lighter and the arbitrage |
+| `tbot down [parts] [--all]` / `tbot status` | Stop them / one screen for every part and the Telegram bot |
 | `arcus dashboard [--once]` | Live screen every 10 s: today's volume, PnL, position |
 | **Trade** | |
 | `arcus pilot status` / `approve N [--live] [--list cheapest\|max] [--max-lev]` / `close` | What is deployed and the top 3; run a list's pick on paper (or live); close the position and stop |

@@ -1,11 +1,11 @@
 # Arbitrage
 
-Funding-rate arbitrage between Arcus and Lighter (Robinhood Chain). One of three bots in the [repository](../README.md): installed by
-`make install`, its switches in the one `.env`, and controlled from the one Telegram bot as `/arb_<command>`. It trades with the Arcus and
+Funding-rate arbitrage between Arcus and Lighter (Robinhood Chain). One of five parts of the [repository](../README.md): installed by
+`make install`, its switches in the one `arcus/.env`, and controlled from the one Telegram bot as `/arb_<command>`. It trades with the Arcus and
 Lighter bots' own venue clients and keys. It scans, plans, backtests, and runs the position: on paper by default, live only behind a switch
 that you set and a confirmation each time.
 
-**`arbitrage <command>` in this guide is `.venv/bin/arbitrage <command>`**, run from `treading-bot/arcus`.
+**`arbitrage <command>` works from any folder** once `make install` has put the commands on your PATH (main README, section 2).
 
 On two machines (`BOT_ROLE` in `arcus/.env`, [main README](../README.md#two-machines-one-records-one-trades)) the executor runs on the
 machine that trades (`all` or `trader`): it needs nothing from the recorder, since it reads both venues itself. A `recorder` or a
@@ -331,7 +331,6 @@ for a week (`tbot up` on the recorder) and run `arbitrage fills` again before si
 ## 3. Commands
 
 ```
-cd treading-bot/arcus        # then .venv/bin/arbitrage ... ; written as `arbitrage ...` below
 arbitrage scan               # rank the markets, with the accounts' own free collateral
 arbitrage scan --arcus 120 --lighter 120 --feeds
 arbitrage plan BABA --arcus 120 --lighter 120
@@ -545,7 +544,8 @@ Not started by anyone yet. Before the first run:
    - Lighter allows a standard account 60 requests a minute in all, and each program budgets as if it had all 60.
    The arbitrage does refuse to open over a position it did not make, and closes when a leg is not the size it
    holds, so the damage is a closed position, not an unwatched one. On Arcus a second subaccount is enough:
-   `ARCUS_ACCOUNT_INDEX=1` in `.env`, with its own money.
+   a key bound to it in `arcus/.env` (`ARCUS_API_PRIVATE_KEY_2=...`), `ARCUS_ACCOUNT_INDEX=1` in `arbitrage/.env`,
+   and its own money. The executor trades with the key bound to that subaccount and refuses to start without one.
 3. `ARB_LIVE=1` in `arcus/.env`, then `tbot down` and `tbot up` so the Telegram bot sees it.
 4. **Small first:** `arbitrage set max_notional_usd 30`, then `/arb_start live` in Telegram and type back the code it
    shows (or `arbitrage start --live` in a terminal and type LIVE). Watch `/arb_status`.
@@ -638,12 +638,12 @@ the venues) arrive in the same chat.
 | `arbitrage/history.py`, `arbitrage/backtest.py` | the history download; the rules replayed on it |
 | `arbitrage/exec/engine.py` | the executor's state machine |
 | `arbitrage/exec/venue.py` | what the executor needs from a venue; the simulated and the paper venue |
-| `arbitrage/exec/arcus.py`, `arbitrage/exec/lighter.py` | the live venues, on the two bots' own clients |
+| `arbitrage/exec/arcus.py`, `arbitrage/exec/lighter.py` | the live venues, on the Arcus and Lighter bots' own clients |
 | `arbitrage/exec/run.py` | the loop, its files, paper funding |
 | `arbitrage/ops.py` | the executor as a background process (`arbitrage start`, `arbitrage stop`, `/arb_start`, `/arb_stop`) |
-| `arbitrage/telegram.py`, `arbitrage/feeds.py`, `arbitrage/paper.py`, `arbitrage/cli.py` | its commands for the one Telegram bot; ProFunding and arb.sh; the paper note-book of `arbitrage paper`; the commands |
+| `arbitrage/telegram.py`, `arbitrage/feeds.py`, `arbitrage/cli.py` | its commands for the one Telegram bot; ProFunding and arb.sh; the commands |
 | `state/`, `data/` (not committed) | `position-<mode>.json`, `events-<mode>.jsonl`, `run-<mode>.pid` and `.out`, paper money; the downloaded history |
 | `settings.json` (not committed) | your settings. The account ids and switches are in the one `arcus/.env` |
 
-Install: `make install` in the repository root. Tests (offline): `make test` in the root, or from `treading-bot/arbitrage`:
-`../arcus/.venv/bin/python -m pytest`.
+Install: `make install` in the repository root. Tests (offline): `make test` in the root, or `pytest` in
+`treading-bot/arbitrage` with the commands on your PATH.

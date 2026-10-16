@@ -160,9 +160,8 @@ class Book:
             elif isinstance(a, Exit):
                 if self.pos is not None:
                     self.exit_next = a.reason
-            elif isinstance(a, MoveStop):
-                if self.pos is not None:
-                    self.pos.stop = a.price
+            elif isinstance(a, MoveStop) and self.pos is not None:
+                self.pos.stop = a.price
 
     def end_day(self, t: int, c: float) -> None:
         if self.pos is not None:

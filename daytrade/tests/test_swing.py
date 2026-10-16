@@ -67,7 +67,7 @@ def test_percent_b_waits_for_three_closes_under_its_band_and_leaves_over_0_8():
 
 
 def test_the_rsi_rules_read_only_closes_up_to_the_bar():
-    c = list(np.linspace(100, 140, 230)) + [139.0, 137.0, 135.0, 134.0, 136.0, 138.0, 141.0]
+    c = [*list(np.linspace(100, 140, 230)), 139.0, 137.0, 135.0, 134.0, 136.0, 138.0, 141.0]
     cb = daily(c)
     for rule in (R.CumRsi("SPY"), R.RsiLevel("SPY", 2, 15, exit="high"), R.Rsi2("SPY")):
         full = S.simulate(rule, cb, V, NoFunding())

@@ -5,8 +5,8 @@ import asyncio
 import datetime as dt
 
 import pytest
-from arbitrage.exec.venue import PaperVenue, SimVenue, Spec
 
+from arbitrage.exec.venue import PaperVenue, SimVenue, Spec
 from deltaneutral import engine as E
 from deltaneutral import plan as P
 from deltaneutral.plan import ARCUS, LIGHTER
@@ -275,7 +275,7 @@ def test_what_one_venue_loses_at_its_stop_the_other_makes_at_its_take_profit(tmp
     w.until("open", fill=False)
     w.step()
     st = w.eng.st
-    lo, hi = st.stops["AAA"]
+    _lo, _hi = st.stops["AAA"]
     units = {v: w.v[v].pos["AAA"] for v in (ARCUS, LIGHTER)}
     assert abs(units[ARCUS] + units[LIGHTER]) < 1e-9                    # the same units, opposite ways
     assert st.room0[LIGHTER] < st.room0[ARCUS]                          # Lighter is the weaker venue

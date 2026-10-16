@@ -10,7 +10,8 @@
 The file is treading-bot/exports/tb-<YYYYMMDD>-<HHMM>Z.tar (UTC). Inside it, under one folder of the same name:
 
     SUMMARY.md       read this first: what ran, the trades, problems in the logs, how complete the recording is
-    records.tar.gz   arcus/ lighter/ arbitrage/ (state, logs, scans, reports, config, fills and orders as CSV), system/
+    records.tar.gz   arcus/ lighter/ arbitrage/ (state, logs, scans, reports, config, fills and orders as CSV),
+                     daytrade/ deltaneutral/ (state, settings, reports), system/
     coverage.csv     rows and hours per venue, market, UTC day and kind, counted here before packing
     tape/<venue>/<MARKET>/<UTC day>/*.npz    the market tape, as recorded
     files.csv, MANIFEST.json    every tape file's size and SHA-256; written last, so a cut-off copy is noticed
@@ -78,15 +79,24 @@ class ExportError(Exception):
 # ------------------------------------------------------------------------------------------------ where things are
 @dataclass(frozen=True)
 class Roots:
-    """The three parts' folders. `arcus` is treading-bot/arcus (the folder commands run from)."""
+    """The parts' folders. `arcus` is treading-bot/arcus (the folder commands run in). Daytrade and delta neutral give
+    only their state, settings and reports: their price history is public and fetched again."""
 
     arcus: Path
     lighter: Path
     arbitrage: Path
+    daytrade: Path | None = None            # None: next to the others
+    deltaneutral: Path | None = None
 
     @property
     def repo(self) -> Path:
         return self.arcus.parent
+
+    def parts(self) -> list[tuple[str, Path]]:
+        """(label, folder) of every part."""
+        return [("arcus", self.arcus), ("lighter", self.lighter), ("arbitrage", self.arbitrage),
+                ("daytrade", self.daytrade or self.repo / "daytrade"),
+                ("deltaneutral", self.deltaneutral or self.repo / "deltaneutral")]
 
     @classmethod
     def find(cls, arcus: Path | None = None) -> Roots:
@@ -100,7 +110,16 @@ class Roots:
             from arbitrage.config import ROOT as AROOT
 
             arbitrage = Path(AROOT)
-        return cls(arcus, lighter, arbitrage)
+        daytrade, deltaneutral = arcus.parent / "daytrade", arcus.parent / "deltaneutral"
+        with contextlib.suppress(Exception):
+            from daytrade import ROOT as DTROOT
+
+            daytrade = Path(DTROOT)
+        with contextlib.suppress(Exception):
+            from deltaneutral import ROOT as DNROOT
+
+            deltaneutral = Path(DNROOT)
+        return cls(arcus, lighter, arbitrage, daytrade, deltaneutral)
 
     def tapes(self) -> dict[str, Path]:
         return {"arcus": self.arcus / "data" / "scout" / "tape", "lighter": self.lighter / "data" / "tape"}
@@ -118,6 +137,7 @@ class Source:
 
 def sources(r: Roots) -> list[Source]:
     b, li, a = r.arcus, r.lighter, r.arbitrage
+    dt_, dn = dict(r.parts())["daytrade"], dict(r.parts())["deltaneutral"]
     return [
         Source("arcus/state", b / "state", always=True),
         Source("arcus/config", b / "config", always=True),
@@ -134,6 +154,11 @@ def sources(r: Roots) -> list[Source]:
         Source("arbitrage/state", a / "state", always=True),
         Source("arbitrage/settings.json", a / "settings.json", always=True),
         Source("arbitrage/data", a / "data"),
+        Source("daytrade/state", dt_ / "state", always=True),
+        Source("daytrade/reports", dt_ / "reports"),
+        Source("deltaneutral/state", dn / "state", always=True),
+        Source("deltaneutral/settings.json", dn / "settings.json", always=True),
+        Source("deltaneutral/reports", dn / "reports"),
     ]
 
 
@@ -201,7 +226,7 @@ def secret_values(r: Roots, environ: dict[str, str] | None = None) -> list[bytes
     """Every secret this machine holds (by the variable's name), longest first: blanked out of whatever is copied."""
     found: set[str] = set()
     pairs = list((environ if environ is not None else dict(os.environ)).items())
-    for root in (r.arcus, r.lighter, r.arbitrage):
+    for _, root in r.parts():
         pairs += list(_env_pairs(root / ".env"))
     for k, v in pairs:
         if SECRET_NAME.search(k) and not k.upper().endswith("_INDEX") and len(v) >= 8:

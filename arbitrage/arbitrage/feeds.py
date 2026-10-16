@@ -38,14 +38,26 @@ def profunding_pairs(rows: list[dict[str, Any]]) -> dict[str, dict[str, Any]]:
     return out
 
 
-async def profunding(api_key: str, cache: Path, *, max_age_s: float = CACHE_S) -> dict[str, dict[str, Any]]:
-    """ProFunding's Arcus <-> Lighter RH opportunities, from the cache when it is fresh enough. {} without a key."""
+def _cached(cache: Path, max_age_s: float) -> dict[str, dict[str, Any]] | None:
     try:
         saved = json.loads(cache.read_text())
         if time.time() - saved["ts"] < max_age_s:
             return dict(saved["pairs"])
     except (OSError, ValueError, KeyError):
         pass
+    return None
+
+
+def _keep(cache: Path, pairs: dict[str, dict[str, Any]]) -> None:
+    cache.parent.mkdir(parents=True, exist_ok=True)
+    cache.write_text(json.dumps({"ts": time.time(), "pairs": pairs}))
+
+
+async def profunding(api_key: str, cache: Path, *, max_age_s: float = CACHE_S) -> dict[str, dict[str, Any]]:
+    """ProFunding's Arcus <-> Lighter RH opportunities, from the cache when it is fresh enough. {} without a key."""
+    saved = _cached(cache, max_age_s)
+    if saved is not None:
+        return saved
     if not api_key:
         return {}
     session = aiohttp.ClientSession(headers={**UA, "X-API-Key": api_key}, timeout=aiohttp.ClientTimeout(total=60))
@@ -53,8 +65,7 @@ async def profunding(api_key: str, cache: Path, *, max_age_s: float = CACHE_S) -
         if r.status != 200:
             raise RuntimeError(f"ProFunding: HTTP {r.status} {(await r.text())[:200]}")
         pairs = profunding_pairs(await r.json(content_type=None))
-    cache.parent.mkdir(parents=True, exist_ok=True)
-    cache.write_text(json.dumps({"ts": time.time(), "pairs": pairs}))
+    _keep(cache, pairs)
     return pairs
 
 

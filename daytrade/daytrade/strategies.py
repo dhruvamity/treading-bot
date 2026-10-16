@@ -23,7 +23,7 @@ import math
 import numpy as np
 
 from . import bars as B
-from .core import Action, Cancel, Day, Exit, Order, Position, Strategy
+from .core import Action, Day, Exit, Order, Position, Strategy
 
 HOUR = 3600
 RTH_OPEN = 9 * HOUR + 30 * 60
@@ -278,29 +278,6 @@ class VwapTrend(_Stock):
         return []
 
 
-class FirstCandle(_Stock):
-    """The opening-range rule as the published backtests run it (Zarattini & Aziz, 2023, QQQ): the first 5-minute bar
-    sets the side (up bar: long, down bar: short, flat: nothing); enter at the next bar's open; the stop is the far
-    end of that first bar; out at the target (10R in the paper) or the close."""
-
-    def __init__(self, market: str = "QQQ", orb_min: int = 5, rr: float | None = 10.0):
-        self.market, self.tf, self.orb_min, self.rr = market, 1, orb_min, rr
-        self.name = f"{market.lower()}-firstcandle{orb_min}-{'rr' + str(rr) if rr else 'eod'}"
-
-    def on_bar(self, k: int, pos: Position | None, trades_today: int) -> list[Action]:
-        if trades_today or pos is not None or self.sod[k] + 60 != RTH_OPEN + self.orb_min * 60:
-            return []
-        if self.sod[0] != RTH_OPEN:
-            return []
-        o, c = float(self.day.o[0]), float(self.day.c[k])
-        hi, lo = float(self.day.h[:k + 1].max()), float(self.day.l[:k + 1].min())
-        if c > o:
-            return [self.entry(1, c, lo, self.rr, "first-long")]
-        if c < o:
-            return [self.entry(-1, c, hi, self.rr, "first-short")]
-        return []
-
-
 # ---- London morning (gold) -----------------------------------------------------------------------------------------
 
 def structure_trend(h: np.ndarray, l: np.ndarray, c: np.ndarray, n: int = 2) -> np.ndarray:  # noqa: E741
@@ -512,7 +489,3 @@ class LondonSweep(Strategy):
         return [Order(self.dir, "limit", entry, stop, target, expire=self.at(self.deadline),
                       flat_at=self.at(self.flat), tag="sweep-long" if self.dir > 0 else "sweep-short",
                       cancel_beyond=target)]
-
-
-def cancel_all() -> list[Action]:
-    return [Cancel("strategy")]

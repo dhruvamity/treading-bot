@@ -1,6 +1,6 @@
 """Backtest every strategy, its variants, on 1-, 5- and 15-minute signal bars and on both venues' costs.
 
-    python -m daytrade.research [spy] [qqq] [xau] [venues]
+    daytrade research [spy] [qqq] [xau]
 
 The main version of each strategy (the first in each list below) was fixed before any result was seen. The other
 versions change one or two rules at a time. Only the last two years count (the owner's rule, `daytrade.PERIODS`):
@@ -27,7 +27,6 @@ from .core import MARKETS
 from .sim import Trade, run
 from .strategies import EmaPullback, LondonSweep, OpeningRange, VwapTrend
 
-NOW = int(time.time())
 OUT = REPORTS / "research"
 
 

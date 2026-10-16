@@ -8,7 +8,7 @@ jobs:
       - uses: astral-sh/setup-uv@v3
       - run: make install
       - run: make lint
-      - run: make -C arcus type
+      - run: make type
       - run: make test
       - name: no credentials tracked
         run: |

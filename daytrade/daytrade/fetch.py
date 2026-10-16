@@ -12,6 +12,7 @@ antigravity/.env. Every source is paced well under its limit, and a second run o
 from __future__ import annotations
 
 import datetime as dt
+import itertools
 import json
 import lzma
 import os
@@ -360,7 +361,7 @@ def funding(venue: str, sym: str) -> None:
             if len(rows) < 1000:
                 break
             start = int(rows[-1]["fundingTime"]) + 1
-        for (t0, _), (t1, rate) in zip(pays, pays[1:], strict=False):
+        for (t0, _), (t1, rate) in itertools.pairwise(pays):
             hours = max(1, round((t1 - t0) / 3600))
             for k in range(hours):
                 out[(t1 - (k + 1) * 3600) // 3600 * 3600] = rate / hours

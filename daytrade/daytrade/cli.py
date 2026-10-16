@@ -1,8 +1,11 @@
 """daytrade: the SPY, QQQ and gold day-trading strategies. Paper only.
 
-    daytrade fetch [alpaca] [gold] [lighter] [arcus] [duka]   download one-minute history (public data)
+    daytrade fetch [alpaca gold duka lighter arcus daily gold_hours funding]   public history (all when none named)
     daytrade backtest spy|qqq|xau [--tf 5] [--venue lighter] [--data NAME] [--since 2025-10-15]
-    daytrade research [spy] [qqq] [xau]                       every version, every timeframe, both venues
+    daytrade research [spy] [qqq] [xau]                       the day trades: every version, timeframe and venue
+    daytrade research intraday2 [qqq] [spy] [check|tables]    #2 VWAP rebound and #7 breakouts
+    daytrade research swing [spy] [qqq] [xau] [check|tables]  overnight, swing and the third list
+    daytrade research rotation                                #1 the monthly rotation
     daytrade check                                            the strategies on the venues' own prices vs the reference
     daytrade run [--tf 5] [--seconds N] [--no-swing]          the paper auto-trader (a server job), day and daily rules
     daytrade status                                           what it holds now and its paper results
@@ -53,7 +56,7 @@ def main(argv: list[str] | None = None) -> None:
     ap = argparse.ArgumentParser(prog="daytrade", description=__doc__, formatter_class=argparse.RawTextHelpFormatter)
     sub = ap.add_subparsers(dest="cmd", required=True)
     p = sub.add_parser("fetch")
-    p.add_argument("what", nargs="*")
+    p.add_argument("what", nargs="*", metavar="SOURCE")
     p = sub.add_parser("backtest")
     p.add_argument("market", choices=["spy", "qqq", "xau"])
     p.add_argument("--tf", type=int, default=5, choices=[1, 5, 15])
@@ -75,13 +78,21 @@ def main(argv: list[str] | None = None) -> None:
     if a.cmd == "fetch":
         from . import fetch
 
+        unknown = [w for w in a.what if w not in fetch.SOURCES]
+        if unknown:
+            ap.error(f"unknown source {', '.join(unknown)}: choose from {', '.join(fetch.SOURCES)}")
         fetch.main(a.what)
     elif a.cmd == "backtest":
         cmd_backtest(a)
     elif a.cmd == "research":
-        from . import research
+        from importlib import import_module
 
-        research.main(a.what)
+        study = {"intraday2": "intraday2", "swing": "swing_research", "rotation": "rotation"}.get(a.what[0] if a.what
+                                                                                                    else "")
+        if study:
+            import_module(f"daytrade.{study}").main(a.what[1:])
+        else:
+            import_module("daytrade.research").main(a.what)
     elif a.cmd == "check":
         from . import check
 

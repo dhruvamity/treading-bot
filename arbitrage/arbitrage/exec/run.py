@@ -13,6 +13,7 @@ Files in arbitrage/state/ (one set per mode, so a paper position is never mistak
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import json
 import os
 import signal
@@ -25,7 +26,7 @@ from typing import Any
 import aiohttp
 
 from arbitrage import scan as scanner
-from arbitrage.config import ROOT, STATE, Config, load, read_env
+from arbitrage.config import ROOT, STATE, Config, arcus_account, load, read_env
 from arbitrage.exec.engine import Engine, State
 from arbitrage.exec.venue import PaperVenue, Spec, TradeVenue, VenueDown
 from arbitrage.rank import Plan
@@ -156,10 +157,8 @@ def telegram_alert(env: dict[str, str]) -> Callable[[str], None] | None:
             pass
 
     def send(text: str) -> None:
-        try:
+        with contextlib.suppress(RuntimeError):
             asyncio.get_running_loop().create_task(post(text))
-        except RuntimeError:
-            pass
     return send
 
 
@@ -193,7 +192,7 @@ def live_venues() -> dict[str, TradeVenue]:
     from arbitrage.exec.arcus import ArcusTrade
     from arbitrage.exec.lighter import LighterTrade
 
-    return {"arcus": ArcusTrade(ROOT.parent / "arcus"), "lighter": LighterTrade(STATE)}
+    return {"arcus": ArcusTrade(ROOT.parent / "arcus", account=arcus_account()), "lighter": LighterTrade(STATE)}
 
 
 class PaperFunding:
@@ -261,10 +260,8 @@ async def run(mode: str, *, seconds: float | None = None, collateral: dict[str, 
     stop = asyncio.Event()
     loop = asyncio.get_running_loop()
     for sig in (signal.SIGINT, signal.SIGTERM):
-        try:
+        with contextlib.suppress(NotImplementedError, RuntimeError):
             loop.add_signal_handler(sig, stop.set)
-        except (NotImplementedError, RuntimeError):
-            pass
     store.event("started", f"started ({mode}); " + (f"holding {eng.st.symbol}" if eng.st.phase != "flat"
                                                     else "flat, looking for a position"))
     t_end = time.time() + seconds if seconds else None
@@ -276,22 +273,16 @@ async def run(mode: str, *, seconds: float | None = None, collateral: dict[str, 
                 books.write_text(json.dumps({name: v.dump() for name, v in venues.items()}))  # type: ignore[attr-defined]
             if funding is not None and time.time() - last_funding > 300:
                 last_funding = time.time()
-                try:
+                with contextlib.suppress(RuntimeError, aiohttp.ClientError, TimeoutError, OSError):
                     await funding.apply(eng, venues, time.time())
-                except (RuntimeError, aiohttp.ClientError, TimeoutError, OSError):
-                    pass
-            try:
+            with contextlib.suppress(TimeoutError):
                 await asyncio.wait_for(stop.wait(), LOOP_S.get(eng.st.phase, 5.0))
-            except TimeoutError:
-                pass
     finally:
         store.event("stopped", "stopped" + (f"; {eng.st.symbol} is still {eng.st.phase}: its orders and stops stay on "
                                             "the venues" if eng.st.phase != "flat" else ""))
         for v in venues.values():
-            try:
+            with contextlib.suppress(Exception):
                 await v.stop()
-            except Exception:   # noqa: BLE001  a venue that will not close cleanly must not hide the stop
-                pass
         if closer is not None:
             await asyncio.sleep(0)
     return eng.st

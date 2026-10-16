@@ -15,6 +15,7 @@ would each treat the other's position as theirs.
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import time
 from collections.abc import Callable
 from decimal import ROUND_DOWN, Decimal
@@ -46,12 +47,25 @@ def tpsl_orders(address: str, account_index: int, market_id: int, position: floa
     return out
 
 
+def pick_key(keys: list[Any], account: int | None) -> Any:
+    """The key to trade with: the active one bound to `account` when a subaccount is named (ARCUS_ACCOUNT_INDEX), else
+    the first active one. An Arcus key is bound to one subaccount, so this is what decides which subaccount trades."""
+    active = [k for k in keys if k.active]
+    if account is not None:
+        active = [k for k in active if int(k.account_index or 0) == account]
+    if not active:
+        where = f" bound to subaccount {account} (ARCUS_ACCOUNT_INDEX)" if account is not None else ""
+        raise RuntimeError(f"no active Arcus API key in arcus/.env for this address{where}: `arcus keys` lists them")
+    return active[0]
+
+
 class ArcusTrade:
     name = "arcus"
 
-    def __init__(self, bot_dir: Path, *, mainnet: bool = True) -> None:
+    def __init__(self, bot_dir: Path, *, mainnet: bool = True, account: int | None = None) -> None:
         self.bot_dir = bot_dir
         self.mainnet = mainnet
+        self.want_account = account          # the subaccount to trade (None: the first active key's)
         self.adapter: Any = None
         self.rest: Any = None
         self.markets: dict[str, Any] = {}
@@ -83,11 +97,8 @@ class ArcusTrade:
         pub = ArcusRest(url)
         try:
             self.address = arcus_address(s, not self.mainnet)
-            keys = [k for k in await discover_arcus_keys(pub, self.address, arcus_private_keys(s, not self.mainnet))
-                    if k.active]
-            if not keys:
-                raise RuntimeError("no active Arcus API key in arcus/.env for this address (`arcus keys` lists them)")
-            key = keys[0]
+            key = pick_key(await discover_arcus_keys(pub, self.address, arcus_private_keys(s, not self.mainnet)),
+                           self.want_account)
             lp = LiveParams(arcus=pub)
             await lp.refresh()
         finally:
@@ -99,6 +110,11 @@ class ArcusTrade:
         self.adapter = ArcusAdapter(self.rest, None, address=self.address, account_index=self.account,
                                     markets=self.markets)
         self._ids = ClientIdFactory("manual", int(time.time()) // 60 % 46_000)
+
+    async def whoami(self) -> tuple[str, int]:
+        """The wallet address and the subaccount this client trades: its API key's."""
+        await self._call(self._connect())
+        return self.address, self.account
 
     async def _call(self, coro: Any) -> Any:
         """Run one venue call; anything that may pass (a timeout, a 5xx, a rate limit) becomes VenueDown."""
@@ -185,10 +201,8 @@ class ArcusTrade:
         rec = self._orders.get(order_id)
         if rec is None or not rec["info"].open:
             return
-        try:
+        with contextlib.suppress(VenueError):       # already gone (filled or cancelled): `order` will say which
             await self._call(self.adapter.cancel([order_id]))
-        except VenueError:                # already gone (filled or cancelled): `order` will say which
-            pass
 
     async def order(self, symbol: str, order_id: str) -> OrderInfo | None:
         from arcus.common.errors import VenueError
@@ -223,10 +237,8 @@ class ArcusTrade:
         await self._call(self.adapter.cancel_all(symbol))
         m = self.markets[symbol]
         for oid in self._stops.pop(symbol, []):       # the stop orders too, in case cancel-all leaves them
-            try:
+            with contextlib.suppress(VenueError):
                 await self._call(self.rest.cancel_order(self.account, m.venue_market_id, order_id=oid))
-            except VenueError:
-                pass
         for rec in self._orders.values():
             if rec["info"].open:
                 rec["info"].note = "cancel sent"

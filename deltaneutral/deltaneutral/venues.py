@@ -6,7 +6,7 @@ margin rules, whether Arcus's stock markets are closed, and the funding rates.
 - live: the arbitrage's own live clients (arbitrage/exec/arcus.py and lighter.py: the same keys as the other bots,
   in arcus/.env and lighter/.env). Lighter's client trades one market, so each market gets its own, sharing one
   nonce counter (Lighter refuses a nonce that does not rise). Each venue's money is read from its public account
-  endpoint (ARCUS_ADDRESS, ARCUS_ACCOUNT_INDEX, LIGHTER_ACCOUNT_INDEX).
+  endpoint, for the accounts those clients trade (Arcus: the API key's subaccount; Lighter: its account index).
 """
 
 from __future__ import annotations
@@ -19,6 +19,7 @@ from typing import Any
 
 from arbitrage import venues as AV
 from arbitrage.exec.venue import PaperVenue, Spec, TradeVenue
+from lighter_bot.config import env_file
 
 from . import ROOT, STATE
 from . import plan as P
@@ -29,27 +30,17 @@ ENV_KEYS = ("ARCUS_ADDRESS", "ARCUS_ACCOUNT_INDEX", "LIGHTER_ACCOUNT_INDEX", "TE
             "BOT_ROLE")
 
 
-def _env_file(p: Path) -> dict[str, str]:
-    out: dict[str, str] = {}
-    try:
-        for line in p.read_text().splitlines():
-            line = line.strip()
-            if line and not line.startswith("#") and "=" in line:
-                k, v = line.split("=", 1)
-                if v.strip():
-                    out[k.strip()] = v.strip().strip('"').strip("'")
-    except OSError:
-        pass
-    return out
-
-
 def read_env() -> dict[str, str]:
-    """The bot's one credentials file (treading-bot/arcus/.env), lighter/.env for Lighter's account, then
-    deltaneutral/.env, then the process environment. Only the names this part uses (and DN_*)."""
+    """The bot's one credentials file (treading-bot/arcus/.env), then lighter/.env over it (as the Lighter bot reads
+    them), then deltaneutral/.env, then the process environment. Only the names this part uses (and DN_*);
+    ARCUS_WALLET_ADDRESS counts as ARCUS_ADDRESS, as in the Arcus bot."""
     ours = lambda k: k in ENV_KEYS or k.startswith("DN_")       # noqa: E731
     out: dict[str, str] = {}
-    for p in (ROOT.parent / "lighter" / ".env", ROOT.parent / "arcus" / ".env", ROOT / ".env"):
-        out.update({k: v for k, v in _env_file(p).items() if ours(k)})
+    for p in (ROOT.parent / "arcus" / ".env", ROOT.parent / "lighter" / ".env", ROOT / ".env"):
+        f = env_file(p)
+        if "ARCUS_WALLET_ADDRESS" in f:
+            f.setdefault("ARCUS_ADDRESS", f["ARCUS_WALLET_ADDRESS"])
+        out.update({k: v for k, v in f.items() if ours(k)})
     out.update({k: v for k, v in os.environ.items() if ours(k) and v})
     return out
 
@@ -218,6 +209,11 @@ class LighterPair:
         for t in self.legs.values():
             await t.stop()
 
+    def account(self) -> int | None:
+        """The Lighter account the client trades, once a market has started."""
+        first = next(iter(self.legs.values()), None)
+        return int(first.account) if first is not None and first.account else None
+
     @property
     def maker_life_s(self) -> float | None:
         """How long a resting order may stay before the engine replaces it (Lighter drops it at its expiry)."""
@@ -255,24 +251,30 @@ class LighterPair:
         await self.legs[symbol].set_leverage(symbol, leverage)
 
 
-def live(env: dict[str, str]) -> tuple[dict[str, TradeVenue], dict[str, Any]]:
+def live(env: dict[str, str], names: dict[str, str]) -> tuple[dict[str, TradeVenue], dict[str, Any]]:
+    """The live venues, and each one's money read for the account its client trades (the Arcus key's subaccount,
+    Lighter's account index). `names` (the transfer notice's) is filled in once those are known."""
     from arbitrage.exec.arcus import ArcusTrade
 
-    addr = env.get("ARCUS_ADDRESS", "").strip()
-    a_idx = int(env.get("ARCUS_ACCOUNT_INDEX") or 0)
-    l_idx = env.get("LIGHTER_ACCOUNT_INDEX", "").strip()
-    if not addr or not l_idx:
-        raise RuntimeError("ARCUS_ADDRESS and LIGHTER_ACCOUNT_INDEX must be in arcus/.env: the bot reads each "
-                           "venue's money from them")
     arcus, lighter = AV.Arcus(), AV.Lighter()
+    sub = env.get("ARCUS_ACCOUNT_INDEX", "").strip()
+    at, lp = ArcusTrade(ROOT.parent / "arcus", account=int(sub) if sub.isdigit() else None), LighterPair(STATE)
 
     async def a_eq() -> float:
-        return (await arcus.equity(addr, a_idx))[0]
+        addr, idx = await at.whoami()
+        names[ARCUS] = f"Arcus ({addr[:6]}…{addr[-4:]}, subaccount {idx})"
+        return (await arcus.equity(addr, idx))[0]
 
     async def l_eq() -> float:
-        return (await lighter.equity(int(l_idx)))[0]
-    venues: dict[str, TradeVenue] = {ARCUS: ArcusTrade(ROOT.parent / "arcus"),
-                                     LIGHTER: LighterPair(STATE)}     # type: ignore[dict-item]
+        idx = lp.account()
+        if idx is None:
+            idx = int(env["LIGHTER_ACCOUNT_INDEX"]) if env.get("LIGHTER_ACCOUNT_INDEX", "").strip() else None
+        if idx is None:
+            raise RuntimeError("Lighter's account is not known yet: LIGHTER_ACCOUNT_INDEX in lighter/.env or "
+                               "arcus/.env tells it before the first order")
+        names[LIGHTER] = f"Lighter (account {idx})"
+        return (await lighter.equity(idx))[0]
+    venues: dict[str, TradeVenue] = {ARCUS: at, LIGHTER: lp}     # type: ignore[dict-item]
     return venues, {ARCUS: a_eq, LIGHTER: l_eq}
 
 

@@ -1,3 +1,5 @@
+import itertools
+
 import numpy as np
 
 from daytrade import bars as B
@@ -93,7 +95,7 @@ def gold_day() -> B.Bars:
         sp[f"{m // 60:02d}:{m % 60:02d}"] = (p, p + 0.2, p - 0.2, p)
     path = [(7, 0, 2006), (7, 15, 2008.5), (7, 20, 2004), (7, 30, 1997), (7, 35, 1995), (7, 40, 1998),
             (7, 45, 2001), (7, 50, 2004), (7, 55, 2006), (8, 0, 2007), (8, 5, 2009), (8, 10, 2010), (8, 15, 2011)]
-    for (h0, m0, p0), (h1, m1, p1) in zip(path, path[1:], strict=False):
+    for (h0, m0, p0), (h1, m1, p1) in itertools.pairwise(path):
         a, z = h0 * 60 + m0, h1 * 60 + m1
         for m in range(a, z):
             p = p0 + (p1 - p0) * (m - a) / (z - a)

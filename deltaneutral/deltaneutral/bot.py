@@ -76,7 +76,7 @@ async def run(mode: str, *, seconds: float | None = None, collateral: dict[str, 
     st_ = store(mode, echo, telegram_alert(env))
     paper_sides: dict[str, V.PaperSide] = {}
     if mode == "live":
-        venues, equity = V.live(env)
+        venues, equity = V.live(env, names)
     else:
         paper_sides, equity = V.paper(collateral or {"arcus": 100.0, "lighter": 100.0})
         venues = paper_sides            # type: ignore[assignment]

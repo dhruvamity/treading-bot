@@ -2,7 +2,6 @@
 
     arbitrage scan [--top 10] [--arcus 120 --lighter 120] [--feeds]    rank the markets both venues list
     arbitrage plan SPY [--arcus 120 --lighter 120]                     one market's plan: sizes, stops, what it pays
-    arbitrage paper open SPY | status | close SPY                      a paper record of holding it
     arbitrage feeds                                                    ProFunding's and arb.sh's view, as a cross-check
     arbitrage history                                                  download both venues' funding and price history
     arbitrage backtest [--capital 240] [--symbols SPY ...]             the rules replayed on all of it
@@ -32,11 +31,10 @@ from dataclasses import asdict, replace
 from pathlib import Path
 from zoneinfo import ZoneInfo
 
-from arbitrage import feeds, paper
+from arbitrage import feeds
 from arbitrage import scan as scanner
-from arbitrage.config import ADJUSTABLE, ROOT, STATE, Config, load, set_value
+from arbitrage.config import ADJUSTABLE, ROOT, STATE, Config, arcus_account, load, set_value
 from arbitrage.rank import Plan
-from arbitrage.venues import Arcus, Lighter
 
 IST = ZoneInfo("Asia/Kolkata")
 NAMES = {"arcus": "Arcus", "lighter": "Lighter"}
@@ -149,74 +147,6 @@ async def cmd_feeds(a: argparse.Namespace, cfg: Config, res: scanner.Scan | None
     return 0
 
 
-Mids = dict[str, dict[str, float]]
-Rates = dict[str, dict[str, dict[int, float]]]
-
-
-async def mids_and_history(pos_syms: list[str]) -> tuple[Mids, Rates]:
-    arcus, lighter = Arcus(), Lighter()
-    hist = scanner.History(STATE)
-    now = time.time()
-    try:
-        await lighter.legs()
-        mids: Mids = {}
-        hs: Rates = {}
-        for s in pos_syms:
-            (ab, aa), (lb, la) = await arcus.top(s), await lighter.top(s)
-            mids[s] = {"arcus": (ab + aa) / 2, "lighter": (lb + la) / 2}
-            hs[s] = {"arcus": await hist.fresh("arcus", s, arcus, now),
-                     "lighter": await hist.fresh("lighter", s, lighter, now)}
-        return mids, hs
-    finally:
-        await arcus.http.close()
-        await lighter.http.close()
-
-
-async def cmd_paper(a: argparse.Namespace, cfg: Config) -> int:
-    book_path, log_path = STATE / "paper.json", STATE / "paper_history.jsonl"
-    book = paper.load(book_path)
-    now = time.time()
-    if a.action == "open":
-        sym = a.symbol.upper()
-        if sym in book:
-            print(f"{sym} is already open on paper")
-            return 1
-        res = await scanner.run(cfg, symbols=[sym], collateral=collateral_arg(a))
-        if not res.plans or res.plans[0].size <= 0:
-            print(f"{sym}: nothing to open (not on both venues, or no collateral: give --arcus and --lighter)")
-            return 1
-        p = res.plans[0]
-        mids, _ = await mids_and_history([sym])
-        book[sym] = paper.open_position(p, mids[sym], cfg.settings, now)
-        paper.save(book_path, book)
-        print(detail(p, cfg))
-        print(f"\nOpened on paper at Arcus {mids[sym]['arcus']:,.6g}, Lighter {mids[sym]['lighter']:,.6g}"
-              + ("" if p.go else "  (the scan says NOT NOW; recorded anyway)"))
-        return 0
-    if not book:
-        print("no paper position open")
-        return 0
-    syms = [a.symbol.upper()] if a.action == "close" else sorted(book)
-    if a.action == "close" and syms[0] not in book:
-        print(f"{syms[0]} is not open on paper")
-        return 1
-    mids, hs = await mids_and_history(syms)
-    for sym in syms:
-        pos = book[sym]
-        r = paper.mark(pos, mids[sym], hs[sym], now, closing=a.action == "close")
-        print(f"{sym}: short {NAMES[pos.short_venue]}, long {NAMES[pos.long_venue]}, ${pos.notional:,.0f} a leg, "
-              f"{r['hours']:.1f} h\n  funding ${r['funding']:+.3f} ({int(r['payments'])} payments) · price gap between "
-              f"the venues ${r['basis']:+.3f} · fills ${-r['cost']:.3f} · net ${r['net']:+.3f}"
-              + (f"\n  ! the price moved {r['move'] * 100:.2f}%: past the {pos.stop_dist * 100:.2f}% stop"
-                 if r["stop_hit"] else ""))
-        if a.action == "close":
-            paper.log_close(log_path, pos, r, now)
-            del book[sym]
-    if a.action == "close":
-        paper.save(book_path, book)
-    return 0
-
-
 def cmd_settings(a: argparse.Namespace, cfg: Config) -> int:
     if a.cmd == "set":
         try:
@@ -322,7 +252,7 @@ def cmd_run(a: argparse.Namespace, cfg: Config) -> int:
         return 1
     if mode == "live":
         if read_env().get("ARB_LIVE", "").strip() != "1":
-            print("LIVE is off: put ARB_LIVE=1 in arcus/.env first (README.md, section 6). Nothing was sent.")
+            print("LIVE is off: put ARB_LIVE=1 in arcus/.env first (arbitrage/README.md, section 6). Nothing was sent.")
             return 1
         if not a.yes:
             print("This places REAL orders on Arcus and on Lighter with the keys in arcus/.env and lighter/.env.")
@@ -410,7 +340,7 @@ def cmd_livetest(a: argparse.Namespace, cfg: Config) -> int:
               "one account")
         return 1
     if read_env().get("ARB_LIVE", "").strip() != "1":
-        print("LIVE is off: put ARB_LIVE=1 in arcus/.env first (README.md, section 6). Nothing was sent.")
+        print("LIVE is off: put ARB_LIVE=1 in arcus/.env first (arbitrage/README.md, section 6). Nothing was sent.")
         return 1
     symbol = a.symbol.upper()
     parts = ("lighter", "arcus", "engine") if a.what == "all" else (a.what,)
@@ -431,7 +361,7 @@ def cmd_livetest(a: argparse.Namespace, cfg: Config) -> int:
             rep = asyncio.run(legtest.LegTest(LighterTrade(STATE), symbol, max_loss=a.max_loss,
                                               expiry=a.expiry).run())
         elif part == "arcus":
-            rep = asyncio.run(legtest.ArcusLegTest(ArcusTrade(ROOT.parent / "arcus"), symbol,
+            rep = asyncio.run(legtest.ArcusLegTest(ArcusTrade(ROOT.parent / "arcus", account=arcus_account()), symbol,
                                                    max_loss=a.max_loss).run())
             rep.title = "the Arcus leg"
         else:
@@ -451,7 +381,7 @@ async def _run_drill(symbol: str, max_loss: float, hold: float, state: Path) -> 
     from arbitrage.exec.arcus import ArcusTrade
     from arbitrage.exec.lighter import LighterTrade
 
-    arcus, lighter = ArcusTrade(ROOT.parent / "arcus"), LighterTrade(state)
+    arcus, lighter = ArcusTrade(ROOT.parent / "arcus", account=arcus_account()), LighterTrade(state)
     # the reads that check the engine come from the same two adapters, through the leg tests' readers
     grounds = {"arcus": legtest.ArcusLegTest(arcus, symbol), "lighter": legtest.LegTest(lighter, symbol)}
     return await drill.Drill({"arcus": arcus, "lighter": lighter}, grounds, symbol, max_loss=max_loss,
@@ -632,10 +562,6 @@ def main(argv: list[str] | None = None) -> None:
     p = sub.add_parser("plan", help="one market's plan")
     p.add_argument("symbol")
     money(p)
-    p = sub.add_parser("paper", help="a paper record of holding a pair")
-    p.add_argument("action", choices=("open", "status", "close"))
-    p.add_argument("symbol", nargs="?")
-    money(p)
     sub.add_parser("feeds", help="ProFunding's and arb.sh's view")
     p = sub.add_parser("backtest", help="the rules replayed on all the history there is")
     p.add_argument("--capital", type=float, default=240.0)
@@ -712,8 +638,6 @@ def main(argv: list[str] | None = None) -> None:
     p.add_argument("name")
     p.add_argument("value")
     a = ap.parse_args(argv)
-    if a.cmd == "paper" and a.action in ("open", "close") and not a.symbol:
-        ap.error(f"paper {a.action} needs a market, e.g. arbitrage paper {a.action} SPY")
     if a.cmd == "feeds":
         a.arcus = a.lighter = None
     cfg = load()
@@ -738,7 +662,7 @@ def main(argv: list[str] | None = None) -> None:
              "livetest": cmd_livetest}
     if a.cmd in plain:
         sys.exit(plain[a.cmd](a, cfg))
-    fn = {"scan": cmd_scan, "plan": cmd_plan, "paper": cmd_paper, "feeds": cmd_feeds}[a.cmd]
+    fn = {"scan": cmd_scan, "plan": cmd_plan, "feeds": cmd_feeds}[a.cmd]
     sys.exit(asyncio.run(fn(a, cfg)))
 
 

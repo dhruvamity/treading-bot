@@ -4,19 +4,20 @@ Maker (limit-order) trading on **Lighter perps on Robinhood Chain**, built from 
 Lighter: the same setups (**Mid**, **Grid**, **Smart**, a directional **bias**, run limits `sl=` `tp=` `vol=`, plus **Touch**, a
 Lighter-only mode) and the same scout (record, backtest, rank into three lists), pilot and autopilot.
 
-It is one of three bots in the [repository](../README.md): installed by `make install`, started by `tbot up`, its keys in the one
-`.env`, and controlled from the one Telegram bot, where a Lighter command is the Arcus command with `l_` in front (`/l_status`,
+It is one of five parts of the [repository](../README.md): installed by `make install`, started by `tbot up`, its keys in the one
+`arcus/.env`, and controlled from the one Telegram bot, where a Lighter command is the Arcus command with `l_` in front (`/l_status`,
 `/l_run`, `/l_closeall`). What stays its own is what must: its engine (Lighter's orders, fees and limits are not Arcus's), its data
 (`lighter/data`), its settings and its state.
 
-**`lighter <command>` in this guide is `.venv/bin/lighter <command>`**, run from `treading-bot/arcus`.
+**`lighter <command>` works from any folder** once `make install` has put the commands on your PATH (main README, section 2).
 
 On two machines (`BOT_ROLE` in `arcus/.env`, [main README](../README.md#two-machines-one-records-one-trades)) the Lighter scout does
 what the role says: a `recorder` records only, a `trader` neither records nor scans and follows the lists the other machine makes
 (the same `tbot sync` fetches Arcus's and Lighter's together), and neither a `recorder` nor a `scout` machine starts a run.
 
 A standard Lighter account pays **0% maker and 0% taker**. The backtests on Lighter's recorded books put the best setups at **−0.1 to
-0.3 bp per dollar traded**, against 0.8–1.7 bp for the best Arcus ones. Only a few recorded days back that: it has never sent a live order.
+0.3 bp per dollar traded**, against 0.8–1.7 bp for the best Arcus ones. Only a few recorded days back that, and live it has run once
+for ten minutes at the smallest size (2026-10-10, section 6).
 
 > **Risk warning.** Experimental software that can place real orders with real money. Backtests are estimates. Run paper first, then
 > small. Nothing here is financial advice.
@@ -25,10 +26,10 @@ A standard Lighter account pays **0% maker and 0% taker**. The backtests on Ligh
 
 | Command | What it does |
 |---|---|
-| `make install` | One time, in the repository root: all three bots into `arcus/.venv` |
+| `make install` | One time, in the repository root: every part into `arcus/.venv` |
 | `lighter up` / `lighter scout` | The Lighter scout alone, in the background: records every Lighter perp, scans every 30 min, runs the Lighter autopilot |
 | `tbot up` | Everything this machine is for: the Arcus scout, this scout and the one Telegram bot (`tbot up lighter` = this scout, `tbot up telegram` = the bot) |
-| `lighter status` | This bot on one screen: the scout, the recorder, the run and the lists. `tbot status` shows all three bots |
+| `lighter status` | This bot on one screen: the scout, the recorder, the run and the lists. `tbot status` shows every part |
 | `lighter run SPY "smart +1"` | Paper run in this terminal (Ctrl-C stops it; `--bg` in the background) |
 | `lighter pilot approve 1` | Run the Most Volume list's #1 in paper (`--list cheapest`/`max`, `--live`) |
 | `lighter close` / `lighter stop` | Close the position and stop / stop with the position kept |
@@ -90,14 +91,14 @@ Telegram needs nothing here: the one Telegram bot (`TELEGRAM_BOT_TOKEN`, `TELEGR
 **Getting an API key** (once, on your own machine). Registering a key needs a signature from your wallet, so it is your step:
 
 ```bash
-cd treading-bot/arcus && .venv/bin/python ../lighter/scripts/register_key.py --slot 4
+cd treading-bot && python lighter/scripts/register_key.py --slot 4
 ```
 
 It asks for the wallet's private key (hidden, used once, never stored), makes a key pair, registers it and prints the three lines for
-`.env`. Then check everything:
+`arcus/.env`. Then check everything:
 
 ```bash
-.venv/bin/lighter doctor SPY
+lighter doctor SPY
 ```
 
 `doctor` is read-only and checks the switch, the credentials and the signer; the clock against Lighter's; the account, its funds, that
@@ -204,7 +205,7 @@ wild in the last hour, its data fresh.
   Volume; or Telegram ▶️ → 📝 Paper.
 - **Live**, in order:
   1. Register a key and fund the account ([section 2](#2-credentials)).
-  2. Put `LBOT_LIVE=1` in `.env`.
+  2. Put `LBOT_LIVE=1` in `arcus/.env`.
   3. `lighter doctor SPY` must say READY, and the `account tier` line must say standard.
   4. `lighter run SPY "smart +1" --live --sl 10`, read the doctor's lines, and type `LIVE`. From Telegram: 🔴 LIVE, then type the 6-digit
      code it sends within 2 minutes.
@@ -212,7 +213,7 @@ wild in the last hour, its data fresh.
   does every kind of request the bot sends, once, with the smallest order Lighter takes, and asks Lighter after each what happened:
 
   ```bash
-  .venv/bin/lighter livetest
+  lighter livetest
   ```
 
   It needs `LBOT_LIVE=1`, a passing doctor and `LIVE` typed at its prompt; nothing else can start it (not Telegram, not a flag). It
@@ -247,7 +248,7 @@ wild in the last hour, its data fresh.
   the first time, with as little money at work as Lighter allows:
 
   ```bash
-  .venv/bin/lighter run SPY "smart 0" --lev 2 --capital 16 --live --sl 1 --seconds 600 --flat
+  lighter run SPY "smart 0" --lev 2 --capital 16 --live --sl 1 --seconds 600 --flat
   ```
 
   $16 at 2x gives orders of about $13 and never more than $26 held; the position stop is $0.32, the stop on Lighter sits at

@@ -1,2 +1,2 @@
-"""Funding-rate arbitrage between Arcus and Lighter on Robinhood Chain. Read-only so far: it scans, plans and keeps a
-paper record; it holds no trading key and sends no order."""
+"""Funding-rate arbitrage between Arcus and Lighter on Robinhood Chain: it scans, plans, backtests and holds one
+position across both venues (paper by default; live behind ARB_LIVE=1 and a typed LIVE)."""

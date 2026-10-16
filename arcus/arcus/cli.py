@@ -1,5 +1,5 @@
-"""The Arcus command line (`arcus <command>`; `arcus -h` lists them). What belongs to the whole machine (all three
-bots, the Telegram bot, export, import) is `tbot` (main_tbot below).
+"""The Arcus command line (`arcus <command>`; `arcus -h` lists them). What belongs to the whole machine (every part,
+the Telegram bot, export, import) is `tbot` (main_tbot below). Both work from any folder (go_home).
 
     arcus up                        start the Arcus part: its scout, and the guardian while a live run exists
     arcus scout [stop]              start (or stop) the Arcus scout alone; `scout run|scan|limits|playbook` as before
@@ -614,7 +614,7 @@ def cmd_telegram(a: argparse.Namespace) -> None:
     s = SecretStore()
     tok, chat = s.get("TELEGRAM_BOT_TOKEN"), s.get("TELEGRAM_CHAT_ID")
     if not tok or not chat:
-        print("set TELEGRAM_BOT_TOKEN and TELEGRAM_CHAT_ID in .env first (README.md, section 2)")
+        print("set TELEGRAM_BOT_TOKEN and TELEGRAM_CHAT_ID in arcus/.env first (the main README, section 2)")
         sys.exit(2)
     allowed = {int(x) for x in (s.get("TELEGRAM_ALLOWED_USER_IDS") or "").replace(" ", "").split(",") if x}
     api = TelegramAPI(tok)
@@ -882,7 +882,7 @@ def cmd_export(a: argparse.Namespace) -> None:
           "the next plain `tbot export` still sends everything since the last full or plain one")
     print("\nCopy it to the other machine, for example from there:\n"
           f"  scp {getpass.getuser()}@THIS-SERVER:{res.path} ~/Downloads/\n"
-          "then, in treading-bot/arcus there:\n  .venv/bin/tbot import")
+          "then there:\n  tbot import")
 
 
 def cmd_import(a: argparse.Namespace) -> None:
@@ -920,9 +920,9 @@ def cmd_sync(a: argparse.Namespace) -> None:
                                                              for k, v in st["refused"].items()))
         elif a.action == "key":
             pub = handoff.make_key(handoff.key_path())
-            print(f"{pub}\n\nOn the OTHER machine (the one that records), in treading-bot/arcus, paste that line "
-                  f"in quotes:\n  .venv/bin/tbot sync allow '{pub}'\n\nThen here, put its address in .env "
-                  f"({handoff.FROM}=user@its-address) and try:\n  .venv/bin/tbot sync pull")
+            print(f"{pub}\n\nOn the OTHER machine (the one that records), paste that line in quotes:\n"
+                  f"  tbot sync allow '{pub}'\n\nThen here, put its address in arcus/.env "
+                  f"({handoff.FROM}=user@its-address) and try:\n  tbot sync pull")
         elif a.action == "allow":
             if not a.arg:
                 raise handoff.SyncError("give the public key `tbot sync key` printed on the trader, in quotes")
@@ -1190,22 +1190,33 @@ def build_parser() -> argparse.ArgumentParser:
     return p
 
 
+HOME = Path(__file__).resolve().parents[1]      # treading-bot/arcus: config/, data/, state/, logs/, .env
+
+
+def go_home() -> None:
+    """Every command works in the arcus folder, whatever folder it is typed in (BOT_HOME names another one). A copy
+    installed without its folder (no config/app.yaml next to the package) keeps the folder it was started in."""
+    home = os.environ.get("BOT_HOME") or (str(HOME) if (HOME / "config" / "app.yaml").exists() else os.getcwd())
+    os.chdir(home)
+
+
 TBOT_DELEGATED = ("telegram", "export", "import", "sync", "recommend")
-TBOT_HELP = """tbot: the commands that belong to no single bot (one install, three bots, one Telegram bot)
+TBOT_HELP = """tbot: the commands that belong to the whole machine, not to one part (one install, one .env, one Telegram bot)
 
   tbot up [parts]                        start those parts; with none named, all of them (BOT_ROLE decides what a part is)
   tbot down [parts] [--all]              stop them; --all also stops their runs (quotes cancelled, positions kept)
   tbot status                            one screen for the whole machine
   tbot role [trader|recorder|scout|all]  what this machine is for (BOT_ROLE in .env): say it, or set it
   tbot scout [arcus|lighter|both]        start the scouts (--stop stops them)
-  tbot telegram [--read-only]            the one Telegram bot for Arcus, Lighter and the arbitrage, in this terminal
+  tbot telegram [--read-only]            the one Telegram bot for every part, in this terminal
   tbot recommend [MARKET ...] [--scan]   the best setups of each list, as the Telegram lines to paste
   tbot export / import / sync            one file with everything recorded and traded / take it in / two machines
 
 parts: arcus = its scout (and the guardian while a live run exists), lighter = its scout, telegram = the bot, daytrade =
 its paper bot (no orders; only where BOT_ROLE is all or trader), deltaneutral = the delta-neutral pair bot's paper bot
 (only when named; live: deltaneutral start --live), scouts = arcus + lighter. Each bot also has its own:
-`arcus up|down|status|scout`, `lighter up|down|status|scout`, `arbitrage start|stop|status`.
+`arcus up|down|status|scout`, `lighter up|down|status|scout`, `arbitrage start|stop|status`,
+`deltaneutral start|stop|status`, `daytrade run|status`. Every command works from any folder.
 """
 
 
@@ -1234,14 +1245,14 @@ def main_tbot(argv: list[str] | None = None) -> None:
     sp.add_argument("which", nargs="?", choices=["arcus", "lighter", "both"], default="both")
     sp.add_argument("--stop", action="store_true")
     sp.set_defaults(fn=cmd_tbot_scout)
-    os.chdir(os.environ.get("BOT_HOME", os.getcwd()))
+    go_home()
     load_dotenv(".env")
     a = p.parse_args(args)
     a.fn(a)
 
 
 def main(argv: list[str] | None = None) -> None:
-    os.chdir(os.environ.get("BOT_HOME", os.getcwd()))
+    go_home()
     load_dotenv(".env")
     a = build_parser().parse_args(argv)
     a.fn(a)

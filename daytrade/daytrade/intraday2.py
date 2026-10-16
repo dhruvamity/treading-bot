@@ -11,9 +11,9 @@
 Fills and costs are those of the first three (sim.py). Only the last two years count (the owner's rule,
 `daytrade.PERIODS`): versions are ranked on the first of them and judged on the last twelve months.
 
-    python -m daytrade.intraday2           # every version on QQQ and SPY -> reports/intraday2/
-    python -m daytrade.intraday2 tables    # the report's tables from reports/intraday2/summary.csv
-    python -m daytrade.intraday2 check     # the main versions on Lighter's own prices against the reference
+    daytrade research intraday2            # every version on QQQ and SPY -> reports/intraday2/
+    daytrade research intraday2 tables     # the report's tables from reports/intraday2/summary.csv
+    daytrade research intraday2 check      # the main versions on Lighter's own prices against the reference
 """
 
 from __future__ import annotations

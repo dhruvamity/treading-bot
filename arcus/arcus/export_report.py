@@ -99,7 +99,7 @@ def host_text(r: Roots, now: float) -> str:
         mem = f"{int(m) / 1e9:.1f} GB"
     lines.append(f"memory    {mem or '?'}")
     lines.append(f"uptime    {_sh(['uptime']) or '?'}")
-    for label, p in (("arcus", r.arcus), ("lighter", r.lighter), ("arbitrage", r.arbitrage)):
+    for label, p in r.parts():
         with contextlib.suppress(OSError):
             u = shutil.disk_usage(p)
             lines.append(f"disk      {label}: {u.free / 1e9:.1f} GB free of {u.total / 1e9:.0f} GB ({p})")
@@ -210,7 +210,7 @@ def env_names_text(r: Roots) -> str:
     from arcus.export import _env_pairs
 
     lines = ["Which settings each .env has. Values are never exported, except switches and account indexes."]
-    for label, root in (("arcus", r.arcus), ("lighter", r.lighter), ("arbitrage", r.arbitrage)):
+    for label, root in r.parts():
         pairs = list(_env_pairs(root / ".env"))
         lines.append(f"\n{label}/.env" + ("" if pairs else ": none"))
         lines += [f"  {k} = {(v if k in SHOWN else 'set') if v else '(empty)'}" for k, v in pairs]
@@ -414,6 +414,37 @@ def arb_lines(rec: Path) -> list[str]:
     return out or ["The funding arbitrage has not run on this machine."]
 
 
+def daytrade_lines(rec: Path) -> list[str]:
+    state = rec / "daytrade" / "state"
+    st = _json(state / "paper_status.json") or {}
+    trades = list(_jsonl(state / "paper_trades.jsonl"))
+    if not st and not trades:
+        return ["The daytrade paper bot has not run on this machine."]
+    out = [f"- **paper** (no orders), last look {st.get('utc', '?')} UTC:"] if st else []
+    out += [f"  - {k}: {str(v.get('state') or v.get('error') or '')[:140]}" for k, v in (st.get("slots") or {}).items()]
+    if trades:
+        last = trades[-1]
+        out.append(f"- {len(trades)} paper trades closed; the last: {last.get('slot')} {last.get('side')} "
+                   f"{last.get('entry_utc')} UTC, {last.get('reason')}, {last.get('bp', '?')} bp.")
+    return out
+
+
+def deltaneutral_lines(rec: Path) -> list[str]:
+    state = rec / "deltaneutral" / "state"
+    out: list[str] = []
+    for mode in ("live", "paper"):
+        st = _json(state / f"{mode}-state.json")
+        if not st:
+            continue
+        cycles = list(_jsonl(state / f"{mode}-cycles.jsonl"))
+        made = sum(sum((c.get("made") or {}).values()) for c in cycles)
+        out.append(f"- **{mode}:** {st.get('phase') or 'flat'}, pair {st.get('x')}/{st.get('y')}, cycle "
+                   f"{st.get('cycle')}; {len(cycles)} cycles closed, {_money(made)} made in all.")
+        out += [f"  - {_utc(_secs(e.get('ts')))} {e.get('kind')}: {str(e.get('text') or '')[:160]}"
+                for e in list(_jsonl(state / f"{mode}-events.jsonl"))[-6:]]
+    return out or ["The delta-neutral bot has not run on this machine."]
+
+
 def _crashes(p: Path) -> Iterator[tuple[str, list[str]]]:
     """(how it ended, the traceback) for each Python traceback printed in a service's or a run's own output."""
     block: list[str] | None = None
@@ -439,7 +470,8 @@ def log_problems(rec: Path, limit: int = 30) -> list[str]:
     """Warnings and errors in the exported logs, grouped: how often, when last, what it said. Then the crashes."""
     seen: dict[tuple[str, str, str, str], list[Any]] = {}
     crashes: dict[str, list[Any]] = {}
-    files = [p for part in ("arcus", "lighter", "arbitrage") for p in sorted((rec / part).rglob("*"))
+    files = [p for part in ("arcus", "lighter", "arbitrage", "daytrade", "deltaneutral")
+             for p in sorted((rec / part).rglob("*"))
              if p.is_file() and ("logs" in p.parts or p.suffix == ".out")]
     for p in files:
         part = p.relative_to(rec).parts[0]
@@ -506,13 +538,15 @@ def summary(rec: Path, meta: dict[str, Any], coverage: str, warnings: list[str])
            if meta.get("changed") else "") + ".", "",
         f"**Holds:** {meta['contents']}."
         + (f" The export before it was `{meta['prev']}`." if meta.get("prev") else ""), "",
-        "Take it in on another machine with `tbot import <this file>` (from `treading-bot/arcus`): the tape is merged "
+        "Take it in on another machine with `tbot import <this file>`: the tape is merged "
         "into the tape folders, everything else lands in `arcus/data/server-export/" + meta["name"] + "/`.", "",
         "## 1. The bot at that moment", "", "```", text("status.txt"), "```", "",
         "## 2. The machine", "", "```", text("host.txt"), "", text("network.txt"), "```", "",
         "Processes:", "", "```", text("processes.txt"), "```", "",
         "## 3. Trading", "", *arcus_lines(rec), "", "### Lighter", "", *lighter_lines(rec), "",
         "### Funding arbitrage", "", *arb_lines(rec), "",
+        "### Daytrade (paper)", "", *daytrade_lines(rec), "",
+        "### Delta neutral", "", *deltaneutral_lines(rec), "",
         "## 4. Problems in the logs", "", *log_problems(rec), "",
         "## 5. The recording", "", *recorder_lines(rec, now), "",
         "Tape in this export, counted before packing (`coverage.csv` has every market, day and kind):", "",
@@ -528,6 +562,8 @@ def summary(rec: Path, meta: dict[str, Any], coverage: str, warnings: list[str])
             ["`arcus/config/`", "app.yaml, the session files, calendars"],
             ["`lighter/`", "the same for the Lighter part: `state/` (runs, `fills-<mode>.jsonl`), `logs/`, `data/`"],
             ["`arbitrage/`", "the funding arbitrage: `state/` (position, events), `settings.json`, the funding history"],
+            ["`daytrade/`", "the paper bot's `state/` (status, trades, events) and the research `reports/`"],
+            ["`deltaneutral/`", "`state/` (each mode's cycle, events, cycles), `settings.json`, the research `reports/`"],
             ["`system/`", "status, host, network, processes, git, versions, which .env names are set"],
         ]),
     ]

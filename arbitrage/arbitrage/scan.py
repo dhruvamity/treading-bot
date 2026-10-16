@@ -124,7 +124,7 @@ async def run(cfg: Config, *, symbols: list[str] | None = None, top: int = 10,
                 pf = {k: float(v.get("net_apr") or 0.0) for k, v in rows.items()}
                 if not rows and not cfg.profunding_key:
                     no_side = "PROFUNDING_API_KEY is not set, and profunding_side asks ProFunding for the side"
-            except Exception as e:   # noqa: BLE001  whatever went wrong there, the side is not known
+            except Exception as e:
                 no_side = f"ProFunding could not be read ({str(e)[:80]}), and profunding_side asks it for the side"
         # no market named: with `profunding_side` the best one is ProFunding's best, not the venues' own widest
         want = [s.upper() for s in symbols] if symbols else candidates(la, ll, pf, cfg.settings, top)

@@ -26,7 +26,7 @@ from pathlib import Path
 
 import numpy as np
 
-from . import STATE, fetch
+from . import STATE, fetch, ops
 from . import bars as B
 from .core import MARKETS, Strategy
 from .sim import Book, Trade
@@ -215,7 +215,7 @@ def summary(mode: str = "paper", state_dir: Path = STATE) -> str:
     if st.exists():
         d = json.loads(st.read_text())
         pid = state_dir / f"{mode}.pid"
-        alive = pid.exists() and _alive(int(pid.read_text() or 0))
+        alive = pid.exists() and ops.alive(int(pid.read_text() or 0))
         lines.append(f"{mode.upper()} {'running' if alive else 'NOT running'} · last look {d['utc']} UTC")
         for k, v in d["slots"].items():
             lines.append(f"  {k}: {v.get('state') or v.get('error')}  (last bar {v.get('last_bar_utc', '-')} UTC)")
@@ -236,13 +236,3 @@ def summary(mode: str = "paper", state_dir: Path = STATE) -> str:
             parts.append(f"{sum(x['bp'] for x in rs) / len(rs):+.1f} bp a trade")
         lines.append(f"  {k}: " + ", ".join(parts))
     return "\n".join(lines)
-
-
-def _alive(pid: int) -> bool:
-    if pid <= 0:
-        return False
-    try:
-        os.kill(pid, 0)
-        return True
-    except OSError:
-        return False

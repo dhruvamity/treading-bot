@@ -23,7 +23,7 @@ from typing import Any
 
 import numpy as np
 
-from . import ROOT, TOKENS
+from . import TOKENS
 from . import backtest as BT
 from . import costs as C
 from . import plan as P
@@ -33,7 +33,6 @@ from .plan import ARCUS, LIGHTER, VENUES, Pair
 DAY = 86_400
 YEAR_H = 24 * 365
 DAYS = 30
-ARB_HISTORY = ROOT.parent / "arbitrage" / "data" / "history"
 
 
 def data_end(symbols: list[str] | tuple[str, ...] = TOKENS) -> int:
@@ -167,8 +166,8 @@ LONG_FROM = int(dt.datetime(2026, 7, 15, tzinfo=dt.UTC).timestamp())   # Arcus's
 
 def long_history(x: str, y: str, dist: dict[str, tuple[float, float]], root: Path | None = None,
                  since: int = LONG_FROM) -> dict[str, Any]:
-    """On the hourly history since late June (data.fetch_hours: Lighter's mark, Arcus's candles): of all 24-hour holds
-    starting on the hour, the share in which X and Y moved further apart than the guard's distance or the
+    """On the hourly history since late June (`deltaneutral fetch`: Lighter's mark, Arcus's candles): of all 24-hour
+    holds starting on the hour, the share in which X and Y moved further apart than the guard's distance or the
     liquidation's on either venue, and the largest move seen. A hold counts once whichever venue it was."""
     def series(name: str) -> dict[int, float]:
         rows = S.read(name, root)
@@ -377,13 +376,13 @@ def report(symbols: list[str] | None = None, days: int = DAYS, out: Path | None 
 
     # ---- longer history
     w("## 3. Liquidation risk over a longer stretch (15 Jul - 16 Oct)\n")
-    w("The 30 days had few earnings reports. On the venues' hourly prices since mid-July (data.fetch_hours; "
+    w("The 30 days had few earnings reports. On the venues' hourly prices since mid-July (`deltaneutral fetch`; "
       "both venues' first weeks are left out, Arcus's prices were broken then), every 24-hour hold starting on the "
       "hour, at the highest leverage:\n")
     w("| Pair | Holds | Ended early (75% of the way) | Would have liquidated a venue without it | Largest 24 h "
       "move apart | Worst days |")
     w("|---|---|---|---|---|---|")
-    for r in best[:6] + [runs[RECOMMENDED.name], runs[EXAMPLE.name], runs.get("AMD/INTC", best[-1])]:
+    for r in [*best[:6], runs[RECOMMENDED.name], runs[EXAMPLE.name], runs.get("AMD/INTC", best[-1])]:
         p = r.pair
         if f"long:{p.name}" in seen:
             continue

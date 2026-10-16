@@ -22,6 +22,7 @@ async def main() -> None:
     if a.slot in (0, 1, 2, 3, 157) or not 2 <= a.slot <= 254:
         raise SystemExit("choose a slot from 4 to 254 (not 157)")
     import eth_account
+
     import lighter
     url = "https://api.rh-testnet.lighter.xyz" if a.testnet else "https://api.rh.lighter.xyz"
     chain = 300 if a.testnet else 466324

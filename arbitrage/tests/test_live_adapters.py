@@ -237,3 +237,18 @@ async def test_lighter_reads_fills_and_the_position_from_the_account_stream(tmp_
     assert order_view({"status": "filled", "initial_base_amount": "5", "remaining_base_amount": "0"}) == (
         5.0, False, "filled")
     assert await t.order("BABA", "999") is None
+
+
+def test_the_arcus_key_bound_to_the_named_subaccount_is_the_one_that_trades() -> None:
+    """An Arcus key trades one subaccount: with ARCUS_ACCOUNT_INDEX set, that subaccount's key is used, and with none
+    bound to it nothing starts (the first active key would trade another program's subaccount)."""
+    from types import SimpleNamespace
+
+    from arbitrage.exec.arcus import pick_key
+
+    keys = [SimpleNamespace(active=True, account_index=0, name="mm"), SimpleNamespace(active=False, account_index=1,
+                                                                                       name="old"),
+            SimpleNamespace(active=True, account_index=2, name="arb")]
+    assert pick_key(keys, 2).name == "arb" and pick_key(keys, 0).name == "mm" and pick_key(keys, None).name == "mm"
+    with pytest.raises(RuntimeError, match="subaccount 1"):
+        pick_key(keys, 1)                       # its key is revoked

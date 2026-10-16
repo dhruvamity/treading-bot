@@ -4,6 +4,9 @@ The owner's directional strategies for SPY, QQQ and gold (three lists of what X/
 2026), written out as exact rules, each with its own backtest, and a **paper** auto-trader. Separate from the
 market-making bots: it imports none of their strategies or simulators. **It sends no real orders.**
 
+One of five parts of the [repository](../README.md): installed by `make install`, started by `tbot up`, read from the
+one Telegram bot as `/dt_<command>`.
+
 ## What the backtests say
 
 **Only the last two years count** (the owner's rule, 15 Oct 2026): trades from 15 Oct 2024 to 15 Oct 2026, the
@@ -39,23 +42,26 @@ Nothing here survives the venues' highest leverage (50x liquidated every dip-buy
 
 ## Commands
 
-From `treading-bot/daytrade` (until it is part of `make install`, prefix `PYTHONPATH=.` and use `../arcus/.venv/bin/python -m daytrade.cli`):
+They work from any folder once `make install` has put the commands on your PATH (main README, section 2).
 
 ```bash
-daytrade fetch                        # public history into data/ (Alpaca key needed for SPY/QQQ minutes)
-daytrade fetch daily funding gold_hours   # daily ETFs, the venues' funding, hourly spot gold (2024 on)
+daytrade fetch                        # every public history source into data/ (an Alpaca key in arcus/.env for SPY/QQQ)
+daytrade fetch daily funding gold_hours   # or some of them: daily ETFs, the venues' funding, hourly spot gold
 daytrade backtest spy --tf 5          # one day-trading strategy: trades, win rate, R, $1,000 result
 daytrade research                     # the day-trading study -> reports/research/
-python -m daytrade.intraday2          # #2 and #7 -> reports/intraday2/ (`tables`, `check`)
-python -m daytrade.swing_research     # overnight, swing and the third list -> reports/swing/ (`spy qqq xau tables`)
-python -m daytrade.rotation           # #1 -> reports/rotation/
+daytrade research intraday2           # #2 and #7 -> reports/intraday2/ (add `tables` or `check`)
+daytrade research swing               # overnight, swing and the third list -> reports/swing/ (`spy qqq xau tables`)
+daytrade research rotation            # #1 -> reports/rotation/
 daytrade check                        # the day-trading strategies on Lighter's and Arcus's own prices
 daytrade run                          # the paper auto-trader: a server job, it runs until stopped
 daytrade run --seconds 300            # a bounded check (--no-swing leaves out the daily rules)
 daytrade status                       # what it holds now, and its paper results
 ```
 
-With the rest of the bot (from `treading-bot/arcus`): `tbot up daytrade` runs `daytrade run` in the background (plain `tbot up` does too where `BOT_ROLE` is `all` or `trader`; pid and output in `state/paper.pid`, `state/paper.out`), `tbot down daytrade` stops it, `tbot status` shows it; in the one Telegram bot `/dt_status` and `/dt_trades` (the last 10 trades) only read, `/dt` lists them.
+With the rest of the bot: `tbot up daytrade` runs `daytrade run` in the background (plain `tbot up` does too where
+`BOT_ROLE` is `all` or `trader`; pid and output in `state/paper.pid`, `state/paper.out`), `tbot down daytrade` stops
+it, `tbot status` shows it, and `tbot export` packs its state and reports. In the one Telegram bot `/dt_status` and
+`/dt_trades` (the last 10 trades) only read; `/dt` lists them.
 
 ## How it works
 

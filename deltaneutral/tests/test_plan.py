@@ -3,9 +3,9 @@
 import datetime as dt
 import math
 
+from arbitrage.hours import open_hours as arcus_open
 from deltaneutral import plan as P
 from deltaneutral.plan import ARCUS, LIGHTER
-from deltaneutral.series import arcus_open
 
 TEN = {ARCUS: P.Rules(imf=0.1, imf_off=0.15, mmf=0.0667, taker_bp=2.25),
        LIGHTER: P.Rules(imf=0.1, imf_off=0.1, mmf=0.06)}

@@ -1,12 +1,13 @@
 #!/usr/bin/env bash
 # One-time setup of a fresh Ubuntu 24.04 server (a VPS). Run it as a normal user who can sudo, after cloning:
 #
-#     cd treading-bot/arcus && bash deploy/scripts/bootstrap.sh
+#     bash treading-bot/arcus/deploy/scripts/bootstrap.sh
 #
 # What it does:
 #   1. installs the system packages, keeps the clock in sync (chrony) and installs uv;
-#   2. installs the three bots into arcus/.venv (make install: Arcus, Lighter, the funding arbitrage);
-#   3. creates .env from the template if there is none (mode 600), and never changes one that exists;
+#   2. installs every part into arcus/.venv (make install in the repository root) and puts its commands on this
+#      user's PATH (a line in ~/.bashrc);
+#   3. creates arcus/.env from the template if there is none (mode 600), and never changes one that exists;
 #   4. closes the firewall to everything but SSH (the port this session came in on);
 #   5. makes `tbot up` run after every reboot (a line in this user's crontab).
 # It starts nothing and places no orders. Running it again is safe.
@@ -23,18 +24,15 @@ sudo systemctl enable --now chrony cron
 command -v uv >/dev/null 2>&1 || curl -LsSf https://astral.sh/uv/install.sh | sh
 export PATH="$HOME/.local/bin:$PATH"
 
-echo "[2/5] the bots (arcus/.venv)"
-make install
+echo "[2/5] every part (arcus/.venv) and its commands on the PATH"
+make -C .. install
 mkdir -p state logs data
 chmod 700 state
+PATHLINE="export PATH=\"$BOT/.venv/bin:\$PATH\""
+grep -qxF "$PATHLINE" ~/.bashrc 2>/dev/null || echo "$PATHLINE" >> ~/.bashrc
 
 echo "[3/5] credentials file"
-if [ -f .env ]; then
-  echo "  .env exists: left as it is"
-else
-  cp .env.example .env
-  echo "  created .env from the template: fill it in (nano .env)"
-fi
+echo "  arcus/.env: $( [ -s .env ] && echo 'there (left as it is)' || echo 'created from the template: fill it in')"
 chmod 600 .env
 
 echo "[4/5] firewall: SSH only"
@@ -50,23 +48,24 @@ LINE="@reboot cd $BOT && .venv/bin/tbot up >> logs/boot.out 2>&1"
 
 cat <<EOF
 
-Done. Next, from $BOT, one line at a time:
+Done. Next, one line at a time (the first puts the commands on this shell's PATH):
 
+  0. source ~/.bashrc
   1. Your keys and the Telegram token (the README, section 2):
-       nano .env
+       nano $BOT/.env
      On two machines also say what this one is for (the README, section 3, "Two servers, step by step").
      The one that trades, which holds the keys:
-       .venv/bin/tbot role trader
+       tbot role trader
      The one that records, which needs no keys at all:
-       .venv/bin/tbot role recorder
+       tbot role recorder
   2. May this server's address trade Arcus perps?
-       .venv/bin/arcus region-check
+       arcus region-check
   3. Credentials, account and clock (reads only):
-       .venv/bin/arcus doctor
+       arcus doctor
   4. Start what this machine is for (everything, or what its BOT_ROLE says):
-       .venv/bin/tbot up
+       tbot up
   5. One screen:
-       .venv/bin/tbot status
+       tbot status
   6. Later, one file with everything recorded and traded, to bring home:
-       .venv/bin/tbot export
+       tbot export
 EOF

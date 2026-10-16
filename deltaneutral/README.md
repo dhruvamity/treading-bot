@@ -4,6 +4,9 @@ Two markets held delta-neutral across Arcus and Lighter (Robinhood Chain), renew
 market is long and the other short; on Lighter the opposite, with the same units of each market on both venues. So
 the whole is flat in both markets, and each venue's money moves only with the difference between the two.
 
+One of five parts of the [repository](../README.md): installed by `make install`, its switch in the one `arcus/.env`,
+controlled from the one Telegram bot as `/dn_<command>`.
+
 Example, USO/ORCL with $100 on each venue: Arcus long $450 USO and short $450 ORCL, Lighter short $450 USO and long
 $450 ORCL. That is $1,800 of open interest across the four legs and about $3,600 traded a day.
 
@@ -69,8 +72,7 @@ the backtest that only added fills.
 
 ## Commands
 
-All of these run from `treading-bot/deltaneutral`; the program is `../arcus/.venv/bin/deltaneutral` until
-`make install` has run.
+They work from any folder once `make install` has put the commands on your PATH (main README, section 2).
 
 ```bash
 deltaneutral pair USO ORCL              # the two markets
@@ -100,7 +102,9 @@ Add `live` to act on the live bot, for example `/dn_status live`.
 ## Before real money
 
 - **Accounts.** Give it accounts the market-making bots and the arbitrage are not using: an Arcus subaccount of its
-  own, and its own Lighter API key. Two programs on one account would each treat the other's positions as theirs.
+  own (a key bound to it in `arcus/.env`, and `ARCUS_ACCOUNT_INDEX` in `deltaneutral/.env`, which wins over
+  `arcus/.env`; the bot trades with the key bound to that subaccount), and its own Lighter API key. Two programs on one
+  account would each treat the other's positions as theirs.
 - **First run.** Run with `max_notional_usd` set small, for example `deltaneutral set max_notional_usd 20`, for one
   cycle.
 - **Order code.** Live uses the arbitrage's order clients. Lighter's passed `arbitrage livetest` on the venue;

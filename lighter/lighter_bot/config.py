@@ -18,13 +18,14 @@ ROOT = Path(os.environ.get("LBOT_ROOT") or Path(__file__).resolve().parent.paren
 
 
 OURS = ("LIGHTER_", "LBOT_", "TELEGRAM_", "BOT_ROLE")      # the keys this project reads from a credentials file
-# What this machine is for (BOT_ROLE, one variable for the three bots; treading-bot/arcus/arcus/common/role.py says why):
+# What this machine is for (BOT_ROLE, one variable for every part; treading-bot/arcus/arcus/common/role.py says why):
 # all = everything on one machine; trader = Telegram and the runs, no recording and no scans (it follows the lists
 # another machine makes); recorder = the tape only; scout = the tape and the scans, no runs.
 ROLES = ("all", "trader", "recorder", "scout")
 
 
-def _env_file(p: Path) -> dict[str, str]:
+def env_file(p: Path) -> dict[str, str]:
+    """A .env file's set values ({} when it is missing): KEY=value lines, quotes taken off."""
     out: dict[str, str] = {}
     try:
         for line in p.read_text().splitlines():
@@ -43,8 +44,8 @@ def load_env(path: Path | None = None) -> dict[str, str]:
     """The credentials: the bot's one file (treading-bot/arcus/.env, our keys only), then lighter/.env over it, then
     the process environment over both. Empty values count as not set."""
     p = path or ROOT / ".env"
-    shared = {k: v for k, v in _env_file(p.parent.parent / "arcus" / ".env").items() if k.startswith(OURS)}
-    return {**shared, **_env_file(p), **{k: v for k, v in os.environ.items() if k.startswith(OURS) and v}}
+    shared = {k: v for k, v in env_file(p.parent.parent / "arcus" / ".env").items() if k.startswith(OURS)}
+    return {**shared, **env_file(p), **{k: v for k, v in os.environ.items() if k.startswith(OURS) and v}}
 
 
 @dataclass(frozen=True)

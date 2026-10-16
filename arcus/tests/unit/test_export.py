@@ -31,7 +31,7 @@ def part(path: Path, start_us: int, rows: int) -> None:
 
 
 def machine(root: Path) -> ex.Roots:
-    """A server as `arcus up` leaves it: three parts with state, logs, tape, and secrets that must stay behind."""
+    """A server as `arcus up` leaves it: the parts with state, logs, tape, and secrets that must stay behind."""
     arcus, lighter, arbitrage = root / "arcus", root / "lighter", root / "arbitrage"
     for d in (arcus / "state", arcus / "logs" / "runs", arcus / "config", arcus / "data" / "scout" / "scans",
               arcus / "data" / "scout" / "cache" / "v10", lighter / "state", lighter / "logs", lighter / "data" / "scout",
@@ -80,7 +80,22 @@ def machine(root: Path) -> ex.Roots:
     (arbitrage / "state" / "position-paper.json").write_text('{"phase": "flat", "paused": true}')
     (arbitrage / "state" / "run-paper.pid").write_text("5")
     (arbitrage / "settings.json").write_text('{"max_hold_h": 72}')
-    return ex.Roots(arcus, lighter, arbitrage)
+    daytrade, dn = root / "daytrade", root / "deltaneutral"
+    for d in (daytrade / "state", daytrade / "data" / "bars", dn / "state", dn / "data"):
+        d.mkdir(parents=True)
+    (daytrade / "state" / "paper_status.json").write_text(
+        '{"utc": "2026-10-05 14:00:00", "slots": {"spy-orb@lighter": {"state": "flat, 0 trade(s) today"}}}')
+    (daytrade / "state" / "paper_trades.jsonl").write_text(
+        '{"slot": "spy-orb@lighter", "side": "long", "entry_utc": "2026-10-05 13:45", "reason": "target", "bp": 12.5}\n')
+    (daytrade / "data" / "bars" / "alpaca_SPY.npz").write_bytes(b"public history: fetched again, not exported")
+    (dn / ".env").write_text(f"DN_LIVE=1\nTELEGRAM_BOT_TOKEN={TOKEN}\n")
+    (dn / "settings.json").write_text('{"x": "USO", "y": "ORCL"}')
+    (dn / "state" / "paper-state.json").write_text('{"phase": "open", "x": "USO", "y": "ORCL", "cycle": 3}')
+    (dn / "state" / "paper-cycles.jsonl").write_text('{"cycle": 2, "made": {"arcus": 1.5, "lighter": -2.0}}\n')
+    (dn / "state" / "paper-events.jsonl").write_text('{"ts": 1791000000, "kind": "opened", "text": "cycle 3 open"}\n')
+    (dn / "state" / "run-paper.pid").write_text("7")
+    (dn / "data" / "lighter_USO_5m.csv").write_text("ts,open\n")
+    return ex.Roots(arcus, lighter, arbitrage, daytrade, dn)
 
 
 def empty(root: Path) -> ex.Roots:
@@ -124,15 +139,20 @@ def test_one_file_holds_the_trades_the_logs_and_the_tape_but_no_secret(tmp_path:
                  "records/arcus/config/app.yaml", "records/arcus/data/scout/latest.json",
                  "records/arcus/data/scout/scans/20261005-1200.json", "records/arcus/csv/fills-live.csv",
                  "records/lighter/state/fills-paper.jsonl", "records/arbitrage/state/position-paper.json",
-                 "records/arbitrage/settings.json", "records/system/host.txt", "records/system/env-names.txt"):
+                 "records/arbitrage/settings.json", "records/system/host.txt", "records/system/env-names.txt",
+                 "records/daytrade/state/paper_trades.jsonl", "records/deltaneutral/settings.json",
+                 "records/deltaneutral/state/paper-state.json"):
         assert want in rec, want
+    assert not any("/data/" in n and n.split("/")[1] in ("daytrade", "deltaneutral") for n in rec)   # public history
     assert b"770.10" in rec["records/arcus/csv/fills-live.csv"]
     env = rec["records/system/env-names.txt"].decode()
     assert "ARCUS_API_PRIVATE_KEY = set" in env and "BOT_PILOT_LIVE = 1" in env and "ARCUS_ADDRESS = set" in env
     with tarfile.open(res.path) as tar:
         summary = tar.extractfile(f"{res.name}/SUMMARY.md").read().decode()   # type: ignore[union-attr]
     for said in ("2 fills", "50% as maker", "POST_ONLY_WOULD_CROSS", "SPY-USD", "0.49 bp", "ws_degraded", "rate_limited",
-                 "KeyError: 'bid'", "trading PnL since the first deposit -10.00", "arcus: 1 markets"):
+                 "KeyError: 'bid'", "trading PnL since the first deposit -10.00", "arcus: 1 markets",
+                 "spy-orb@lighter: flat", "1 paper trades closed", "**paper:** open, pair USO/ORCL, cycle 3",
+                 "cycle 3 open"):
         assert said in summary, said
 
 

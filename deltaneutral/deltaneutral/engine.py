@@ -38,10 +38,11 @@ from pathlib import Path
 from typing import Any
 
 from arbitrage.exec.venue import BUY, SELL, Spec, Top, TradeVenue, VenueDown
+from arbitrage.hours import open_hours as arcus_open
 
 from . import plan as P
 from .plan import ARCUS, LIGHTER, VENUES
-from .series import arcus_open, blocked, next_open
+from .series import blocked, next_open
 
 HOUR = 3600
 DAY = 86_400
@@ -435,7 +436,7 @@ class Engine:
                     await self.v[v].set_leverage(sym, r.max_leverage(False))
                 except VenueDown:
                     raise
-                except Exception as e:      # noqa: BLE001  a refused setting is reported, the open goes on
+                except Exception as e:
                     self._say("refused", f"{self.names[v]} refused leverage {r.max_leverage(False):.0f}x on {sym}: "
                               f"{str(e)[:120]}")
         sd = P.sides(way)
@@ -796,6 +797,3 @@ def _utc(t: float) -> str:
 def _usd(x: float) -> str:
     return f"-${-x:,.2f}" if x < 0 else f"+${x:,.2f}"
 
-
-def arcus_closed(now: float) -> bool:
-    return not arcus_open(now)

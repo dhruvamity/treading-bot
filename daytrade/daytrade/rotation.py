@@ -12,7 +12,7 @@ Held two ways:
 Only the last two years count (the owner's rule, `daytrade.PERIODS`): the first hold begins at the first month end
 inside them; the ranking may look back up to twelve months before it.
 
-    python -m daytrade.rotation        -> reports/rotation/summary.csv (REPORT.md is written from it by hand)
+    daytrade research rotation         -> reports/rotation/summary.csv (REPORT.md is written from it by hand)
 """
 
 from __future__ import annotations

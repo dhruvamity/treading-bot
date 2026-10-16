@@ -68,7 +68,6 @@ MAX_FILE = 32 * 2**20
 MAX_TOTAL = 64 * 2**20
 FUTURE_S = 600.0
 STATE = "sync.json"
-EVERY_S = 120.0
 _DEST = re.compile(r"^([A-Za-z_][A-Za-z0-9_.-]{0,31})@([A-Za-z0-9][A-Za-z0-9.-]{0,252})(?::(\d{1,5}))?$")
 _PUB = re.compile(r"^(ssh-ed25519|ssh-rsa|ecdsa-sha2-nistp(?:256|384|521)) ([A-Za-z0-9+/]{40,}={0,3})(?: .*)?$")
 _SINCE = re.compile(r"^since=(\d{1,12}(?:\.\d{1,9})?)$")

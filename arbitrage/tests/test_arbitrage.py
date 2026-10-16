@@ -1,4 +1,4 @@
-"""The funding arbitrage arithmetic, the venues' payloads and the paper record. Offline: no network."""
+"""The funding arbitrage arithmetic and the venues' payloads. Offline: no network."""
 
 from __future__ import annotations
 
@@ -9,7 +9,7 @@ from pathlib import Path
 
 import pytest
 
-from arbitrage import feeds, paper
+from arbitrage import feeds
 from arbitrage.config import load
 from arbitrage.rank import Leg, Settings, conservative_edge, max_leverage, plan, round_trip_bp
 from arbitrage.scan import aligned
@@ -135,38 +135,6 @@ def test_history_lines_up_by_hour() -> None:
     b = {3600 * i: float(-i) for i in range(3, 12)}
     xa, xb = aligned(a, b, hours=4)
     assert xa == [6.0, 7.0, 8.0, 9.0] and xb == [-6.0, -7.0, -8.0, -9.0]
-
-
-def test_the_paper_record_counts_payments_prices_and_fills() -> None:
-    a, b = legs()
-    p = plan(a, b, [1.7e-5] * 168, [4e-6] * 168, 0.0167, {"arcus": 120.0, "lighter": 120.0})
-    t0 = 1_791_000_000.0
-    pos = paper.open_position(p, {"arcus": 106.42, "lighter": 106.40}, Settings(), now=t0)
-    h0 = int(t0) // 3600 * 3600
-    hist = {"arcus": {h0 + 3600 * i: 1.7e-5 for i in range(6)}, "lighter": {h0 + 3600 * i: 4e-6 for i in range(6)}}
-    now = h0 + 3 * 3600 + 60
-    earned, n = paper.funding_earned(pos, hist, now)
-    assert n == 3 and earned == pytest.approx(3 * 1.3e-5 * pos.notional)   # not the hour it opened in
-    r = paper.mark(pos, {"arcus": 107.42, "lighter": 107.30}, hist, now)
-    assert r["long_leg"] == pytest.approx(pos.size * 0.90) and r["short_leg"] == pytest.approx(-pos.size * 1.00)
-    assert r["basis"] == pytest.approx(-pos.size * 0.10)                         # the two venues drifted 10 cents apart
-    assert r["cost"] == pytest.approx(pos.notional * 2e-4)                       # two fills so far
-    assert r["net"] == pytest.approx(earned + r["basis"] - r["cost"]) and r["stop_hit"] == 0.0
-    closing = paper.mark(pos, {"arcus": 107.42, "lighter": 107.30}, hist, now, closing=True)
-    assert closing["cost"] == pytest.approx(pos.notional * 4e-4)
-    far = paper.mark(pos, {"arcus": 106.42 * (1 + pos.stop_dist), "lighter": 106.40 * (1 + pos.stop_dist)}, hist, now)
-    assert far["stop_hit"] == 1.0
-
-
-def test_the_paper_book_survives_a_restart(tmp_path: Path) -> None:
-    a, b = legs()
-    p = plan(a, b, [1.7e-5] * 168, [4e-6] * 168, 0.0167, {"arcus": 120.0, "lighter": 120.0})
-    book = {"BABA": paper.open_position(p, {"arcus": 106.42, "lighter": 106.40}, Settings(), now=1.0)}
-    paper.save(tmp_path / "paper.json", book)
-    assert paper.load(tmp_path / "paper.json") == book and paper.load(tmp_path / "none.json") == {}
-    paper.log_close(tmp_path / "h.jsonl", book["BABA"], {"net": 1.5}, 2.0)
-    row = json.loads((tmp_path / "h.jsonl").read_text())
-    assert row["symbol"] == "BABA" and row["net"] == 1.5 and row["closed_at"] == 2.0
 
 
 def test_feeds_keep_only_the_two_venues() -> None:

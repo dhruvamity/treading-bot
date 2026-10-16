@@ -12,18 +12,18 @@ from __future__ import annotations
 
 import datetime as dt
 import json
-import zoneinfo
 from dataclasses import dataclass
 from pathlib import Path
 
 import numpy as np
+
 from arbitrage import history as H
+from arbitrage.hours import NEW_YORK
 
 from . import DATA
 from .plan import ARCUS, LIGHTER, Rules
 
 FIVE = 300
-NEW_YORK = zoneinfo.ZoneInfo("America/New_York")
 
 
 def read(name: str, root: Path | None = None) -> np.ndarray:
@@ -60,18 +60,12 @@ def funding_on_clock(t: np.ndarray, rows: np.ndarray) -> np.ndarray:
     return out
 
 
-def arcus_open(t: float) -> bool:
-    """Arcus's regular hours for stocks and ETFs: Monday to Friday, 04:00 to 20:00 New York (holidays not known)."""
-    d = dt.datetime.fromtimestamp(t, NEW_YORK)
-    return d.weekday() < 5 and 4 <= d.hour < 20
-
-
 def next_open(after: float, hour_ny: float, weekends: bool = True) -> float:
     """The first moment at or after `after` that is `hour_ny` o'clock in New York (10.5 = 10:30), on a Saturday or
     Sunday only with `weekends`. New York time, so the open stays at the same point of the stock market's day when
     the clocks change."""
     d = dt.datetime.fromtimestamp(after, NEW_YORK).date()
-    h, m = int(hour_ny), int(round((hour_ny - int(hour_ny)) * 60))
+    h, m = int(hour_ny), round((hour_ny - int(hour_ny)) * 60)
     for _ in range(10):
         t = dt.datetime(d.year, d.month, d.day, h, m, tzinfo=NEW_YORK).timestamp()
         if t >= after and (weekends or d.weekday() < 5):
@@ -102,7 +96,7 @@ def blocked(t0: float, t1: float, days: list[str] | tuple[str, ...]) -> tuple[fl
 
 
 def hhmm(hour: float) -> str:
-    return f"{int(hour):02d}:{int(round((hour - int(hour)) * 60)):02d}"
+    return f"{int(hour):02d}:{round((hour - int(hour)) * 60):02d}"
 
 
 def cash_session(t: float) -> str:

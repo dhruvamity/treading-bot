@@ -1,10 +1,11 @@
-# The repository is exactly this: three bots, one README, one Makefile and the CI. Anything else at the top level
+# The repository is exactly this: five parts, one README, one Makefile, one lint config and the CI. Anything else at the top level
 # (your research folders, downloaded docs, archives, exports) is yours and is never committed.
 /*
 !/.gitignore
 !/.github/
 !/README.md
 !/Makefile
+!/ruff.toml
 !/arcus/
 !/lighter/
 !/arbitrage/

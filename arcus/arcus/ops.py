@@ -181,7 +181,7 @@ def lighter_up(role: str = "all") -> str:
         was = lops.running(cfg, "scout")
         pid = lops.start(cfg, "scout", ["scout", "run", *SCOUT_FLAG[role]])
     except Exception as e:   # not installed, or its config does not load: the Arcus services are not affected
-        return f"lighter scout: not started ({type(e).__name__}: {e}). In treading-bot/arcus: make install"
+        return f"lighter scout: not started ({type(e).__name__}: {e}). make install in treading-bot"
     return (f"lighter scout: {'already running' if was else 'started'} (pid {pid}), "
             f"log {cfg.logs_dir / 'scout.out'}")
 
@@ -225,7 +225,7 @@ def daytrade_up(role: str = "all") -> str:
 
         msg = dops.start()[1]
     except Exception as e:   # not installed, or it fails to start: the other parts are not affected
-        return f"daytrade: not started ({type(e).__name__}: {e}). In treading-bot/arcus: make install"
+        return f"daytrade: not started ({type(e).__name__}: {e}). make install in treading-bot"
     return f"daytrade paper bot: {msg}  [paper only: it sends no orders]"
 
 
@@ -252,7 +252,7 @@ def daytrade_status(role: str = "all") -> list[str]:
         if not pid:
             lines.append("  start it: tbot up daytrade")
     except Exception as e:
-        lines.append(f"  not available ({type(e).__name__}: {e}). In treading-bot/arcus: make install")
+        lines.append(f"  not available ({type(e).__name__}: {e}). make install in treading-bot")
     return lines
 
 
@@ -265,7 +265,7 @@ def deltaneutral_up(role: str = "all") -> str:
 
         msg = nops.start("paper")[1]
     except Exception as e:   # not installed, or it fails to start: the other parts are not affected
-        return f"deltaneutral: not started ({type(e).__name__}: {e}). In treading-bot/arcus: make install"
+        return f"deltaneutral: not started ({type(e).__name__}: {e}). make install in treading-bot"
     return f"delta-neutral bot {msg}  [paper: real books, no orders; live: deltaneutral start --live]"
 
 
@@ -295,12 +295,12 @@ def deltaneutral_status(role: str = "all") -> list[str]:
             lines.append("  not running. tbot up deltaneutral (paper), deltaneutral start --live" if roles.trades(role)
                          else "  not here: it runs on the trader machine")
     except Exception as e:
-        lines.append(f"  not available ({type(e).__name__}: {e}). In treading-bot/arcus: make install")
+        lines.append(f"  not available ({type(e).__name__}: {e}). make install in treading-bot")
     return lines
 
 
 def others_status(role: str = "all") -> list[str]:
-    """The Lighter, funding-arbitrage and daytrade lines of `tbot status`."""
+    """The lines of `tbot status` for the other parts: Lighter, the arbitrage, daytrade and delta neutral."""
     lines = ["", "LIGHTER"]
     does = {"all": "records every Lighter market, ranks setups", "scout": "records every Lighter market, ranks setups",
             "recorder": "records every Lighter market", "trader": "follows the other machine's Lighter lists"}[role]
@@ -328,7 +328,7 @@ def others_status(role: str = "all") -> list[str]:
             lines.append("  no run. Start one: /l_run in Telegram, or lighter run SPY 'smart +1'" if roles.trades(role)
                          else "  no runs here: they start on the trader machine")
     except Exception as e:
-        lines.append(f"  not available ({type(e).__name__}: {e}). In treading-bot/arcus: make install")
+        lines.append(f"  not available ({type(e).__name__}: {e}). make install in treading-bot")
     lines += ["", "FUNDING ARB"]
     try:
         from arbitrage import ops as aops
@@ -344,17 +344,13 @@ def others_status(role: str = "all") -> list[str]:
             lines.append("  not running. /arb_scan and /arb_start in Telegram, or arbitrage scan" if roles.trades(role)
                          else "  not here: it runs on the trader machine")
     except Exception as e:
-        lines.append(f"  not available ({type(e).__name__}: {e}). In treading-bot/arcus: make install")
+        lines.append(f"  not available ({type(e).__name__}: {e}). make install in treading-bot")
     return lines + daytrade_status(role) + deltaneutral_status(role)
 
 
 PARTS = ("arcus", "lighter", "telegram", "daytrade")
 NAMED_ONLY = ("deltaneutral",)        # parts started and stopped only when named
 HINT = {"scout": "arcus up", "telegram": "tbot up telegram", "guardian": "arcus up"}
-PART_WHAT = {"arcus": "the Arcus scout (and the guardian while a live Arcus run exists)",
-             "lighter": "the Lighter scout", "telegram": "the one Telegram bot (all three bots)",
-             "daytrade": "the daytrade paper bot (no orders)",
-             "deltaneutral": "the delta-neutral pair bot, paper (only when named)"}
 
 
 def up_parts(app: AppConfig, env: dict[str, str], live_running: bool, parts: tuple[str, ...]) -> list[str]:
@@ -417,7 +413,7 @@ def ago(seconds: float | None) -> str:
 
 def dashboard(app: AppConfig, env: dict[str, str], root: Path, scope: str = "all") -> str:
     """One screen: the services, the trading bot, what is deployed, the last scan, the balance. scope "arcus": the Arcus
-    part only (`tbot status`); "all": plus the Telegram bot, Lighter and the arbitrage (`tbot status`)."""
+    part only (`arcus status`); "all": plus the Telegram bot and every other part (`tbot status`)."""
     from arcus.core.balances import BalanceLog, pnl
     from arcus.telegram.control import Control
 
