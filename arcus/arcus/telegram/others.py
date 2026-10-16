@@ -2,16 +2,18 @@
 
 The trading bot is one bot with three parts: Arcus market making (this package), Lighter market making
 (treading-bot/lighter, package `lighter`) and the funding arbitrage between the two (treading-bot/arbitrage, package `arb`).
-The paper day-trading bot (treading-bot/daytrade) is a fourth that only reads. `make install` puts them all into this
-one environment, and this one Telegram bot controls all of them:
+The paper day-trading bot (treading-bot/daytrade) is a fourth that only reads, and the delta-neutral pair bot
+(treading-bot/deltaneutral) a fifth. `make install` puts them all into this one environment, and this one Telegram bot
+controls all of them:
 
     /status, /run, /closeall ...          Arcus, as always
     /l_status, /l_run, /l_closeall ...    the same commands for Lighter (`/l status` works too; /l lists them)
     /arb_status, /arb_scan, /arb_hold 72  the funding arbitrage (/arb lists them)
     /dt_status, /dt_trades                daytrade, paper only (/dt lists them)
+    /dn_status, /dn_cycles, /dn_transfer  the delta-neutral pair bot (/dn lists them)
 
-Every Lighter message starts with LIGHTER, every arbitrage message with FUNDING ARB and every daytrade message with
-DAYTRADE, so a reply can never be taken for another part's. A part that is not installed, or fails to load, says so
+Every Lighter message starts with LIGHTER, every arbitrage message with FUNDING ARB, every daytrade message with
+DAYTRADE and every delta-neutral message with DELTA NEUTRAL, so a reply can never be taken for another part's. A part that is not installed, or fails to load, says so
 when its command is sent; the rest of the bot is not affected.
 """
 
@@ -25,7 +27,7 @@ from arcus.common.logging import Log
 from arcus.common.tgfmt import card, codes
 
 log = Log("telegram_parts")
-LIGHTER, ARB, DAYTRADE = "l", "arb", "dt"
+LIGHTER, ARB, DAYTRADE, DELTA = "l", "arb", "dt", "dn"
 INSTALL_HINT = "In treading-bot/arcus: make install, then tbot down and tbot up"
 
 
@@ -41,9 +43,10 @@ def arcus_spelling(cmd: str, args: list[str]) -> tuple[str, list[str]]:
 
 
 def part_of(cmd: str) -> tuple[str, str] | None:
-    """("l" | "arb" | "dt", the command inside that part) for /l, /l_status, /lighter, /arb, /arb_hold, /dt_trades ...;
-    else None. "" means the part's own menu."""
-    for part, names in ((LIGHTER, ("l", "lighter")), (ARB, ("arb", "arbitrage")), (DAYTRADE, ("dt", "daytrade"))):
+    """("l" | "arb" | "dt" | "dn", the command inside that part) for /l, /l_status, /lighter, /arb, /arb_hold,
+    /dt_trades, /dn_status ...; else None. "" means the part's own menu."""
+    for part, names in ((LIGHTER, ("l", "lighter")), (ARB, ("arb", "arbitrage")), (DAYTRADE, ("dt", "daytrade")),
+                        (DELTA, ("dn", "deltaneutral"))):
         if cmd in names:
             return part, ""
         for n in names:
@@ -131,6 +134,29 @@ class DayTrade:
         return card("⚠️", "DAYTRADE IS NOT AVAILABLE", codes(self.why[:300] or "not installed"), codes(INSTALL_HINT))
 
 
+class DeltaNeutral:
+    """The delta-neutral pair bot's commands (deltaneutral/telegram.py) and its background process
+    (deltaneutral/ops.py). Telegram starts and stops its PAPER bot; live starts only from a terminal."""
+
+    def __init__(self) -> None:
+        self.why = ""
+
+    def load(self) -> tuple[Any, Any] | None:
+        try:
+            from deltaneutral import ops, telegram
+
+            self.why = ""
+            return telegram, ops
+        except Exception as e:
+            self.why = f"{type(e).__name__}: {e}"
+            log.warning("deltaneutral_unavailable", reason=self.why[:200])
+            return None
+
+    def missing(self) -> str:
+        return card("⚠️", "DELTA NEUTRAL IS NOT AVAILABLE", codes(self.why[:300] or "not installed"),
+                    codes(INSTALL_HINT))
+
+
 def arb_card(title: str, out: str) -> str:
     """What an arbitrage command printed, as one message."""
     out = out.strip() or "done"
@@ -184,3 +210,30 @@ def dt_menu(pid: int | None) -> str:
 
 def dt_keyboard() -> list[list[tuple[str, str]]]:
     return [[("📊 Status", "dt_status"), ("📜 Trades", "dt_trades")], [("☰ Menu", "menu")]]
+
+
+def dn_card(title: str, out: str) -> str:
+    """What a delta-neutral command answered, as one message."""
+    out = out.strip() or "nothing"
+    if len(out) > 3400:
+        out = out[:3400].rsplit("\n", 1)[0] + "\n…"
+    return card("⇄", f"DELTA NEUTRAL · {title.upper()}", f"<pre>{escape(out)}</pre>")
+
+
+def dn_menu(running: dict[str, int | None]) -> str:
+    state = [f"{m.upper()}: {'running (pid ' + str(running[m]) + ')' if running.get(m) else 'not running'}"
+             for m in ("paper", "live")]
+    return card("⇄", "DELTA NEUTRAL",
+                codes(*state, "Two markets, long on one venue and short on the other, renewed every 24 h"),
+                "\n".join(("/dn_status · /dn_cycles · /dn_transfer",
+                           "/dn_settings · /dn_set name value · /dn_pair USO ORCL",
+                           "/dn_skip · /dn_skip 2026-10-22 (an earnings date)",
+                           "/dn_close · /dn_pause · /dn_resume",
+                           "/dn_start · /dn_stop (paper)")),
+                codes("Add live to act on the live bot: /dn_status live",
+                      "Live starts from a terminal: deltaneutral start --live"))
+
+
+def dn_keyboard() -> list[list[tuple[str, str]]]:
+    return [[("📊 Status", "dn_status"), ("📜 Cycles", "dn_cycles")],
+            [("💸 Transfer", "dn_transfer"), ("☰ Menu", "menu")]]

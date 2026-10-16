@@ -224,3 +224,29 @@ def test_arcus_can_be_spelled_like_the_other_two_in_telegram() -> None:
     assert f("arcus", ["closeall", "taker"]) == ("closeall", ["taker"]) and f("a", []) == ("menu", [])
     assert f("status", []) == ("status", []) and f("account", []) == ("account", [])       # not a prefix
     assert f("auto", ["on"]) == ("auto", ["on"]) and f("l_status", []) == ("l_status", [])
+
+
+# ------------------------------------------------------------------------------------------------ delta neutral
+def test_delta_neutral_starts_only_when_named_and_only_on_a_trader(monkeypatch: pytest.MonkeyPatch) -> None:
+    pytest.importorskip("deltaneutral")
+    from deltaneutral import ops as nops
+
+    assert "deltaneutral" not in ops.PARTS and "deltaneutral" in ops.NAMED_ONLY      # plain `tbot up` leaves it
+    calls: list[str] = []
+    monkeypatch.setattr(nops, "start", lambda mode="paper", collateral=None, state=None:
+                        calls.append(mode) or (True, "paper: started (pid 7)"))
+    monkeypatch.setattr(nops, "stop", lambda mode="paper", state=None: calls.append(f"stop-{mode}") or (True,
+                                                                                                       "paper: stopped"))
+    assert ops.up_parts(AppConfig(), {"BOT_ROLE": "trader"}, False, ("deltaneutral",)) == [
+        "delta-neutral bot paper: started (pid 7)  [paper: real books, no orders; live: deltaneutral start --live]"]
+    assert ops.up_parts(AppConfig(), {"BOT_ROLE": "recorder"}, False, ("deltaneutral",)) == [
+        "deltaneutral: not started (this machine is a recorder: the trader runs it)"]
+    assert ops.down_parts(AppConfig(), ("deltaneutral",), everything=False, live_running=False) == [
+        "delta-neutral bot paper: stopped"]
+    assert calls == ["paper", "stop-paper"]
+
+
+def test_delta_neutral_never_starts_a_process_under_tests() -> None:
+    pytest.importorskip("deltaneutral")
+    assert ops.deltaneutral_up("trader").startswith("deltaneutral: not started (RuntimeError: refusing")
+    assert ops.deltaneutral_status("trader")[1] == "DELTA NEUTRAL"

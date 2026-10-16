@@ -309,7 +309,10 @@ sl= run stop $ · tp= take profit $ · vol= volume target
 {code("/arb_start 120 120")} paper · {code("/arb_start live")} · {code("/arb_stop")}
 
 {b("Daytrade")} (SPY, QQQ, gold; paper only, it sends no orders)
-/dt · {code("/dt_status")} · {code("/dt_trades")}"""
+/dt · {code("/dt_status")} · {code("/dt_trades")}
+
+{b("Delta neutral")} (two markets, Arcus against Lighter, renewed every 24 h)
+/dn · {code("/dn_status")} · {code("/dn_cycles")} · {code("/dn_transfer")} · {code("/dn_skip 2026-10-22")}"""
 
 # Telegram's "/" list: the everyday commands (everything in HELP still works)
 COMMANDS: list[tuple[str, str]] = [
@@ -329,6 +332,7 @@ COMMANDS: list[tuple[str, str]] = [
     ("l", "Lighter: the same commands as /l_status, /l_run ..."),
     ("arb", "Funding arbitrage: /arb_status, /arb_scan ..."),
     ("dt", "Daytrade, paper only: /dt_status, /dt_trades"),
+    ("dn", "Delta neutral: /dn_status, /dn_cycles, /dn_transfer"),
     ("menu", "Buttons"), ("home", "Home: six buttons and a venue switch"), ("help", "All commands"),
 ]
 
@@ -344,6 +348,7 @@ def menu_keyboard() -> Keyboard:
         [("🩺 Status", "status"), ("⚙️ Settings", "settings"), ("🔔 Alerts", "alerts")],
         [("❌ Cancel all", "cancelall"), ("🧯 Close all", "closeall")],
         [("⚡ Lighter", "l_menu"), ("⚖️ Funding arb", "arb_menu"), ("📈 Daytrade", "dt_menu")],   # the other parts
+        [("⇄ Delta neutral", "dn_menu")],
     ]
 
 

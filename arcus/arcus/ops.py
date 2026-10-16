@@ -19,6 +19,8 @@ The bot's other parts run under the same three commands:
 `tbot down --all` stops their runs too; positions are kept, with the venues' own stop orders.
 daytrade (treading-bot/daytrade) is a paper bot: `tbot up` starts it (`daytrade run`) where the runs are (BOT_ROLE all
 or trader), `tbot down` stops it. It sends no orders.
+The delta-neutral pair bot (treading-bot/deltaneutral) starts only when named: `tbot up deltaneutral` starts its PAPER
+bot, `tbot down deltaneutral` stops it; its live bot starts from a terminal (`deltaneutral start --live`).
 """
 
 from __future__ import annotations
@@ -254,6 +256,49 @@ def daytrade_status(role: str = "all") -> list[str]:
     return lines
 
 
+def deltaneutral_up(role: str = "all") -> str:
+    """Start the delta-neutral PAPER bot unless it runs (only where the runs are)."""
+    if not roles.trades(role):
+        return f"deltaneutral: not started (this machine is a {role}: the trader runs it)"
+    try:
+        from deltaneutral import ops as nops
+
+        msg = nops.start("paper")[1]
+    except Exception as e:   # not installed, or it fails to start: the other parts are not affected
+        return f"deltaneutral: not started ({type(e).__name__}: {e}). In treading-bot/arcus: make install"
+    return f"delta-neutral bot {msg}  [paper: real books, no orders; live: deltaneutral start --live]"
+
+
+def deltaneutral_down() -> str:
+    try:
+        from deltaneutral import ops as nops
+
+        return f"delta-neutral bot {nops.stop('paper')[1]}"
+    except Exception as e:
+        return f"deltaneutral: {type(e).__name__}: {e}"
+
+
+def deltaneutral_status(role: str = "all") -> list[str]:
+    """The delta-neutral lines of `tbot status`: each mode's process and phase."""
+    lines = ["", "DELTA NEUTRAL"]
+    try:
+        from deltaneutral import ops as nops
+
+        shown = False
+        for mode in nops.MODES:
+            pid, ph = nops.running(mode), nops.phase(mode)
+            if pid or ph not in ("", "flat"):
+                shown = True
+                lines.append(f"  {mode.upper():<6} {'running (pid ' + str(pid) + ')' if pid else 'NOT RUNNING'} · "
+                             f"{ph or 'never run'}")
+        if not shown:
+            lines.append("  not running. tbot up deltaneutral (paper), deltaneutral start --live" if roles.trades(role)
+                         else "  not here: it runs on the trader machine")
+    except Exception as e:
+        lines.append(f"  not available ({type(e).__name__}: {e}). In treading-bot/arcus: make install")
+    return lines
+
+
 def others_status(role: str = "all") -> list[str]:
     """The Lighter, funding-arbitrage and daytrade lines of `tbot status`."""
     lines = ["", "LIGHTER"]
@@ -300,14 +345,16 @@ def others_status(role: str = "all") -> list[str]:
                          else "  not here: it runs on the trader machine")
     except Exception as e:
         lines.append(f"  not available ({type(e).__name__}: {e}). In treading-bot/arcus: make install")
-    return lines + daytrade_status(role)
+    return lines + daytrade_status(role) + deltaneutral_status(role)
 
 
 PARTS = ("arcus", "lighter", "telegram", "daytrade")
+NAMED_ONLY = ("deltaneutral",)        # parts started and stopped only when named
 HINT = {"scout": "arcus up", "telegram": "tbot up telegram", "guardian": "arcus up"}
 PART_WHAT = {"arcus": "the Arcus scout (and the guardian while a live Arcus run exists)",
              "lighter": "the Lighter scout", "telegram": "the one Telegram bot (all three bots)",
-             "daytrade": "the daytrade paper bot (no orders)"}
+             "daytrade": "the daytrade paper bot (no orders)",
+             "deltaneutral": "the delta-neutral pair bot, paper (only when named)"}
 
 
 def up_parts(app: AppConfig, env: dict[str, str], live_running: bool, parts: tuple[str, ...]) -> list[str]:
@@ -333,6 +380,8 @@ def up_parts(app: AppConfig, env: dict[str, str], live_running: bool, parts: tup
             out.append(f"telegram: not started ({skip.get('telegram', 'not set up')})")
     if "daytrade" in parts:
         out.append(daytrade_up(r))
+    if "deltaneutral" in parts:
+        out.append(deltaneutral_up(r))
     return out
 
 
@@ -353,6 +402,8 @@ def down_parts(app: AppConfig, parts: tuple[str, ...], *, everything: bool, live
                            arbitrage=everything and set(parts) >= {"arcus", "lighter", "telegram"})
     if "daytrade" in parts:
         out.append(daytrade_down())
+    if "deltaneutral" in parts:
+        out.append(deltaneutral_down())
     return out
 
 

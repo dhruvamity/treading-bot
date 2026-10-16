@@ -19,6 +19,7 @@ import pytest
 os.environ["LBOT_NO_SPAWN"] = "1"     # the Lighter part, the funding arbitrage and daytrade refuse to start one too
 os.environ["ARB_NO_SPAWN"] = "1"
 os.environ["DAYTRADE_NO_SPAWN"] = "1"
+os.environ["DN_NO_SPAWN"] = "1"           # the delta-neutral bot too
 os.environ["BOT_ROLE"] = "all"       # whatever this machine's .env says, the tests run as one machine
 
 
@@ -30,7 +31,7 @@ def _no_real_bot_processes(monkeypatch: pytest.MonkeyPatch) -> Iterator[None]:
     class Guarded(real):  # type: ignore[misc,valid-type]
         def __init__(self, args: Any, *a: Any, **kw: Any) -> None:
             argv = [str(x) for x in args] if isinstance(args, (list, tuple)) else [str(args)]
-            if argv and Path(argv[0]).name in ("arcus", "lighter", "arbitrage", "daytrade"):
+            if argv and Path(argv[0]).name in ("arcus", "lighter", "arbitrage", "daytrade", "deltaneutral"):
                 refused.append(" ".join(argv))
                 raise RuntimeError(f"a test tried to start a real bot process: {' '.join(argv)}")
             super().__init__(args, *a, **kw)

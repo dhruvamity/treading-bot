@@ -314,3 +314,59 @@ async def test_daytrade_that_cannot_be_imported_breaks_nothing_else(tmp_path: Pa
     assert "DAYTRADE IS NOT AVAILABLE" in api.sent[-1][1]
     await bot.handle(msg("/ping"))
     assert "PONG" in api.sent[-1][1]
+
+
+# ------------------------------------------------------------------------------------------------ delta neutral
+@pytest.fixture
+def dn_home(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
+    """The delta-neutral bot's state and settings in a temporary place."""
+    pytest.importorskip("deltaneutral")
+    from deltaneutral import bot as nbot
+    from deltaneutral import cli as ncli
+    from deltaneutral import ops as nops
+
+    home = tmp_path / "dn"
+    (home / "state").mkdir(parents=True)
+    for mod in (nbot, nops, ncli):
+        monkeypatch.setattr(mod, "STATE", home / "state")
+    monkeypatch.setattr(nbot, "settings_path", lambda: home / "settings.json")
+    return home
+
+
+async def test_delta_neutral_answers_with_its_own_label_and_starts_only_paper(tmp_path: Path, dn_home: Path,
+                                                                             monkeypatch: pytest.MonkeyPatch) -> None:
+    from deltaneutral import ops as nops
+
+    monkeypatch.setenv("BOT_ROLE", "trader")
+    bot, api, _ = _bot(tmp_path, _app(tmp_path))
+    assert others.part_of("dn_status") == ("dn", "status") and others.part_of("deltaneutral") == ("dn", "")
+    await bot.handle(msg("/dn"))
+    assert api.sent[-1][1].startswith("⇄ <b>DELTA NEUTRAL</b>") and "/dn_transfer" in api.sent[-1][1]
+    await bot.handle(msg("/dn_status"))
+    assert api.sent[-1][1].startswith("⇄ <b>DELTA NEUTRAL · STATUS</b>") and "Not started yet" in api.sent[-1][1]
+    await bot.handle(msg("/dn_transfer"))
+    assert "nothing to move" in api.sent[-1][1]
+    await bot.handle(msg("/dn_pair amd intc"))
+    await bot.handle(msg("/dn_skip 2026-10-22"))
+    assert "2026-10-22" in api.sent[-1][1]
+    await bot.handle(msg("/dn_set guard 0.4"))
+    settings = json.loads((dn_home / "settings.json").read_text())
+    assert settings["x"] == "AMD" and settings["y"] == "INTC" and settings["skip"] == ["2026-10-22"]
+    assert settings["guard"] == 0.4
+    await bot.handle(msg("/dn_start live"))
+    assert "only from a terminal" in api.sent[-1][1]
+    started: list[str] = []
+    monkeypatch.setattr(nops, "start", lambda mode="paper", collateral=None, state=None:
+                        started.append(mode) or (True, "paper: started (pid 1)"))
+    await bot.handle(msg("/dn_start"))
+    assert started == ["paper"] and "started" in api.sent[-1][1]
+    await bot.handle(msg("/dn_fly"))
+    assert "DELTA NEUTRAL · UNKNOWN COMMAND" in api.sent[-1][1]
+
+
+async def test_a_read_only_bot_reads_delta_neutral_but_changes_nothing(tmp_path: Path, dn_home: Path) -> None:
+    bot, api, _ = _bot(tmp_path, _app(tmp_path), read_only=True)
+    await bot.handle(msg("/dn_settings"))
+    assert "DELTA NEUTRAL · SETTINGS" in api.sent[-1][1] and "USO" in api.sent[-1][1]
+    await bot.handle(msg("/dn_set guard 0.4"))
+    assert "READ-ONLY" in api.sent[-1][1] and not (dn_home / "settings.json").exists()

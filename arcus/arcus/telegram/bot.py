@@ -1,6 +1,6 @@
 """The Telegram control bot: status, control and live alerts for the trading bot. ONE bot for all of it: Arcus
 (the commands below), Lighter (/l_<command>), the funding arbitrage (/arb_<command>) and the paper day-trading bot
-(/dt_<command>, read only): arcus/telegram/others.py.
+(/dt_<command>, read only) and the delta-neutral pair bot (/dn_<command>): arcus/telegram/others.py.
 
 Security:
 - Only the owner's chat (TELEGRAM_CHAT_ID) is served; with TELEGRAM_ALLOWED_USER_IDS set, only those users, in the
@@ -165,6 +165,7 @@ class TelegramBot:
                                       home_if=lambda: self.ui() == "menu")
         self.arb = others.Arb()
         self.daytrade = others.DayTrade()
+        self.deltaneutral = others.DeltaNeutral()
         self.venues: dict[int, str] = {}     # menu layout: which part the Home buttons act on, per chat (default Arcus)
 
     # ------------------------------------------------------------------ plumbing
@@ -352,7 +353,8 @@ class TelegramBot:
         part = others.part_of(cmd)
         if part is not None:      # /l_status, /l status, /arb_hold 72, /dt_trades ...: Lighter, the arbitrage, daytrade
             name, rest = (part[1], args) if part[1] else ((args[0].lower(), args[1:]) if args else ("", []))
-            handler = {others.LIGHTER: self.c_lighter, others.ARB: self.c_arb, others.DAYTRADE: self.c_daytrade}
+            handler = {others.LIGHTER: self.c_lighter, others.ARB: self.c_arb, others.DAYTRADE: self.c_daytrade,
+                       others.DELTA: self.c_deltaneutral}
             await handler[part[0]](ctx, name, rest)
             return
         cmd = ALIASES.get(cmd, cmd)
@@ -486,6 +488,30 @@ class TelegramBot:
             await self.reply(ctx, card("❔", "DAYTRADE · UNKNOWN COMMAND", codes(f"/dt_{name}"), codes("/dt lists them")))
             return
         await self.reply(ctx, others.dt_card(name, out), others.dt_keyboard())
+
+    async def c_deltaneutral(self, ctx: Ctx, name: str, rest: list[str]) -> None:
+        """/dn_<name>: the delta-neutral pair bot (/dn lists the commands). Settings and controls change the bot;
+        Telegram starts and stops only its paper bot."""
+        loaded = self.deltaneutral.load()
+        if loaded is None:
+            await self.reply(ctx, self.deltaneutral.missing())
+            return
+        tg, ops = loaded
+        if name in ("", "menu", "help"):
+            await self.reply(ctx, others.dn_menu({m: ops.running(m) for m in ops.MODES}), others.dn_keyboard())
+            return
+        if tg.changes_something(name, rest) and self.read_only:
+            await self.reply(ctx, card("🔒", "READ-ONLY", codes("Controls are off on this bot")))
+            return
+        try:
+            out = await asyncio.to_thread(tg.reply, name, rest)
+        except Exception as e:
+            out = f"{type(e).__name__}: {redact_str(str(e))[:300]}"
+        if out is None:
+            await self.reply(ctx, card("❔", "DELTA NEUTRAL · UNKNOWN COMMAND", codes(f"/dn_{name}"),
+                                       codes("/dn lists them")))
+            return
+        await self.reply(ctx, others.dn_card(name, out), others.dn_keyboard())
 
     # ------------------------------------------------------------------ scout / pilot: the lists
     async def c_scout(self, ctx: Ctx, args: list[str]) -> None:

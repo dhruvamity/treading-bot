@@ -14,6 +14,9 @@ install:
 	@$(UV) pip install --python $(PY) -e '../daytrade[dev]' \
 		&& echo "installed: daytrade (paper only)" \
 		|| echo "WARNING: daytrade did not install; the three bots work without it"
+	@$(UV) pip install --python $(PY) -e '../deltaneutral[dev]' \
+		&& echo "installed: deltaneutral" \
+		|| echo "WARNING: deltaneutral did not install; the other bots work without it"
 
 lint:
 	.venv/bin/ruff check arcus tests scripts deploy/scripts

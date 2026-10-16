@@ -9,6 +9,7 @@
 !/lighter/
 !/arbitrage/
 !/daytrade/
+!/deltaneutral/
 
 # ---- credentials: never commit ---------------------------------------------------------------------------------
 .env
@@ -43,6 +44,10 @@
 /daytrade/data/
 /daytrade/state/
 /daytrade/reports/
+/deltaneutral/data/
+/deltaneutral/state/
+/deltaneutral/reports/
+/deltaneutral/settings.json
 *.sqlite
 *.sqlite-*
 *.npz
