@@ -1,9 +1,11 @@
 """plan.py: the size both venues allow, room to liquidation, which way pays, and the transfer."""
 
+import datetime as dt
 import math
 
 from deltaneutral import plan as P
 from deltaneutral.plan import ARCUS, LIGHTER
+from deltaneutral.series import arcus_open
 
 TEN = {ARCUS: P.Rules(imf=0.1, imf_off=0.15, mmf=0.0667, taker_bp=2.25),
        LIGHTER: P.Rules(imf=0.1, imf_off=0.1, mmf=0.06)}
@@ -46,6 +48,29 @@ def test_way_shorts_x_on_the_venue_whose_funding_is_higher():
     assert P.way_from(diff_x=0.0, diff_y=0.00002) == -1
     sd = P.sides(1)
     assert sd[ARCUS] == {"x": 1, "y": -1} and sd[LIGHTER] == {"x": -1, "y": 1}
+
+
+def test_the_funding_forecast_judges_each_hour_of_the_hold_by_its_session():
+    """Arcus pays X's longs while the stock market is open and charges its one fixed rate while it is closed, when
+    Lighter pays X's shorts: a weekday hold should be long X on Arcus, a weekend hold (closed hours only) the other
+    way round. The last 24 hours before Saturday's open (mostly Friday) would have said the weekday way."""
+    yr = 24 * 365 * 100
+    sat = dt.datetime(2026, 10, 17, 14, tzinfo=dt.UTC).timestamp()        # Saturday 10:00 New York
+    hist: dict = {(v, m): {} for v in (ARCUS, LIGHTER) for m in ("X", "Y")}
+    for h in range(int(sat) - 7 * 86_400, int(sat), 3600):
+        o = arcus_open(h)
+        hist[(ARCUS, "X")][h] = (-20 if o else 5) / yr
+        hist[(LIGHTER, "X")][h] = (4 if o else -2) / yr
+        hist[(ARCUS, "Y")][h] = 5 / yr
+        hist[(LIGHTER, "Y")][h] = 4 / yr
+    weekday = P.forecast(hist, "X", "Y", sat - 3 * 86_400, 24, arcus_open)      # Wednesday 10:00
+    weekend = P.forecast(hist, "X", "Y", sat, 24, arcus_open)
+    assert weekday is not None and weekend is not None
+    assert weekday.way == 1 and weekend.way == -1
+    assert abs(weekday.edge * yr - (16 * 25 - 8 * 6) / 24) < 1e-6            # 16 open hours, 8 closed
+    assert abs(weekend.edge * yr - 6) < 1e-6 and abs(weekend.rates[(ARCUS, "X")] * yr - 5) < 1e-6
+    hist.pop((LIGHTER, "Y"))
+    assert P.forecast(hist, "X", "Y", sat, 24, arcus_open) is None             # a market without history
 
 
 def test_the_transfer_evens_the_money_to_the_cent():

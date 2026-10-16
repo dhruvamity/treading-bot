@@ -18,6 +18,7 @@ Margin (venue docs, 16 Oct 2026). Both venues use cross margin by default: a ven
 from __future__ import annotations
 
 import math
+from collections.abc import Callable
 from dataclasses import dataclass
 
 ARCUS, LIGHTER = "arcus", "lighter"
@@ -116,6 +117,39 @@ def way_from(diff_x: float, diff_y: float) -> int:
     """Which way round pays the funding: diff = Lighter's rate - Arcus's (a fraction an hour, + = longs pay). With
     way +1 the bot is short X on Lighter and short Y on Arcus, so it earns diff_x - diff_y an hour on each dollar."""
     return 1 if diff_x - diff_y >= 0 else -1
+
+
+@dataclass(frozen=True)
+class Forecast:
+    way: int                                     # the way round the funding should pay
+    edge: float                                  # what that way should earn an hour on each dollar of each market
+    rates: dict[tuple[str, str], float]          # (venue, market): its hourly rate expected in the hold, + = longs pay
+
+
+def forecast(history: dict[tuple[str, str], dict[int, float]], x: str, y: str, start: float, hold_h: float,
+             is_open: Callable[[float], bool]) -> Forecast | None:
+    """Which way round the funding should pay over a hold from `start`, from each venue's hourly funding history
+    ({(venue, market): {hour start: rate}}). Each hour of the hold is expected to pay what that venue paid on average
+    in the same kind of hour over the history: while the stock market is open (`is_open`) or while it is closed, when
+    Arcus charges every market one fixed rate. So a hold over a weekend is judged on weekend hours. None when a
+    venue has no history for a market."""
+    hours = [(int(start) // 3600 + 1 + k) * 3600 for k in range(max(1, round(hold_h)))]
+    rates: dict[tuple[str, str], float] = {}
+    for v in VENUES:
+        for sym in (x, y):
+            h = history.get((v, sym)) or {}
+            if not h:
+                return None
+            by: dict[bool, list[float]] = {True: [], False: []}
+            for t, r in h.items():
+                by[is_open(t)].append(r)
+            every = sum(h.values()) / len(h)
+            av = {k: sum(rs) / len(rs) if rs else every for k, rs in by.items()}
+            rates[(v, sym)] = sum(av[is_open(t)] for t in hours) / len(hours)
+    dx = rates[(LIGHTER, x)] - rates[(ARCUS, x)]
+    dy = rates[(LIGHTER, y)] - rates[(ARCUS, y)]
+    way = way_from(dx, dy)
+    return Forecast(way, way * (dx - dy), rates)
 
 
 @dataclass(frozen=True)

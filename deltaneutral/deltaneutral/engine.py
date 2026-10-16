@@ -4,7 +4,8 @@
 A cycle:
 1. flat -> opening, at the day's open time (`open_ny`, New York time): the size is the largest both venues' margins
    allow now (plan.size; Arcus asks 1.5 times the margin while the stock market is closed, so an off-hours open is
-   smaller) and the way round is the one the last 24 hours of funding paid (`way`).
+   smaller) and the way round is the one the funding should pay over the hold (`way` auto): each venue's hourly
+   funding of the last `funding_days` days, fetched at the open, hour by hour of the hold (plan.forecast).
 2. opening: every leg rests a limit order that chases its own book (`execution` "chase"): at the best price, one
    tick inside it when the spread is wider than two ticks, moved when the best price moves (`requote_s`). Its size
    follows the other venue: neither venue gets more than `max_gap_usd` of a market ahead of the other, and a gap
@@ -57,7 +58,9 @@ class Settings:
     margin_use: float = 0.9         # share of the poorer venue's money its initial margin may use
     max_leverage: float = 0.0       # each venue's (X + Y dollars) / its money at most this; 0 = the venues' highest
     max_notional_usd: float = 0.0   # dollars of each market at most; 0 = no cap (a small number for a first live run)
-    way: str = "auto"               # "auto": the way the funding pays now; "+1": Arcus long X short Y; "-1": reverse
+    way: str = "auto"               # "auto": the way the funding should pay (plan.forecast), decided at every open;
+                                    # "+1": Arcus long X short Y; "-1": the reverse
+    funding_days: float = 7.0       # "auto" judges on each venue's hourly funding over this many days
     offhours: str = "keep"          # "keep": a position stays as opened when the stock market closes (Arcus keeps it);
                                     # "cut": cut to Arcus's off-hours size at the close, grown back at the reopen
     execution: str = "chase"        # "chase": both venues rest limit orders that follow their books; "arcus": only
@@ -99,7 +102,7 @@ ADJUSTABLE: dict[str, tuple[float, float] | tuple[str, ...]] = {
     "open_ny": (0, 23.99), "hold_h": (1, 720), "margin_use": (0.1, 0.95), "max_leverage": (0, 50),
     "max_notional_usd": (0, 1e7), "stop_share": (0, 0.95), "max_gap_usd": (10, 1e6), "catchup_s": (0, 3600),
     "requote_s": (2, 600), "enter_timeout_s": (60, 7200), "exit_timeout_s": (0, 7200), "max_cross_bp": (1, 200),
-    "min_transfer_usd": (0, 1e6), "remind_min": (1, 1440),
+    "min_transfer_usd": (0, 1e6), "remind_min": (1, 1440), "funding_days": (1, 30),
     "way": ("auto", "+1", "-1"), "offhours": ("keep", "cut"), "execution": ("chase", "arcus", "take"),
     "venue_stops": (0, 1), "improve": (0, 1), "wait_transfer": (0, 1), "weekends": (0, 1),
 }
@@ -419,7 +422,7 @@ class Engine:
         nx, ny = sz.nx, sz.ny
         if s.max_notional_usd > 0:
             nx, ny = min(nx, s.max_notional_usd), min(ny, s.max_notional_usd)
-        way = await self._way(s, snap, x, y)
+        way, why = await self._way(s, x, y, now, nx, ny)
         ux, uy = self._units(x, nx, snap), self._units(y, ny, snap)
         self.st.next_open = self._scheduled(now + 1, s)
         if ux <= 0 or uy <= 0:
@@ -448,8 +451,8 @@ class Engine:
         lev = {v: sz.leverage[v] for v in VENUES}
         self._say("opening", f"cycle {st.cycle}: opening {x}/{y}, ${nx:,.2f} of {x} and ${ny:,.2f} of {y} on each "
                   f"venue ({self._ways(way, x, y)}); leverage Arcus {lev[ARCUS]:.1f}x, Lighter {lev[LIGHTER]:.1f}x"
-                  + ("; the stock market is closed: Arcus's off-hours margin sets the size" if snap.off_hours else ""),
-                  cycle=st.cycle, nx=nx, ny=ny, way=way)
+                  + ("; the stock market is closed: Arcus's off-hours margin sets the size" if snap.off_hours else "")
+                  + f". {why}", cycle=st.cycle, nx=nx, ny=ny, way=way)
 
     def _ways(self, way: int, x: str, y: str) -> str:
         sd = P.sides(way)
@@ -457,28 +460,35 @@ class Engine:
         return (f"Arcus {word[sd[ARCUS]['x']]} {x} / {word[sd[ARCUS]['y']]} {y}, "
                 f"Lighter {word[sd[LIGHTER]['x']]} {x} / {word[sd[LIGHTER]['y']]} {y}")
 
-    async def _way(self, s: Settings, snap: Snapshot, x: str, y: str) -> int:
-        """`way` +1 / -1, or "auto": the way the last 24 hours of funding paid (the rates of the moment when those
-        cannot be read)."""
-        if s.way == "+1":
-            return 1
-        if s.way == "-1":
-            return -1
-        rates: dict[tuple[str, str], float] = {}
-        tr = getattr(self.reader, "trailing", None)
-        if callable(tr):
+    async def _way(self, s: Settings, x: str, y: str, now: float, nx: float, ny: float) -> tuple[int, str]:
+        """The way round and why: `way` +1 / -1, or "auto": the way the funding should pay over the hold, from each
+        venue's hourly funding of the last `funding_days` days, fetched now (the rates of the moment when that cannot
+        be read)."""
+        if s.way in ("+1", "-1"):
+            return int(s.way), f"The way round is fixed (way {s.way})"
+        hist: dict[tuple[str, str], dict[int, float]] = {}
+        get = getattr(self.reader, "history", None)
+        if callable(get):
             try:
-                rates = await tr((x, y))
+                hist = await get((x, y), round(s.funding_days * 24))
             except (VenueDown, RuntimeError, OSError, KeyError) as e:
                 self._say("venue_down", f"the funding history could not be read ({e}); the rates of the moment decide")
+        f = P.forecast(hist, x, y, now, s.hold_h, arcus_open)
+        if f is not None:
+            yr = 24 * 365 * 100
+            d = {m: f.rates[(LIGHTER, m)] - f.rates[(ARCUS, m)] for m in (x, y)}
+            usd = f.way * (nx * d[x] - ny * d[y]) * s.hold_h
+            each = "; ".join(f"{m} Arcus {f.rates[(ARCUS, m)] * yr:+.1f}%, Lighter {f.rates[(LIGHTER, m)] * yr:+.1f}%"
+                             for m in (x, y))
+            return f.way, (f"The funding should pay this way {_usd(usd)} over the {s.hold_h:g} hours ({each} a year, "
+                           f"+ = longs pay, expected from the last {s.funding_days:g} days)")
         fr = getattr(self.reader, "funding", None)
-        if not rates and callable(fr):
-            rates = fr()
-        if rates:
-            dx = rates.get((LIGHTER, x), 0.0) - rates.get((ARCUS, x), 0.0)
-            dy = rates.get((LIGHTER, y), 0.0) - rates.get((ARCUS, y), 0.0)
-            return P.way_from(dx, dy)
-        return 1
+        rates = fr() if callable(fr) else {}
+        if all((v, m) in rates for v in VENUES for m in (x, y)):
+            dx = rates[(LIGHTER, x)] - rates[(ARCUS, x)]
+            dy = rates[(LIGHTER, y)] - rates[(ARCUS, y)]
+            return P.way_from(dx, dy), "The way round is the one the rates of the moment pay (no funding history)"
+        return 1, "No funding could be read: the way round is +1"
 
     def _units(self, sym: str, usd: float, snap: Snapshot) -> float:
         """Units for `usd` dollars, on the coarser of the two venues' size steps, 0 under either venue's smallest."""
@@ -708,8 +718,8 @@ class Engine:
                 gone = [v for v in VENUES if abs(snap.pos[v][sym]) < self.specs[v][sym].step / 2]
                 if gone:
                     names = " and ".join(self.names[v] for v in gone)
-                    self._say("stopped_out", f"cycle {st.cycle}: {names} no longer holds {sym} (a stop or a "
-                              "liquidation): closing everything now")
+                    self._say("stopped_out", f"cycle {st.cycle}: {names} no longer hold{'' if len(gone) > 1 else 's'} "
+                              f"{sym} (a stop or a liquidation): closing everything now")
                     self._begin_close(f"{sym} closed on {names}", urgent=True)
                     return
         if s.stop_share > 0 and st.room0:

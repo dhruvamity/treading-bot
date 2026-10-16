@@ -109,18 +109,17 @@ class Reader:
     def funding(self) -> dict[tuple[str, str], float]:
         return dict(self._rates)
 
-    async def trailing(self, symbols: tuple[str, ...], hours: int = 24) -> dict[tuple[str, str], float]:
-        """Each venue's average hourly rate over the last `hours` hours, per market: what the way round is decided on
-        (as in the backtest). While the stock market is closed Arcus charges every market the same fixed rate, so
-        the rate of the moment would decide on noise."""
-        out: dict[tuple[str, str], float] = {}
+    async def history(self, symbols: tuple[str, ...], hours: int) -> dict[tuple[str, str], dict[int, float]]:
+        """Each venue's hourly funding over the last `hours` hours, per market, fetched now: {(venue, market): {hour
+        start: rate}} (+ = longs pay). The way round is decided on it (plan.forecast)."""
+        out: dict[tuple[str, str], dict[int, float]] = {}
         if not self.lighter.ids:
             await self.lighter.legs()
         for s in symbols:
             for v, client in ((ARCUS, self.arcus), (LIGHTER, self.lighter)):
                 h = await client.history(s, hours)
                 if h:
-                    out[(v, s)] = sum(h.values()) / len(h)
+                    out[(v, s)] = h
         return out
 
     async def close(self) -> None:

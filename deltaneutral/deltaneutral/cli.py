@@ -76,7 +76,8 @@ def c_research(a: argparse.Namespace) -> None:
 
 def backtest_settings(a: argparse.Namespace) -> BT.Settings:
     return BT.Settings(open_ny=a.hour, hold_h=a.hold, margin_use=a.margin, max_leverage=a.lev,
-                       ratio="beta" if a.beta else "equal", way=a.way, offhours="cut" if a.cut else "keep",
+                       ratio="beta" if a.beta else "equal", way=a.way, funding_days=a.funding_days,
+                       offhours="cut" if a.cut else "keep",
                        stop_share=a.stop_share, venue_stops=not a.no_venue_stops, execution=a.execution,
                        maker_bp=a.maker_bp, maker_fill=a.maker_fill,
                        transfers="never" if a.no_transfers else "each", weekends=not a.weekdays)
@@ -315,6 +316,7 @@ def parser() -> argparse.ArgumentParser:
     b.add_argument("--lev", type=float, default=0.0, help="leverage cap (0 = the venues' highest)")
     b.add_argument("--beta", action="store_true", help="Y's dollars = beta x X's (default: the same dollars)")
     b.add_argument("--way", default="auto", choices=["auto", "+1", "-1"])
+    b.add_argument("--funding-days", type=float, default=7.0, help="auto: days of funding the way round is judged on")
     b.add_argument("--cut", action="store_true", help="cut to Arcus's off-hours size at the stock market's close")
     b.add_argument("--stop-share", type=float, default=0.75,
                    help="close at this share of the way to liquidation (0 = only the venues' liquidation)")

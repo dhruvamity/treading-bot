@@ -4,7 +4,8 @@ the stops sit at the same prices on both, a stop or the guard closes everything,
 import asyncio
 import datetime as dt
 
-from arbitrage.exec.venue import SimVenue, Spec
+import pytest
+from arbitrage.exec.venue import PaperVenue, SimVenue, Spec
 
 from deltaneutral import engine as E
 from deltaneutral import plan as P
@@ -235,3 +236,101 @@ def test_crumbs_under_a_venues_size_step_count_as_flat(tmp_path):
     w.step()                                             # the 24 hours are up: the next cycle opens at once
     assert w.eng.st.phase == "opening" and w.eng.st.cycle == 2
     assert "found positions while flat" not in str(w.store.tail(w.store.events, 50))
+
+
+# USO/ORCL's margins as the venues set them on 16 Oct: Arcus 20x on USO, 10x on ORCL; Lighter 10x, maintenance 6%
+USO_ORCL = {ARCUS: {"AAA": P.Rules(imf=0.05, imf_off=0.075, mmf=0.033334),
+                    "BBB": P.Rules(imf=0.1, imf_off=0.15, mmf=0.066667)},
+            LIGHTER: {"AAA": P.Rules(imf=0.1, imf_off=0.1, mmf=0.06), "BBB": P.Rules(imf=0.1, imf_off=0.1, mmf=0.06)}}
+
+
+class Priced(World):
+    """USO/ORCL's margins (Lighter has the less room) on paper venues that fire their own stop and take-profit when
+    the price reaches it, closing at that price, as the paper bot's venues do."""
+
+    def __init__(self, tmp_path, **settings) -> None:
+        super().__init__(tmp_path, **settings)
+        self.px = {"AAA": 156.40, "BBB": 134.40}
+        self.v[ARCUS] = PaperVenue(ARCUS, self.book, Spec(0.01, 0.001, 0.001, 5.0, taker_bp=2.25), 100.0)
+        self.v[LIGHTER] = PaperVenue(LIGHTER, self.book, Spec(0.01, 0.001, 0.001, 5.0), 100.0)
+
+    async def book(self, sym: str) -> tuple[float, float]:
+        return self.px[sym] - 0.01, self.px[sym] + 0.01
+
+    async def read(self):
+        eq = {k: await v.free_collateral() for k, v in self.v.items()}
+        return eq, USO_ORCL, False
+
+    def money(self) -> dict[str, float]:
+        return {k: asyncio.run(v.free_collateral()) for k, v in self.v.items()}
+
+
+@pytest.mark.parametrize("against", [LIGHTER, ARCUS])
+def test_what_one_venue_loses_at_its_stop_the_other_makes_at_its_take_profit(tmp_path, against):
+    """A leg's stop on one venue and its take-profit on the other are one price on the same units: the dollars lost
+    at one are the dollars made at the other. The stop is 75% of the way to the weaker venue's liquidation (here
+    Lighter's, at its 6% maintenance line, where its partial liquidation starts). The bot then closes the other
+    market and asks for half the difference to be moved."""
+    w = Priced(tmp_path, execution="take")
+    w.until("open", fill=False)
+    w.step()
+    st = w.eng.st
+    lo, hi = st.stops["AAA"]
+    units = {v: w.v[v].pos["AAA"] for v in (ARCUS, LIGHTER)}
+    assert abs(units[ARCUS] + units[LIGHTER]) < 1e-9                    # the same units, opposite ways
+    assert st.room0[LIGHTER] < st.room0[ARCUS]                          # Lighter is the weaker venue
+    (_, a_stop, a_take), (_, l_stop, l_take) = w.v[ARCUS].stops["AAA"], w.v[LIGHTER].stops["AAA"]
+    assert (l_stop, l_take) == (a_take, a_stop)                         # Lighter's stop is Arcus's take-profit
+
+    hit = w.v[against].stops["AAA"][1]                                  # the price that hurts `against`
+    other = LIGHTER if against == ARCUS else ARCUS
+    before = w.money()
+    w.px["AAA"] = hit
+    for v in w.v.values():                                              # the venues fire, without the bot
+        asyncio.run(v.top("AAA"))
+    after = w.money()
+    lost, made = before[against] - after[against], after[other] - before[other]
+    assert not w.v[ARCUS].pos["AAA"] and not w.v[LIGHTER].pos["AAA"]    # closed on both venues
+    assert lost > 0 and abs(lost - made) < 1e-9                         # the same dollars
+    assert abs(lost - 0.75 * st.room0[LIGHTER]) < 0.01 * st.room0[LIGHTER]      # 75% of Lighter's room
+
+    w.step()                                                            # the bot sees AAA gone: closes BBB too
+    w.until("flat", fill=False)
+    row = w.store.tail(w.store.cycles, 1)[0]
+    end = row["end"]
+    assert row["transfer"]["from"] == other and row["transfer"]["to"] == against
+    assert abs(row["transfer"]["amount"] - (end[other] - end[against]) / 2) < 0.01
+
+
+class Funded:
+    """A reader whose venues publish funding: AAA's longs earn on Arcus and pay on Lighter until `turned`."""
+
+    def __init__(self, w: World) -> None:
+        self.w, self.turned, self.asked = w, False, []
+
+    async def __call__(self):
+        return await self.w.read()
+
+    async def history(self, symbols, hours):
+        self.asked.append((symbols, hours))
+        lead = -1 if self.turned else 1
+        yr = 24 * 365 * 100
+        now = int(self.w.clock.t) // 3600 * 3600
+        rates = {(ARCUS, "AAA"): -10, (LIGHTER, "AAA"): 5, (ARCUS, "BBB"): 5, (LIGHTER, "BBB"): 5}
+        return {k: {now - j * 3600: lead * r / yr for j in range(1, hours + 1)} for k, r in rates.items()}
+
+
+def test_auto_decides_the_way_round_at_every_open_from_the_funding_fetched_then(tmp_path):
+    w = World(tmp_path, execution="take")
+    w.eng.reader = reader = Funded(w)
+    w.until("open")
+    assert w.eng.st.way == 1 and w.v[ARCUS].pos["AAA"] > 0                # long AAA on Arcus, where longs earn
+    assert reader.asked == [(("AAA", "BBB"), 168)]                        # 7 days, fetched at the open
+    opening = [e["text"] for e in w.store.tail(w.store.events, 50) if e["kind"] == "opening"][-1]
+    assert "The funding should pay this way +$" in opening and "AAA Arcus -10.0%, Lighter +5.0%" in opening
+    reader.turned = True                                                  # the funding turns
+    w.clock.t = w.eng.st.close_at
+    w.until("flat")
+    w.step()                                                              # the next cycle opens
+    w.until("open")
+    assert w.eng.st.way == -1 and w.v[ARCUS].pos["AAA"] < 0 and len(reader.asked) == 2

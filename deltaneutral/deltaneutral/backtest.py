@@ -48,7 +48,9 @@ class Settings:
     margin_use: float = 0.9          # share of a venue's equity its initial margin may use
     max_leverage: float = 0.0        # cap on each venue's (gross / equity); 0 = the venues' highest
     ratio: str = "equal"             # "equal": the same dollars of X and Y; "beta": Y's dollars = beta * X's
-    way: str = "auto"                # "auto": the way the last 24 h of funding paid; "+1" / "-1": fixed
+    way: str = "auto"                # "auto": the way the funding should pay over the hold (plan.forecast, as the
+                                     # bot); "+1" / "-1": fixed
+    funding_days: float = 7.0        # "auto" judges on each venue's hourly funding over this many days
     offhours: str = "keep"           # "keep": a position stays at the close; "cut": cut to Arcus's off-hours size
     stop_share: float = 0.75         # close at this share of the way to liquidation (the bot's guard and the venues'
                                      # stops); 0 = only the venues' own liquidation
@@ -268,10 +270,12 @@ class Replay:
             return 1
         if self.st.way == "-1":
             return -1
-        lo = max(0, i - DAY // FIVE)
-        dx = float(np.sum(self.mx.funding[LIGHTER][lo:i] - self.mx.funding[ARCUS][lo:i]))
-        dy = float(np.sum(self.my.funding[LIGHTER][lo:i] - self.my.funding[ARCUS][lo:i]))
-        return P.way_from(dx, dy)
+        lo = max(0, i - int(self.st.funding_days * DAY) // FIVE)
+        hours = [k for k in range(lo, i) if int(self.t[k]) % HOUR == 0]
+        hist = {(v, mk.symbol): {int(self.t[k]): float(mk.funding[v][k]) for k in hours}
+                for mk in (self.mx, self.my) for v in VENUES}
+        f = P.forecast(hist, self.mx.symbol, self.my.symbol, float(self.t[i]), self.st.hold_h, arcus_open)
+        return f.way if f is not None else 1
 
     def open(self, i: int) -> None:
         t = float(self.t[i])

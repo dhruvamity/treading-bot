@@ -14,16 +14,16 @@ prices and funding, with $100 on each:
 
 | Pair | $200 became | Traded | Open interest held | Stops / guard closes | Transfers |
 |---|---|---|---|---|---|
-| USO/ORCL (the default) | $188.74 | $102k | $1,666 | 0 / 1 | 30, typically $13 |
-| ORCL/CRWV | $185.22 | $94k | $1,439 | 6 / 1 | 30, typically $8 |
-| AMD/USO (lost least) | $195.68 | $104k | $1,700 | 1 / 1 | 30, typically $10 |
+| USO/ORCL (the default) | $188.60 | $102k | $1,666 | 0 / 1 | 30, typically $13 |
+| ORCL/CRWV | $184.08 | $95k | $1,442 | 6 / 1 | 30, typically $8 |
+| AMD/PLTR (lost least) | $194.63 | $97k | $1,588 | 1 / 0 | 30, typically $5 |
 
 - **No pair makes money** when it closes and reopens every 24 hours. The eight fills a day cost more than the
-  funding pays. Limit orders on both venues save $5-8 a month against taking every fill.
+  funding pays. Limit orders on both venues save $5-12 a month against taking every fill.
 - **The one real edge is USO.** Arcus pays USO's longs about 14% a year, while Lighter charges them about 4%. So the
   bot is long USO on Arcus and short it on Lighter.
 - **USO/ORCL fits the brief.** USO is Arcus's highest leverage of the eight (20x), and ORCL is its lowest open
-  interest at 10x. Its limit orders fill least often on Lighter, though; AMD/USO's fill most often.
+  interest at 10x. Its limit orders fill least often on Lighter, though; AMD's fill most often.
 - **The risk is earnings.** At the highest leverage, about 1 day in 5 ended early over the longer stretch since
   mid-July, mostly around earnings. Without the stops, about 1 day in 14 would have liquidated a venue.
 - **Skip earnings days.** `deltaneutral skip DATE` keeps the bot flat around a report.
@@ -33,7 +33,11 @@ prices and funding, with $100 on each:
 1. **Open.** At `open_ny` (10:00 New York), the bot opens the largest position both venues' margins allow.
    - Arcus asks 1.5 times the margin while the stock market is closed. So an off-hours open is smaller, and Lighter's
      legs are as small as Arcus's.
-   - The way round is the one the last 24 hours of funding paid.
+   - The bot decides the way round itself at every open, from the funding it fetches then: each venue's hourly
+     rates over the last 7 days (`funding_days`), applied hour by hour to the coming 24 hours, the stock market's
+     open hours apart from its closed ones (Arcus charges one fixed rate while it is closed). The opening message
+     says what that should earn, for example `+$0.30 over the 24 hours`.
+   - It turns round only at an open: turning mid-cycle costs eight fills (about $0.70), more than a day's funding.
 2. **Limit orders on both venues** (`execution chase`). Every leg rests a limit order that chases its own book.
    - Price: the best price, or one tick inside it when the spread is wider than two ticks. It moves when the best
      price moves (`requote_s`, 10 s), and Lighter's are replaced before their 5.5-minute expiry.
