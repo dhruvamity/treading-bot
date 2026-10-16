@@ -219,6 +219,12 @@ class LighterPair:
         for t in self.legs.values():
             await t.stop()
 
+    @property
+    def maker_life_s(self) -> float | None:
+        """How long a resting order may stay before the engine replaces it (Lighter drops it at its expiry)."""
+        first = next(iter(self.legs.values()), None)
+        return first.maker_life_s if first is not None else None
+
     async def top(self, symbol: str) -> Any:
         return await self.legs[symbol].top(symbol)
 

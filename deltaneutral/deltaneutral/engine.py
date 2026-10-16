@@ -4,14 +4,19 @@
 A cycle:
 1. flat -> opening, at the day's open time (`open_ny`, New York time): the size is the largest both venues' margins
    allow now (plan.size; Arcus asks 1.5 times the margin while the stock market is closed, so an off-hours open is
-   smaller)
-   and the way round is the one the funding pays (`way`).
-2. opening: Arcus's two legs work toward their size (`arcus_maker`: limit orders at the best price, then after
-   `maker_wait_s` the rest is taken); Lighter's legs follow what Arcus HOLDS, by taker orders (Lighter charges none).
-3. open: every loop Lighter is made the mirror of Arcus again, so whatever changes Arcus's position (a partial fill,
-   a liquidation, the owner's own order, `offhours cut` at the stock market's close) changes Lighter's the same way.
-   A venue whose room to liquidation falls under `guard` closes everything early.
-4. closing, `hold_h` hours after the open: the same two steps towards nothing, reduce-only.
+   smaller) and the way round is the one the last 24 hours of funding paid (`way`).
+2. opening: every leg rests a limit order that chases its own book (`execution` "chase"): at the best price, one
+   tick inside it when the spread is wider than two ticks, moved when the best price moves (`requote_s`). Its size
+   follows the other venue: neither venue gets more than `max_gap_usd` of a market ahead of the other, and a gap
+   older than `catchup_s` is closed by the venue behind taking it. An entry that has not finished by
+   `enter_timeout_s` keeps what both venues hold.
+3. open: each leg gets a stop and a take-profit resting on its venue, the same two prices on both venues (so they
+   close a market together), `stop_share` (75%) of the way to where that market alone would liquidate the weaker
+   venue (Lighter: to its maintenance margin, where its partial liquidation starts). The bot itself closes
+   everything once a venue has used `stop_share` of its room, or once a venue no longer holds a leg (its stop
+   fired, or it was liquidated); Lighter and Arcus are kept level in every market, whichever one changed.
+4. closing, `hold_h` hours after the open: the stops are cancelled and both venues chase again, reduce-only; what is
+   left after `exit_timeout_s` is taken. Closes for the guard or a stop take at once.
 5. flat: each venue's money is read and the bot says exactly how much to move from which venue to which so both hold
    the same (`min_transfer_usd`). With `wait_transfer` it opens nothing while they are uneven, and says it again every
    `remind_min` minutes. Paper money is moved by the bot itself.
@@ -55,16 +60,21 @@ class Settings:
     way: str = "auto"               # "auto": the way the funding pays now; "+1": Arcus long X short Y; "-1": reverse
     offhours: str = "keep"          # "keep": a position stays as opened when the stock market closes (Arcus keeps it);
                                     # "cut": cut to Arcus's off-hours size at the close, grown back at the reopen
-    guard: float = 0.25             # close early when a venue's (equity - maintenance) / maintenance is under this
-    arcus_maker: bool = True        # Arcus's legs rest limit orders (no fee) before taking
-    maker_wait_s: float = 600.0     # ... for this long, then the rest is taken
-    requote_s: float = 20.0         # a resting order off the best price is moved at most this often
+    execution: str = "chase"        # "chase": both venues rest limit orders that follow their books; "arcus": only
+                                    # Arcus's legs rest and Lighter takes to stay level; "take": both take at once
+    stop_share: float = 0.75        # the bot's guard and the venues' stops: this share of the way to liquidation
+    venue_stops: bool = True        # each leg's stop and take-profit resting on its own venue
+    max_gap_usd: float = 150.0      # while chasing, how far one venue may get ahead of the other in a market
+    catchup_s: float = 60.0         # a gap between the venues older than this is closed by the one behind taking
+    improve: bool = True            # rest one tick inside the spread when it is wider than two ticks
+    requote_s: float = 10.0         # a resting order no longer at the best price is moved at most this often
+    enter_timeout_s: float = 1800.0  # an entry still chasing then keeps what both venues hold
+    exit_timeout_s: float = 900.0   # an exit still chasing then takes the rest
     max_cross_bp: float = 30.0      # a taker order goes no further than this from the best price
     min_transfer_usd: float = 1.0   # below this the money counts as even
     wait_transfer: bool = False     # True: open nothing while the money is uneven (the transfer has not been made)
     remind_min: float = 60.0
     weekends: bool = True           # open on Saturdays and Sundays too (Arcus then has its off-hours margin)
-    open_timeout_s: float = 1800.0  # an opening that has not finished by then keeps what it has
     skip: list[str] = field(default_factory=list)   # report dates ("YYYY-MM-DD", New York) of either market: nothing
                                     # is held from 16:00 the day before to 16:00 the day after (`deltaneutral skip`)
 
@@ -87,11 +97,13 @@ class Settings:
 # What `deltaneutral set` accepts: name -> (lowest, highest) for numbers, or the words allowed
 ADJUSTABLE: dict[str, tuple[float, float] | tuple[str, ...]] = {
     "open_ny": (0, 23.99), "hold_h": (1, 720), "margin_use": (0.1, 0.95), "max_leverage": (0, 50),
-    "max_notional_usd": (0, 1e7), "guard": (0, 5), "maker_wait_s": (0, 7200), "requote_s": (2, 600),
-    "max_cross_bp": (1, 200), "min_transfer_usd": (0, 1e6), "remind_min": (1, 1440), "open_timeout_s": (60, 7200),
-    "way": ("auto", "+1", "-1"), "offhours": ("keep", "cut"), "arcus_maker": (0, 1), "wait_transfer": (0, 1),
-    "weekends": (0, 1),
+    "max_notional_usd": (0, 1e7), "stop_share": (0, 0.95), "max_gap_usd": (10, 1e6), "catchup_s": (0, 3600),
+    "requote_s": (2, 600), "enter_timeout_s": (60, 7200), "exit_timeout_s": (0, 7200), "max_cross_bp": (1, 200),
+    "min_transfer_usd": (0, 1e6), "remind_min": (1, 1440),
+    "way": ("auto", "+1", "-1"), "offhours": ("keep", "cut"), "execution": ("chase", "arcus", "take"),
+    "venue_stops": (0, 1), "improve": (0, 1), "wait_transfer": (0, 1), "weekends": (0, 1),
 }
+BOOLS = ("venue_stops", "improve", "wait_transfer", "weekends")
 
 
 def set_value(path: Path, name: str, text: str) -> Any:
@@ -114,7 +126,7 @@ def set_value(path: Path, name: str, text: str) -> Any:
             raise ValueError(f"{name}: {text!r} is not a number") from None
         if not lo <= v <= hi:
             raise ValueError(f"{name} must be between {lo:g} and {hi:g}")
-        if name in ("arcus_maker", "wait_transfer", "weekends"):
+        if name in BOOLS:
             v = bool(v)
     try:
         cur = json.loads(path.read_text())
@@ -175,7 +187,13 @@ class State:
     start_equity: dict[str, float] = field(default_factory=dict)
     volume: float = 0.0                               # dollars traded this cycle, both venues
     last_pos: dict[str, float] = field(default_factory=dict)     # "venue:symbol" -> units at the last step
-    orders: dict[str, dict[str, Any]] = field(default_factory=dict)   # Arcus's resting order per market
+    orders: dict[str, dict[str, Any]] = field(default_factory=dict)   # "venue:market" -> its resting order
+    gap_since: dict[str, float] = field(default_factory=dict)    # market -> when the venues last parted
+    room0: dict[str, float] = field(default_factory=dict)        # each venue's money less maintenance, at the open
+    stops: dict[str, list[float]] = field(default_factory=dict)  # market -> [stop below, stop above], both venues
+    protect: bool = False                             # place the venues' stops once the legs are where they should be
+    unprotect: bool = False                           # cancel them before closing
+    urgent: bool = False                              # this close takes at once (the guard, a stop)
     paused: bool = False
     transfer: dict[str, Any] = field(default_factory=dict)       # the last transfer asked for
     reminded: float = 0.0
@@ -246,7 +264,7 @@ class Store:
         self.control.write_text(json.dumps({**cur, **cmd}))
 
     ALERTS = ("opened", "closed", "transfer", "remind", "guard", "resized", "stopped", "started", "refused",
-              "too_small", "venue_down", "uneven")
+              "too_small", "venue_down", "uneven", "protected", "stopped_out")
 
     def event(self, kind: str, text: str, **data: Any) -> None:
         now = time.time()
@@ -370,7 +388,8 @@ class Engine:
         if self.st.next_open <= 0:
             self.st.next_open = self._scheduled(now, s)
             self._say("waiting", f"flat; the first cycle opens at {_utc(self.st.next_open)}")
-        held = {f"{v}:{k}": p for v in VENUES for k, p in snap.pos[v].items() if p}
+        held = {f"{v}:{k}": p for v in VENUES for k, p in snap.pos[v].items()
+                if k in self.specs[v] and abs(p) >= self.specs[v][k].step / 2}   # crumbs under a step do not count
         if held:            # flat by our count but something is held (a restart mid-close, a manual order): close it
             self.st.x, self.st.y = s.x, s.y
             self._begin_close("found positions while flat")
@@ -425,6 +444,7 @@ class Engine:
         st.opened_at, st.close_at, st.phase_since = now, now + s.hold_h * HOUR, now
         st.start_equity = dict(snap.equity)
         st.volume, st.why, st.min_room, st.orders, st.funding = 0.0, "", math.inf, {}, {}
+        st.gap_since, st.room0, st.stops, st.protect, st.unprotect, st.urgent = {}, {}, {}, False, False, False
         lev = {v: sz.leverage[v] for v in VENUES}
         self._say("opening", f"cycle {st.cycle}: opening {x}/{y}, ${nx:,.2f} of {x} and ${ny:,.2f} of {y} on each "
                   f"venue ({self._ways(way, x, y)}); leverage Arcus {lev[ARCUS]:.1f}x, Lighter {lev[LIGHTER]:.1f}x"
@@ -471,107 +491,154 @@ class Engine:
         return u
 
     # ------------------------------------------------------------------ working the legs
-    def _begin_close(self, why: str) -> None:
+    def _begin_close(self, why: str, urgent: bool = False) -> None:
         st = self.st
-        st.phase, st.why, st.phase_since = "closing", why, self.clock()
+        st.phase, st.why, st.phase_since, st.urgent = "closing", why, self.clock(), urgent
         st.target = {k: 0.0 for k in (st.x, st.y)}
+        st.unprotect, st.protect = bool(st.stops) or self.settings().venue_stops, False
         self._say("closing", f"cycle {st.cycle}: closing {st.x}/{st.y} ({why})")
 
     async def _work(self, snap: Snapshot, now: float) -> None:
         st, s = self.st, self.settings()
-        closing = st.phase == "closing"
-        if not closing:
+        if st.phase == "open":
             self._watch(snap, now, s)
-            if st.phase == "closing":
-                closing = True
-        late = now - st.phase_since >= (0 if st.why == "guard" else s.maker_wait_s) or not s.arcus_maker
+        if st.phase == "closing" and st.unprotect:          # the venues' stops go before the exit orders
+            for v in VENUES:
+                for sym in (st.x, st.y):
+                    await self.v[v].cancel_all(sym)
+            st.unprotect, st.stops, st.orders = False, {}, {}
         done = True
         for sym in (st.x, st.y):
-            ok = await self._arcus_leg(sym, st.target.get(sym, 0.0), snap, now, s, late, closing)
-            done = done and ok
-        for sym in (st.x, st.y):            # Lighter mirrors what Arcus holds now, after this step's Arcus orders
-            pa = await self.v[ARCUS].position(sym)
-            if pa is None:
-                done = False
-                continue
-            ok = await self._lighter_leg(sym, -pa, snap, s, closing)
-            done = done and ok
+            done = await self._pair_leg(sym, snap, now, s) and done
         if st.phase == "opening":
             if done:
-                st.phase, st.phase_since = "open", now
+                st.phase, st.phase_since, st.protect = "open", now, True
                 self._opened(snap)
-            elif now - st.opened_at >= s.open_timeout_s:
-                held = {sym: await self.v[ARCUS].position(sym) or 0.0 for sym in (st.x, st.y)}
-                st.target = held
-                st.full = dict(held)
-                st.phase, st.phase_since = "open", now
-                await self._cancel_all_makers()
-                self._opened(snap, partial=True)
-        elif closing and done and all(abs(snap.pos[v][k]) < 1e-12 for v in VENUES for k in (st.x, st.y)):
-            await self._finish(snap, now)
+        elif st.phase == "open":
+            if done and st.protect:
+                await self._protect(snap, s)
+        elif done and all(abs(snap.pos[v][k]) < self.specs[v][k].step / 2 for v in VENUES for k in (st.x, st.y)):
+            await self._finish(snap, now)       # flat: less than half of each venue's smallest size step left
 
-    async def _arcus_leg(self, sym: str, want: float, snap: Snapshot, now: float, s: Settings, late: bool,
-                         closing: bool) -> bool:
-        """Move Arcus's position in `sym` toward `want`. True when it is there (within a step or a dust size)."""
-        v = self.v[ARCUS]
-        spec = self.specs[ARCUS][sym]
-        have = snap.pos[ARCUS][sym]
-        d = want - have
-        top = snap.tops[ARCUS][sym]
-        rec = self.st.orders.get(sym)
-        if rec:                               # what became of the resting order
-            info = await v.order(sym, rec["id"])
-            if info is None or not info.open:
-                self.st.orders.pop(sym, None)
-                rec = None
-        if abs(d) < spec.step / 2 or not spec.tradeable(abs(d), top.mid):
-            if rec:
-                await v.cancel(sym, rec["id"])
-                self.st.orders.pop(sym, None)
-            return not (want == 0 and abs(have) > 0 and abs(d) >= spec.step / 2)
-        side = BUY if d > 0 else SELL
-        size = spec.floor_size(abs(d))
-        reduce = closing or (have != 0 and (have > 0) != (d > 0) and abs(want) < abs(have))
-        if not late:
-            px = top.bid if side == BUY else top.ask
-            if rec and (abs(rec["price"] - px) > spec.tick / 2 or abs(rec["size"] - size) > spec.step / 2):
-                if now - rec["at"] >= s.requote_s or abs(rec["size"] - size) > spec.step / 2:
-                    await v.cancel(sym, rec["id"])
-                    self.st.orders.pop(sym, None)
-                    rec = None
-            if rec is None:
-                oid = await v.maker(sym, side, size, px, reduce)
-                self.st.orders[sym] = {"id": oid, "price": px, "size": size, "at": now, "side": side}
-            return False
+    def _key(self, v: str, sym: str) -> str:
+        return f"{v}:{sym}"
+
+    async def _cancel(self, v: str, sym: str) -> None:
+        rec = self.st.orders.pop(self._key(v, sym), None)
         if rec:
-            await v.cancel(sym, rec["id"])
-            self.st.orders.pop(sym, None)
-        worst = top.ask * (1 + s.max_cross_bp / 1e4) if side == BUY else top.bid * (1 - s.max_cross_bp / 1e4)
-        await v.taker(sym, side, size, worst, reduce)
-        return False
+            await self.v[v].cancel(sym, rec["id"])
 
-    async def _lighter_leg(self, sym: str, want: float, snap: Snapshot, s: Settings, closing: bool) -> bool:
-        """Lighter's position in `sym` made `want` (the mirror of Arcus's) by a taker order."""
-        spec = self.specs[LIGHTER][sym]
-        have = await self.v[LIGHTER].position(sym)
-        if have is None:
-            return False
-        d = want - have
-        top = snap.tops[LIGHTER][sym]
-        if abs(d) < spec.step / 2:
+    async def _take(self, v: str, sym: str, side: int, size: float, top: Top, reduce: bool, s: Settings) -> None:
+        await self._cancel(v, sym)
+        worst = top.ask * (1 + s.max_cross_bp / 1e4) if side == BUY else top.bid * (1 - s.max_cross_bp / 1e4)
+        spec = self.specs[v][sym]
+        await self.v[v].taker(sym, side, spec.floor_size(size) or size, worst, reduce)
+
+    def _price(self, v: str, sym: str, side: int, snap: Snapshot, s: Settings) -> float:
+        """Where a resting order chases to: the best price on its side, one tick inside it when the spread is wider
+        than two ticks (`improve`), never on or through the other side; an order of ours that already is the best
+        price stays where it is."""
+        top, tick = snap.tops[v][sym], self.specs[v][sym].tick
+        rec = self.st.orders.get(self._key(v, sym))
+        best, other = (top.bid, top.ask) if side == BUY else (top.ask, top.bid)
+        if rec and rec["side"] == side and abs(rec["price"] - best) < tick / 2:
+            return float(rec["price"])
+        wide = abs(other - best) > 2.5 * tick
+        p = best + side * tick if (s.improve and wide) else best
+        return min(p, other - tick) if side == BUY else max(p, other + tick)
+
+    async def _rest(self, v: str, sym: str, side: int, size: float, price: float, reduce: bool, now: float,
+                    s: Settings) -> None:
+        """Keep one resting order for this leg at `price` for `size`: moved when the best price moved away (at most
+        every `requote_s`), resized when it must shrink or can grow by a quarter, replaced before the venue's own
+        expiry (Lighter: 5.5 minutes)."""
+        key, spec, venue = self._key(v, sym), self.specs[v][sym], self.v[v]
+        rec = self.st.orders.get(key)
+        if rec:
+            info = await venue.order(sym, rec["id"])
+            if info is None or not info.open:
+                self.st.orders.pop(key, None)
+                rec = None
+            else:
+                left = max(0.0, info.size - info.filled)
+                moved = abs(rec["price"] - price) > spec.tick / 2
+                shrink, grow = size < left - spec.step / 2, size > left * 1.25 + spec.step
+                life = getattr(venue, "maker_life_s", None)
+                old = bool(life) and now - rec["at"] >= float(life)
+                if rec["side"] != side or shrink or grow or old or (moved and now - rec["at"] >= s.requote_s):
+                    await self._cancel(v, sym)
+                    rec = None
+        if rec is None:
+            oid = await venue.maker(sym, side, size, price, reduce)
+            self.st.orders[key] = {"id": oid, "price": price, "size": size, "at": now, "side": side}
+
+    async def _pair_leg(self, sym: str, snap: Snapshot, now: float, s: Settings) -> bool:
+        """Work both venues' legs in `sym` toward the target (Arcus `target`, Lighter its opposite), keeping them
+        level. True when both are there."""
+        st = self.st
+        closing = st.phase == "closing"
+        ta = st.target.get(sym, 0.0)
+        want = {ARCUS: ta, LIGHTER: -ta}
+        pos = {v: snap.pos[v][sym] for v in VENUES}
+        d = {v: want[v] - pos[v] for v in VENUES}
+        spec = {v: self.specs[v][sym] for v in VENUES}
+        step = max(sp.step for sp in spec.values())
+        there = {v: abs(d[v]) < spec[v].step / 2 for v in VENUES}
+        if all(there.values()):
+            for v in VENUES:
+                await self._cancel(v, sym)
+            st.gap_since.pop(sym, None)
             return True
-        if not spec.tradeable(abs(d), top.mid) and not (want == 0 and closing):
-            return True                       # dust Lighter would refuse: within one smallest order of the mirror
-        side = BUY if d > 0 else SELL
-        worst = top.ask * (1 + s.max_cross_bp / 1e4) if side == BUY else top.bid * (1 - s.max_cross_bp / 1e4)
-        reduce = want == 0 or (have != 0 and (have > 0) != (d > 0) and abs(want) < abs(have))
-        await self.v[LIGHTER].taker(sym, side, spec.floor_size(abs(d)) or abs(d), worst, reduce)
+        gap = pos[ARCUS] + pos[LIGHTER]                     # units one venue holds more than the other: 0 = level
+        if abs(gap) >= step / 2:
+            since = st.gap_since.setdefault(sym, now)
+            need = -1 if gap > 0 else 1                     # the side that closes the gap
+            lag = max((v for v in VENUES if d[v] * need > 0), key=lambda v: abs(d[v]), default=None)
+            if lag is None:                                 # nobody wants that side: the larger leg comes down
+                lag = max(VENUES, key=lambda v: abs(pos[v]))
+            quick = st.urgent or s.execution == "take" or (s.execution == "arcus" and lag == LIGHTER)
+            if quick or now - since >= s.catchup_s:
+                size = min(abs(gap), abs(d[lag])) if d[lag] * need > 0 else abs(gap)
+                reduce = closing or (pos[lag] != 0 and (pos[lag] > 0) != (need > 0))
+                await self._take(lag, sym, need, size, snap.tops[lag][sym], reduce, s)
+                return False
+        else:
+            st.gap_since.pop(sym, None)
+        timeout = s.exit_timeout_s if closing else s.enter_timeout_s
+        timed_out = now - st.phase_since >= timeout
+        late = st.urgent or s.execution == "take" or (closing and timed_out)
+        if timed_out and st.phase == "opening" and s.execution != "take":   # out of time: keep what both hold
+            if abs(gap) < step / 2:
+                for v in VENUES:
+                    await self._cancel(v, sym)
+                st.target[sym] = pos[ARCUS]
+                return True
+            return False
+        px = snap.mid(LIGHTER, sym)
+        for v in VENUES:
+            if there[v]:
+                await self._cancel(v, sym)
+                continue
+            side = BUY if d[v] > 0 else SELL
+            reduce = closing or (pos[v] != 0 and (pos[v] > 0) != (d[v] > 0))
+            rests = s.execution == "chase" or (s.execution == "arcus" and v == ARCUS)
+            dust = not spec[v].tradeable(abs(d[v]), snap.mid(v, sym))
+            if late or dust:
+                if dust and not closing:
+                    await self._cancel(v, sym)              # an entry's crumb: not worth an order
+                    continue
+                await self._take(v, sym, side, abs(d[v]), snap.tops[v][sym], reduce, s)
+                continue
+            if not rests:
+                continue                                    # it follows the other venue through the gap above
+            other = LIGHTER if v == ARCUS else ARCUS
+            allow = abs(d[v]) if s.execution == "arcus" else abs(d[v]) - abs(d[other]) + s.max_gap_usd / px
+            size = spec[v].floor_size(min(abs(d[v]), max(0.0, allow)))
+            if not spec[v].tradeable(size, snap.mid(v, sym)):
+                await self._cancel(v, sym)                  # ahead of the other venue: wait for it
+                continue
+            await self._rest(v, sym, side, size, self._price(v, sym, side, snap, s), reduce, now, s)
         return False
-
-    async def _cancel_all_makers(self) -> None:
-        for sym, rec in list(self.st.orders.items()):
-            await self.v[ARCUS].cancel(sym, rec["id"])
-        self.st.orders = {}
 
     def _opened(self, snap: Snapshot, partial: bool = False) -> None:
         st = self.st
@@ -580,6 +647,13 @@ class Engine:
         self._say("opened", f"cycle {st.cycle} open{' (partly: the rest did not fill in time)' if partial else ''}: "
                   f"{self._ways(st.way, st.x, st.y)}; ${nx:,.2f} of {st.x} and ${ny:,.2f} of {st.y} on each venue; "
                   f"closes {_utc(st.close_at)}", cycle=st.cycle, nx=nx, ny=ny)
+
+    def room(self, snap: Snapshot, v: str) -> float:
+        """Venue v's money less its maintenance margin now (Lighter: where its partial liquidation starts)."""
+        st = self.st
+        nx = abs(snap.pos[v][st.x]) * snap.mid(v, st.x)
+        ny = abs(snap.pos[v][st.y]) * snap.mid(v, st.y)
+        return snap.equity[v] - P.maintenance(nx, ny, snap.rules[v][st.x], snap.rules[v][st.y])
 
     def rooms(self, snap: Snapshot) -> dict[str, float]:
         """Each venue's (equity - maintenance) / maintenance now."""
@@ -591,28 +665,73 @@ class Engine:
             out[v] = P.room(snap.equity[v], nx, ny, snap.rules[v][st.x], snap.rules[v][st.y])
         return out
 
+    async def _protect(self, snap: Snapshot, s: Settings) -> None:
+        """Each venue's room now, and each leg's stop and take-profit on its venue: the same two prices on both
+        venues, `stop_share` of the way to where that market alone would use up the weaker venue's room."""
+        st = self.st
+        st.protect = False
+        st.room0 = {v: self.room(snap, v) for v in VENUES}
+        if s.stop_share <= 0 or not s.venue_stops:
+            return
+        for v in VENUES:
+            for sym in (st.x, st.y):
+                await self.v[v].cancel_all(sym)             # the stops of an earlier size, if any
+        st.orders = {}
+        lines = []
+        for sym in (st.x, st.y):
+            legs = {v: abs(snap.pos[v][sym]) * snap.mid(v, sym) for v in VENUES}
+            dist = min((st.room0[v] / legs[v] for v in VENUES if legs[v] > 0), default=0.0)
+            if dist <= 0:
+                continue
+            ref = sum(snap.mid(v, sym) for v in VENUES) / len(VENUES)
+            lo, hi = ref * (1 - s.stop_share * dist), ref * (1 + s.stop_share * dist)
+            st.stops[sym] = [lo, hi]
+            for v in VENUES:
+                p = snap.pos[v][sym]
+                if not p:
+                    continue
+                stop, take = (lo, hi) if p > 0 else (hi, lo)
+                if not await self.v[v].set_stops(sym, p, stop, take):
+                    self._say("refused", f"{self.names[v]} did not take the stop and take-profit on {sym}: the bot's "
+                              "own guard still watches, but nothing protects that leg if the bot stops")
+            lines.append(f"{sym} below {lo:,.2f} or above {hi:,.2f} ({s.stop_share * dist * 100:.1f}% away)")
+        if lines:
+            self._say("protected", f"cycle {st.cycle}: stops on both venues at the same prices, {s.stop_share:.0%} of "
+                      "the way to liquidation: " + "; ".join(lines))
+
     def _watch(self, snap: Snapshot, now: float, s: Settings) -> None:
         st = self.st
         rooms = self.rooms(snap)
         st.min_room = min(st.min_room, *rooms.values())
-        worst = min(rooms, key=lambda v: rooms[v])
-        if st.phase == "open" and s.guard > 0 and rooms[worst] < s.guard:
-            self._say("guard", f"cycle {st.cycle}: {self.names[worst]} is near liquidation (room {rooms[worst]:.2f} "
-                      f"under {s.guard:.2f}): closing everything now", room=rooms[worst])
-            st.why = "guard"
-            self._begin_close("guard")
-            st.why = "guard"
-            return
-        if st.phase == "open" and s.offhours == "cut" and snap.off_hours != st.off_size:
+        for sym in (st.x, st.y):                            # a venue no longer holds a leg: its stop, or liquidation
+            if st.target.get(sym) and not st.protect:
+                gone = [v for v in VENUES if abs(snap.pos[v][sym]) < self.specs[v][sym].step / 2]
+                if gone:
+                    names = " and ".join(self.names[v] for v in gone)
+                    self._say("stopped_out", f"cycle {st.cycle}: {names} no longer holds {sym} (a stop or a "
+                              "liquidation): closing everything now")
+                    self._begin_close(f"{sym} closed on {names}", urgent=True)
+                    return
+        if s.stop_share > 0 and st.room0:
+            for v in VENUES:
+                r0 = st.room0.get(v, 0.0)
+                used = 1 - self.room(snap, v) / r0 if r0 > 0 else 0.0
+                if used >= s.stop_share:
+                    self._say("guard", f"cycle {st.cycle}: {self.names[v]} has used {used:.0%} of its room to "
+                              "liquidation: closing everything now", used=used)
+                    self._begin_close("guard", urgent=True)
+                    return
+        if s.offhours == "cut" and snap.off_hours != st.off_size:
             self._resize(snap, s)
-        if st.phase == "open" and blocked(now, now + SKIP_LEAD_S, s.skip) is not None:
+        if blocked(now, now + SKIP_LEAD_S, s.skip) is not None:
             self._begin_close("a skip date (earnings) begins")
             return
-        if st.phase == "open" and now >= st.close_at:
+        if now >= st.close_at:
             self._begin_close(f"{s.hold_h:g} hours are up")
 
     def _resize(self, snap: Snapshot, s: Settings) -> None:
-        """The stock market closed (cut to Arcus's off-hours size) or reopened (back to the size opened with)."""
+        """The stock market closed (cut to Arcus's off-hours size) or reopened (back to the size opened with); the
+        stops are placed again once both venues are there."""
         st = self.st
         rx = {v: snap.rules[v][st.x] for v in VENUES}
         ry = {v: snap.rules[v][st.y] for v in VENUES}
@@ -626,13 +745,15 @@ class Engine:
         new = {st.x: sd[ARCUS]["x"] * ux, st.y: sd[ARCUS]["y"] * uy}
         if snap.off_hours:                  # only ever smaller at the close
             new = {k: (n if abs(n) < abs(st.target[k]) else st.target[k]) for k, n in new.items()}
-        st.target, st.off_size, st.phase_since = new, snap.off_hours, self.clock()
+        st.target, st.off_size, st.phase_since, st.protect = new, snap.off_hours, self.clock(), True
         self._say("resized", f"cycle {st.cycle}: the stock market {'closed' if snap.off_hours else 'reopened'}: "
-                  f"Arcus {'cut' if snap.off_hours else 'back'} to {ux:g} {st.x} and {uy:g} {st.y}; Lighter follows")
+                  f"both venues {'cut' if snap.off_hours else 'back'} to {ux:g} {st.x} and {uy:g} {st.y}")
 
     async def _finish(self, snap: Snapshot, now: float) -> None:
         st, s = self.st, self.settings()
-        await self._cancel_all_makers()
+        for key in list(st.orders):
+            v, sym = key.split(":", 1)
+            await self._cancel(v, sym)
         end = dict(snap.equity)
         made = {v: end[v] - st.start_equity.get(v, end[v]) for v in VENUES}
         tr = P.transfer(end, s.min_transfer_usd)
@@ -651,9 +772,10 @@ class Engine:
             self.mover(tr.amount, tr.source, tr.target)
             self._say("moved", f"paper: ${tr.amount:,.2f} moved from {self.names[tr.source]} to "
                       f"{self.names[tr.target]}")
-        if st.why in ("guard", "asked to close", "found positions while flat"):
+        if st.urgent or st.why in ("asked to close", "found positions while flat"):
             st.next_open = max(st.next_open, self._scheduled(now + 1, s))
         st.phase, st.phase_since, st.target, st.orders, st.reminded = "flat", now, {}, {}, now
+        st.stops, st.room0, st.gap_since, st.urgent = {}, {}, {}, False
 
 
 def _utc(t: float) -> str:

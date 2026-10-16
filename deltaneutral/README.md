@@ -12,20 +12,20 @@ $450 ORCL. That is $1,800 of open interest across the four legs and about $3,600
 `reports/REPORT.md` (`deltaneutral research`) has the details. In brief, on the last 30 days of both venues' own
 prices and funding, with $100 on each:
 
-| Pair | $200 became | Traded | Open interest held | Early closes | Transfers |
+| Pair | $200 became | Traded | Open interest held | Stops / guard closes | Transfers |
 |---|---|---|---|---|---|
-| USO/ORCL (the default) | $187.46 | $102k | $1,661 | 1 | 30, typically $13 |
-| ORCL/CRWV | $183.29 | $94k | $1,502 | 3 | 30, typically $6 |
-| COIN/USO (lost least) | $193.65 | $78k | $1,193 | 4 | 30, typically $7 |
+| USO/ORCL (the default) | $188.74 | $102k | $1,666 | 0 / 1 | 30, typically $13 |
+| ORCL/CRWV | $185.22 | $94k | $1,439 | 6 / 1 | 30, typically $8 |
+| AMD/USO (lost least) | $195.68 | $104k | $1,700 | 1 / 1 | 30, typically $10 |
 
 - **No pair makes money** when it closes and reopens every 24 hours. The eight fills a day cost more than the
-  funding pays.
+  funding pays. Limit orders on both venues save $5-8 a month against taking every fill.
 - **The one real edge is USO.** Arcus pays USO's longs about 14% a year, while Lighter charges them about 4%. So the
   bot is long USO on Arcus and short it on Lighter.
 - **USO/ORCL fits the brief.** USO is Arcus's highest leverage of the eight (20x), and ORCL is its lowest open
-  interest at 10x.
-- **The risk is earnings.** At the highest leverage, the guard closed about 1 day in 5 early over the longer stretch
-  since mid-July, mostly around earnings. Without the guard, about 1 day in 14 would have liquidated a venue.
+  interest at 10x. Its limit orders fill least often on Lighter, though; AMD/USO's fill most often.
+- **The risk is earnings.** At the highest leverage, about 1 day in 5 ended early over the longer stretch since
+  mid-July, mostly around earnings. Without the stops, about 1 day in 14 would have liquidated a venue.
 - **Skip earnings days.** `deltaneutral skip DATE` keeps the bot flat around a report.
 
 ## How a cycle works
@@ -33,16 +33,26 @@ prices and funding, with $100 on each:
 1. **Open.** At `open_ny` (10:00 New York), the bot opens the largest position both venues' margins allow.
    - Arcus asks 1.5 times the margin while the stock market is closed. So an off-hours open is smaller, and Lighter's
      legs are as small as Arcus's.
-   - The way round is the one the funding pays.
-   - Arcus's legs rest limit orders at the best price first, which carries no fee. After `maker_wait_s` the rest is
-     taken.
-   - Lighter's legs follow what Arcus holds, by taker orders. Lighter charges no fee.
-2. **Open, every loop.** Lighter is made the mirror of Arcus again. So anything that changes Arcus's position changes
-   Lighter's the same way. That covers a partial fill, a liquidation, your own order, and `offhours cut` at the stock
-   market's close.
-   - If a venue's room to liquidation falls under `guard` (0.25), the bot closes everything at once.
-3. **Close.** After `hold_h` hours (24), the bot closes the same way, reduce-only.
-4. **Transfer.** After the close it reads both venues' money and sends one line to Telegram, for example:
+   - The way round is the one the last 24 hours of funding paid.
+2. **Limit orders on both venues** (`execution chase`). Every leg rests a limit order that chases its own book.
+   - Price: the best price, or one tick inside it when the spread is wider than two ticks. It moves when the best
+     price moves (`requote_s`, 10 s), and Lighter's are replaced before their 5.5-minute expiry.
+   - Size: it follows the other venue. Neither venue gets more than `max_gap_usd` ($150) of a market ahead of the
+     other, and a gap older than `catchup_s` (60 s) is closed by the venue behind taking it.
+   - An entry still chasing after `enter_timeout_s` (30 min) keeps what both venues hold.
+   - `execution arcus` rests only Arcus's legs (Lighter takes to stay level); `execution take` takes everything.
+3. **Stops at 75% of the way to liquidation** (`stop_share`). Once open, each leg gets a stop and a take-profit
+   resting on its venue.
+   - They sit at the same two prices on both venues, so whichever venue's fires, the other's fires at that price too
+     and the market stays hedged.
+   - The distance is 75% of the way to where that market alone would liquidate the weaker venue. For Lighter that is
+     its maintenance margin (6%), where its partial liquidation starts.
+   - The bot also closes everything once a venue has used 75% of its room, or once a venue no longer holds a leg (its
+     stop fired, or it was liquidated). These closes take at once.
+   - Lighter and Arcus are kept level in every market, whichever one changed.
+4. **Close.** After `hold_h` hours (24), the stops are cancelled and both venues chase again, reduce-only. Whatever is
+   left after `exit_timeout_s` (15 min) is taken.
+5. **Transfer.** After the close it reads both venues' money and sends one line to Telegram, for example:
    `MOVE $13.17 from Arcus (0x12ab…cd34, subaccount 0) to Lighter (account 12345)`.
    - Both venues hold USDG on Robinhood Chain. Withdraw from one to your wallet, then deposit on the other.
    - The next cycle opens at once, sized by the poorer venue. With `wait_transfer 1`, it waits for the move instead.
@@ -50,8 +60,8 @@ prices and funding, with $100 on each:
 About Arcus's lower leverage after hours: Arcus does not cut a position at the close. Its docs say maintenance
 margin is unchanged off-hours, and only opening or adding needs the higher margin. So by default the bot keeps the
 position, and only a cycle opened while the market is closed is smaller. `deltaneutral set offhours cut` cuts both
-venues to Arcus's off-hours size at each close and grows them back at the reopen. In the backtest that only added
-fills.
+venues to Arcus's off-hours size at each close and grows them back at the reopen (the stops are placed again). In
+the backtest that only added fills.
 
 ## Commands
 
@@ -65,9 +75,9 @@ deltaneutral status                     # what it holds, the last cycle, the tra
 deltaneutral transfer                   # how much to move, from which venue to which
 deltaneutral cycles                     # the last cycles
 deltaneutral skip 2026-10-22            # an earnings date: flat from 16:00 New York the day before to the day after
-deltaneutral set guard 0.3              # any setting (deltaneutral settings lists them)
+deltaneutral set stop_share 0.75        # any setting (deltaneutral settings lists them)
 deltaneutral close | pause | resume     # the running bot
-deltaneutral stop                       # stops it (an open cycle stays open)
+deltaneutral stop                       # stops it (an open cycle stays open, with its stops on the venues)
 deltaneutral start --live               # REAL orders: needs DN_LIVE=1 in arcus/.env and LIVE typed here
 deltaneutral backtest USO ORCL --cycles # one pair's 30 days, cycle by cycle (--help for the options)
 deltaneutral fetch && deltaneutral costs && deltaneutral research   # fresh data, costs and report
@@ -90,9 +100,10 @@ Add `live` to act on the live bot, for example `/dn_status live`.
 - **First run.** Run with `max_notional_usd` set small, for example `deltaneutral set max_notional_usd 20`, for one
   cycle.
 - **Order code.** Live uses the arbitrage's order clients. Lighter's passed `arbitrage livetest` on the venue;
-  Arcus's has never sent a real order.
-- **No venue-side stop.** There is no stop order resting on the venues for this bot. If the bot stops, the positions
-  stay hedged across the venues, but no guard watches them.
+  Arcus's has never sent a real order, and its stop orders (`positionTpsl`) have never been placed live. If a venue
+  refuses a stop, the bot says so.
+- **Stops if the bot stops.** Each leg's stop and take-profit stay on its venue at the same prices on both venues, so
+  a market closes on both. The other market then stays open on both venues, still hedged, until the bot runs again.
 
 ## Files
 
@@ -103,5 +114,6 @@ Add `live` to act on the live bot, for example `/dn_status live`.
 | `state/<mode>-*.json(l)` | the bot's state, events, cycles and commands; `run-<mode>.pid` and `.out` while it runs in the background |
 | `settings.json` | your settings |
 
-Code: `plan.py` (sizing, room to liquidation, the transfer), `engine.py` (the cycle), `venues.py` (paper and live
-venues), `bot.py` (the loop), `backtest.py`, `research.py`, `costs.py`, `data.py`, `series.py`.
+Code: `plan.py` (sizing, room to liquidation, the transfer), `engine.py` (the cycle, the limit orders, the stops),
+`venues.py` (paper and live venues), `bot.py` (the loop), `backtest.py`, `research.py`, `costs.py`, `data.py`,
+`series.py`.

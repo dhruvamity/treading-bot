@@ -7,10 +7,18 @@ Arcus's).
 Every five minutes each venue's equity is checked against its maintenance margin; every hour both venues pay or
 receive their funding. After each close the money is made even again by a transfer (`transfers`).
 
-Fills. A fill costs what taking that many dollars from the venue's book costs (half the spread and the levels behind
-it, by session: costs.py), plus the venue's fee. With `arcus_maker` (the bot's default) Arcus's legs rest limit
-orders first: the measured share of them that fills in time costs `maker_bp` and no fee, the rest is taken.
-Lighter's legs always take (Lighter charges no fee).
+Fills (`execution`). "chase", the bot's default: every entry and exit rests limit orders on both venues that follow
+the best price; the measured share of them that fills in time (costs.maker_fills, per venue, market and session)
+costs `maker_bp` and no fee, the rest is taken. "arcus": only Arcus's legs rest, Lighter's take. "take": both take.
+Taking costs what that many dollars cost on the venue's book (half the spread and the levels behind it: costs.py)
+plus its fee. While one venue's limit order waits for the other's, a leg is briefly unhedged: that adds noise, not
+an expected cost, and is not modelled; an entry that would not finish in time is counted as finished.
+
+Stops (`stop_share`, 0.75). At each open, each venue's room = its money less its maintenance margin (Lighter: the
+6% where its partial liquidation starts). The bot closes everything once a venue has used 75% of its room; and each
+leg carries a stop and a take-profit on its venue, the same two prices on both venues, 75% of the way to where that
+market alone would liquidate the weaker venue. Whichever venue's leg triggers, the other's triggers at the same
+price, so the two stay matched; the bot then closes the other market. Stops and guard closes take.
 
 What this cannot see: the order books of the past month (the costs are a recorded month's typical ones), queue
 position, a venue refusing an order, and Arcus's off-hours price band refusing a fill at its edge.
@@ -42,13 +50,15 @@ class Settings:
     ratio: str = "equal"             # "equal": the same dollars of X and Y; "beta": Y's dollars = beta * X's
     way: str = "auto"                # "auto": the way the last 24 h of funding paid; "+1" / "-1": fixed
     offhours: str = "keep"           # "keep": a position stays at the close; "cut": cut to Arcus's off-hours size
-    guard: float = 0.25              # close everything when a venue's (equity - maintenance) / maintenance is under
-                                     # this (the bot's default; 0 = only the venue's liquidation)
-    arcus_maker: bool = True
-    maker_bp: float = 0.5            # what a resting Arcus fill costs against the mid (it gives up its half spread
-                                     # to prices that run on: adverse selection)
-    maker_fill: float = -1.0         # share of Arcus's resting orders filled before the bot takes; -1 = measured
-                                     # (costs.json "maker_fill", per market and session)
+    stop_share: float = 0.75         # close at this share of the way to liquidation (the bot's guard and the venues'
+                                     # stops); 0 = only the venues' own liquidation
+    venue_stops: bool = True         # each leg's stop and take-profit resting on its venue
+    execution: str = "chase"         # "chase": both venues rest limit orders; "arcus": Arcus rests, Lighter takes;
+                                     # "take": both take
+    maker_bp: float = 0.5            # what a resting fill costs against the mid (it gives up its half spread to
+                                     # prices that run on: adverse selection)
+    maker_fill: float = -1.0         # share of resting orders filled in time; -1 = measured (costs.json, per venue,
+                                     # market and session)
     transfers: str = "each"          # "each": money made even after every close; "never"
     weekends: bool = True            # open on Saturday and Sunday too
     skip: tuple[str, ...] = ()       # report dates: nothing held from 16:00 New York the day before to the day after
@@ -108,6 +118,7 @@ class Result:
     liquidations: int
     guards: int
     transfers: list[tuple[int, float, str]]
+    stops: int = 0
 
     @property
     def days(self) -> float:
@@ -162,6 +173,9 @@ class Replay:
         self.guards = 0
         self.transfers: list[tuple[int, float, str]] = []
         self.size_off = False          # the open position is at Arcus's off-hours size ("cut")
+        self.stops = 0
+        self.room0: dict[str, float] = {}                    # each venue's room at the open
+        self.levels: dict[str, tuple[float, float]] = {}     # each market's stop and take-profit prices
 
     # ---- prices
     def px(self, v: str, i: int) -> dict[str, float]:
@@ -171,15 +185,16 @@ class Replay:
         return self.mx.rules if sym == self.pair.x else self.my.rules
 
     # ---- fills
-    def cost_bp(self, v: str, sym: str, i: int, usd: float) -> float:
+    def cost_bp(self, v: str, sym: str, i: int, usd: float, urgent: bool = False) -> float:
         sess = cash_session(float(self.t[i]))
         take = self.costs.take_bp(v, sym, sess, usd) + self.rules(sym)[v].taker_bp
-        if v == ARCUS and self.st.arcus_maker:
-            p = self.st.maker_fill if self.st.maker_fill >= 0 else self.costs.maker_fill(sym, sess)
+        rests = self.st.execution == "chase" or (self.st.execution == "arcus" and v == ARCUS)
+        if rests and not urgent:
+            p = self.st.maker_fill if self.st.maker_fill >= 0 else self.costs.maker_fill(sym, sess, v)
             return p * (self.st.maker_bp + self.rules(sym)[v].maker_bp) + (1 - p) * take
         return take
 
-    def trade(self, v: str, sym: str, units: float, i: int) -> None:
+    def trade(self, v: str, sym: str, units: float, i: int, urgent: bool = False) -> None:
         """Buy (+) or sell (-) `units` of `sym` on venue `v` at bar i's price, paying the fill cost."""
         if units == 0:
             return
@@ -187,7 +202,7 @@ class Replay:
         g = b.legs.setdefault(sym, Leg())
         p = self.px(v, i)[sym]
         usd = abs(units) * p
-        cost = usd * self.cost_bp(v, sym, i, usd) / 1e4
+        cost = usd * self.cost_bp(v, sym, i, usd, urgent) / 1e4
         b.cash -= cost
         self.volume += usd
         if self.cur is not None:
@@ -204,13 +219,39 @@ class Replay:
                 self.cur.price[v] += res
         g.units = new if abs(new) > 1e-12 else 0.0
 
-    def close_all(self, i: int, skip: str = "") -> None:
+    def close_all(self, i: int, skip: str = "", urgent: bool = False, only: str = "") -> None:
         for v in VENUES:
             if v == skip:
                 continue
             for sym, g in list(self.books[v].legs.items()):
-                if g.units:
-                    self.trade(v, sym, -g.units, i)
+                if g.units and (not only or sym == only):
+                    self.trade(v, sym, -g.units, i, urgent)
+
+    def room(self, v: str, i: int) -> float:
+        """Venue v's money less its maintenance margin now: how much it can still lose."""
+        px = self.px(v, i)
+        b = self.books[v]
+        n = b.notional(px)
+        return b.value(px) - P.maintenance(n.get(self.pair.x, 0.0), n.get(self.pair.y, 0.0), self.mx.rules[v],
+                                           self.my.rules[v])
+
+    def protect(self, i: int) -> None:
+        """At the open: each venue's room, and each market's stop and take-profit prices (the same on both venues):
+        `stop_share` of the way to where that market alone would use up the weaker venue's room."""
+        self.room0 = {v: self.room(v, i) for v in VENUES}
+        self.levels = {}
+        if self.st.stop_share <= 0:
+            return
+        for sym in self.pair.symbols():
+            dist = math.inf
+            for v in VENUES:
+                g = self.books[v].legs.get(sym)
+                if g is not None and g.units:
+                    dist = min(dist, self.room0[v] / (abs(g.units) * self.px(v, i)[sym]))
+            if math.isfinite(dist) and dist > 0:
+                ref = sum(self.px(v, i)[sym] for v in VENUES) / len(VENUES)
+                d = self.st.stop_share * dist
+                self.levels[sym] = (ref * (1 - d), ref * (1 + d))
 
     # ---- the cycle
     def target(self, i: int, off: bool, eq: dict[str, float]) -> tuple[float, float, P.Size]:
@@ -249,6 +290,7 @@ class Replay:
         for v in VENUES:
             self.trade(v, self.pair.x, sd[v]["x"] * ux, i)
             self.trade(v, self.pair.y, sd[v]["y"] * uy, i)
+        self.protect(i)
 
     def resize(self, i: int, off: bool) -> None:
         """Cut to Arcus's off-hours size at the close, or grow back at the reopen ("cut")."""
@@ -265,6 +307,7 @@ class Replay:
                 if (off and abs(want) < abs(g.units)) or (not off and abs(want) > abs(g.units)):
                     self.trade(v, sym, d, i)
         self.size_off = off
+        self.protect(i)
 
     def end_cycle(self, i: int, why: str) -> None:
         c = self.cur
@@ -336,8 +379,19 @@ class Replay:
                         self.liquidate(v, i)
                         gone = True
                         break
-                if not gone and st.guard > 0 and self.cur.min_room < st.guard:
-                    self.close_all(i)
+                if not gone and st.venue_stops and self.levels:       # a leg's stop or take-profit on its venue
+                    for sym, (lo, hi) in self.levels.items():
+                        if any(not lo < self.px(v, i)[sym] < hi for v in VENUES):
+                            self.close_all(i, urgent=True, only=sym)
+                            self.close_all(i, urgent=True)
+                            self.stops += 1
+                            self.end_cycle(i, f"stop {sym}")
+                            gone = True
+                            break
+                if not gone and st.stop_share > 0 and any(
+                        self.room0.get(v, 0) > 0 and self.room(v, i) <= (1 - st.stop_share) * self.room0[v]
+                        for v in VENUES):
+                    self.close_all(i, urgent=True)
                     self.guards += 1
                     self.end_cycle(i, "guard")
                     gone = True
@@ -373,7 +427,7 @@ class Replay:
             self.end_cycle(i1 - 1, "end of data")
         return Result(self.pair, st, int(t[i0]), int(t[i1 - 1]), self.start_equity,
                       {v: self.books[v].cash for v in VENUES}, self.cycles, self.volume, self.oi_hours,
-                      self.liquidations, self.guards, self.transfers)
+                      self.liquidations, self.guards, self.transfers, self.stops)
 
     def first_open(self, i0: int) -> int:
         return int(next_open(float(self.t[i0]), self.st.open_ny, self.st.weekends))

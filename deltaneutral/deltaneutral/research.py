@@ -109,7 +109,8 @@ def token_rows(mks: dict[str, S.Market], costs: C.Costs, start: int) -> list[dic
             "a_fund": funding_year(mk, ARCUS, start),
             "a_cost": costs.take_bp(ARCUS, s, "off", 500) + mk.rules[ARCUS].taker_bp,
             "l_cost": costs.take_bp(LIGHTER, s, "off", 500) + mk.rules[LIGHTER].taker_bp,
-            "a_fill": costs.maker_fill(s, "rth"),
+            "a_fill": costs.maker_fill(s, "rth", ARCUS),
+            "l_fill": costs.maker_fill(s, "rth", LIGHTER),
             "move": daily_move(mk.px[LIGHTER], mk.t, start) * 100,
             "basis": bmean,
             "basis_move": bmove,
@@ -148,16 +149,16 @@ def liq_distance(mx: S.Market, my: S.Market, margin_use: float = 0.9) -> float:
     return min(P.spread_to_liquidation(eq[v], sz.nx, sz.ny, mx.rules[v], my.rules[v]) for v in VENUES)
 
 
-def distances(mx: S.Market, my: S.Market, guard: float = 0.25, margin_use: float = 0.9) -> dict[str, tuple[float,
-                                                                                                         float]]:
-    """{venue: (how far apart X and Y may move before the bot's guard closes, before the venue liquidates)}, a fraction
-    of X's dollars, for $100 a venue at the highest in-session leverage."""
+def distances(mx: S.Market, my: S.Market, share: float = 0.75, margin_use: float = 0.9) -> dict[str, tuple[float,
+                                                                                                        float]]:
+    """{venue: (how far apart X and Y may move before the bot's guard closes, at `share` of the way, and before the
+    venue liquidates)}, a fraction of X's dollars, for $100 a venue at the highest in-session leverage."""
     eq = {ARCUS: 100.0, LIGHTER: 100.0}
     sz = P.size(eq, mx.rules, my.rules, False, margin_use)
     out = {}
     for v in VENUES:
         mm = P.maintenance(sz.nx, sz.ny, mx.rules[v], my.rules[v])
-        out[v] = ((eq[v] - (1 + guard) * mm) / sz.nx, (eq[v] - mm) / sz.nx)
+        out[v] = (share * (eq[v] - mm) / sz.nx, (eq[v] - mm) / sz.nx)
     return out
 
 
@@ -234,19 +235,33 @@ def transfers_line(r: BT.Result) -> tuple[int, float, float]:
 RECOMMENDED = Pair("USO", "ORCL")          # Arcus's highest leverage and its lowest OI at 10x; both legs' funding pays
 EXAMPLE = Pair("ORCL", "CRWV")             # the owner's example
 SETTINGS_SHOWN: list[tuple[str, dict[str, Any]]] = [
-    ("the bot's settings (10:00 New York, way from funding, Arcus limit orders first, guard 0.25)", {}),
-    ("Arcus takes at once (no limit orders)", {"arcus_maker": False}),
+    ("the bot's settings (10:00 New York, way from funding, limit orders on both venues, stops at 75%)", {}),
+    ("only Arcus rests limit orders, Lighter takes", {"execution": "arcus"}),
+    ("both venues take at once (no limit orders)", {"execution": "take"}),
+    ("no stops resting on the venues (the bot's guard alone)", {"venue_stops": False}),
     ("open 09:30 New York (the cash open)", {"open_ny": 9.5}),
     ("open 15:00 New York", {"open_ny": 15.0}),
     ("open 20:00 New York (stock market closed: Arcus's off-hours margin)", {"open_ny": 20.0}),
     ("cut to Arcus's off-hours size at each close, grow back at the reopen", {"offhours": "cut"}),
     ("weekdays only", {"weekends": False}),
     ("at most 5x", {"max_leverage": 5.0}),
-    ("no guard (the venues liquidate)", {"guard": 0.0}),
+    ("no stops and no guard (the venues liquidate)", {"stop_share": 0.0}),
     ("Y's dollars = beta x X's", {"ratio": "beta"}),
     ("money never moved between the venues", {"transfers": "never"}),
     ("hold 72 h instead of 24 (outside the owner's rule)", {"hold_h": 72.0}),
 ]
+
+
+def early(r: BT.Result) -> int:
+    """Cycles ended before their time: a stop, the guard or a liquidation."""
+    return r.stops + r.guards + r.liquidations
+
+
+def runs_take_gap(runs: dict[str, BT.Result], mks: dict[str, S.Market], costs: C.Costs, base: BT.Settings,
+                  start: int, end: int, pair: Pair) -> float:
+    """What resting limit orders on both venues saved on `pair` against taking every fill."""
+    taken = run_pair(pair, mks, costs, replace(base, execution="take"), start, end)
+    return runs[pair.name].total - taken.total
 
 
 def report(symbols: list[str] | None = None, days: int = DAYS, out: Path | None = None) -> str:
@@ -264,13 +279,14 @@ def report(symbols: list[str] | None = None, days: int = DAYS, out: Path | None 
     def row(r: BT.Result) -> str:
         n, typ, big = transfers_line(r)
         return (f"{money(r.total)} | {money(r.pnl)} | {money(r.parts()['funding'])} | {money(r.parts()['costs'])} | "
-                f"{fmt_k(r.volume)} | {money(r.avg_oi)} | {r.guards} / {r.liquidations} | {n}: typically "
+                f"{fmt_k(r.volume)} | {money(r.avg_oi)} | {r.stops} / {r.guards} / {r.liquidations} | {n}: typically "
                 f"{money(typ)}, at most {money(big)}")
 
     w("# The delta-neutral bot: which markets, and the last 30 days\n")
     w(f"{d0:%d %b %Y %H:%M} to {d1:%d %b %Y %H:%M} UTC ({days} days), $100 on Arcus and $100 on Lighter at the start, "
       "the bot's own rules (one cycle every 24 hours from 10:00 New York, both venues' highest leverage with 90% of "
-      "the money as margin, money made even after every close). Written by `deltaneutral research`; prices: Arcus's "
+      "the money as margin, limit orders on both venues that chase the book, stops at 75% of the way to liquidation, "
+      "money made even after every close). Written by `deltaneutral research`; prices: Arcus's "
       "candles and Lighter's mark, five-minute bars; funding: each venue's own hourly payments; fills: both venues' "
       "live books measured on 16 Oct and Arcus's own trades (section 6).\n")
 
@@ -279,8 +295,8 @@ def report(symbols: list[str] | None = None, days: int = DAYS, out: Path | None 
     best = sorted(runs.values(), key=lambda r: -r.total)
     shown = [runs[RECOMMENDED.name], runs[EXAMPLE.name], best[0], best[1]]
     seen: set[str] = set()
-    w("| Pair | $200 became | Made | Funding | Fills | Traded | Open interest held (both venues) | Early closes / "
-      "liquidations | Transfers |")
+    w("| Pair | $200 became | Made | Funding | Fills | Traded | Open interest held (both venues) | Stops / guard "
+      "closes / liquidations | Transfers |")
     w("|---|---|---|---|---|---|---|---|---|")
     for r in shown:
         if r.pair.name in seen:
@@ -305,7 +321,13 @@ def report(symbols: list[str] | None = None, days: int = DAYS, out: Path | None 
     w(f"- **Recommended pair: {RECOMMENDED.name}** (the bot's default). USO is Arcus's highest leverage (20x, the "
       "only market of the eight above 10x) and ORCL Arcus's lowest open interest at 10x, as you asked; both legs' "
       "funding pays. The bot holds Arcus long USO / short ORCL and Lighter short USO / long ORCL (it turns round on "
-      "its own when the funding does).")
+      "its own when the funding does). Its limit orders fill least often, though: on Lighter about $5,000 waits at "
+      f"USO's best price and little trades. {best[0].pair.name} lost least ({money(best[0].total)}): both venues' "
+      "limit orders fill most often on AMD (`deltaneutral pair " + " ".join(best[0].pair.symbols()) + "`).")
+    w("- **Limit orders on both venues** (chasing the best price, neither venue more than $150 ahead of the other) "
+      f"save {money(runs_take_gap(runs, mks, costs, base, start, end, RECOMMENDED))} on {RECOMMENDED.name} and "
+      f"{money(runs_take_gap(runs, mks, costs, base, start, end, best[0].pair))} on {best[0].pair.name} in 30 days "
+      "against taking every fill (section 4).")
     w("- **Every cycle needs a transfer.** At the highest leverage one venue makes what the other loses, so the money "
       "ends uneven every day; the bot says exactly how much to move and which way after each close.")
     w("")
@@ -315,14 +337,15 @@ def report(symbols: list[str] | None = None, days: int = DAYS, out: Path | None 
     w("## 1. The eight markets\n")
     w("| Market | Lighter OI | Arcus OI | Lighter leverage | Arcus leverage (market open / closed) | Lighter "
       "funding, a year | Arcus funding, a year | Short on the dearer venue earns, a year | Arcus fill (bp) | "
-      "Lighter fill (bp) | Arcus limit order filled in 10 min | Daily move |")
+      "Lighter fill (bp) | Limit order filled in 10 min, Arcus / Lighter | Daily move |")
     w("|---|---|---|---|---|---|---|---|---|---|---|---|")
     for r in sorted(rows, key=lambda r: r["a_oi"]):
         edge = abs(r["a_fund"] - r["l_fund"])
         dear = "Arcus" if r["a_fund"] > r["l_fund"] else "Lighter"
         w(f"| {r['sym']} | {fmt_k(r['l_oi'])} | {fmt_k(r['a_oi'])} | {r['l_lev']:.0f}x | {r['a_lev']:.0f}x / "
           f"{r['a_lev_off']:.1f}x | {r['l_fund']:+.1f}% | {r['a_fund']:+.1f}% | {edge:.1f}% (short on {dear}) | "
-          f"{r['a_cost']:.1f} | {r['l_cost']:.1f} | {r['a_fill'] * 100:.0f}% | {r['move']:.1f}% |")
+          f"{r['a_cost']:.1f} | {r['l_cost']:.1f} | {r['a_fill'] * 100:.0f}% / {r['l_fill'] * 100:.0f}% | "
+          f"{r['move']:.1f}% |")
     w("\nOpen interest and leverage: both venues' market lists, 16 Oct 2026. Funding: + means longs paid, the 30 "
       "days' average. A fill: half the spread and the levels behind it for $500, plus the fee (Arcus 2.25 bp to "
       "take, nothing to rest; Lighter nothing), measured on the live books while the stock market was closed. "
@@ -340,7 +363,7 @@ def report(symbols: list[str] | None = None, days: int = DAYS, out: Path | None 
       "`Room`: how far apart they may move before the weaker venue is liquidated at the highest leverage. The "
       "bot's guard closes everything earlier, at about two-thirds of that.\n")
     w("| Pair | Correlation | Typical move apart | Largest move apart | Room | $200 became | Funding | Fills | "
-      "Traded | OI held | Early closes / liquidations | Typical transfer |")
+      "Traded | OI held | Stops / guard closes / liquidations | Typical transfer |")
     w("|---|---|---|---|---|---|---|---|---|---|---|---|")
     for r in best:
         p = r.pair
@@ -349,7 +372,7 @@ def report(symbols: list[str] | None = None, days: int = DAYS, out: Path | None 
         n, typ, _ = transfers_line(r)
         w(f"| {p.name} | {corr:.2f} | {sd * 100:.1f}% | {worst * 100:.1f}% | {dist * 100:.1f}% | {money(r.total)} | "
           f"{money(r.parts()['funding'])} | {money(r.parts()['costs'])} | {fmt_k(r.volume)} | {money(r.avg_oi)} | "
-          f"{r.guards} / {r.liquidations} | {money(typ)} |")
+          f"{r.stops} / {r.guards} / {r.liquidations} | {money(typ)} |")
     w("")
 
     # ---- longer history
@@ -357,8 +380,8 @@ def report(symbols: list[str] | None = None, days: int = DAYS, out: Path | None 
     w("The 30 days had few earnings reports. On the venues' hourly prices since mid-July (data.fetch_hours; "
       "both venues' first weeks are left out, Arcus's prices were broken then), every 24-hour hold starting on the "
       "hour, at the highest leverage:\n")
-    w("| Pair | Holds | Ended early by the guard | Would have liquidated a venue without it | Largest 24 h move "
-      "apart | Worst days |")
+    w("| Pair | Holds | Ended early (75% of the way) | Would have liquidated a venue without it | Largest 24 h "
+      "move apart | Worst days |")
     w("|---|---|---|---|---|---|")
     for r in best[:6] + [runs[RECOMMENDED.name], runs[EXAMPLE.name], runs.get("AMD/INTC", best[-1])]:
         p = r.pair
@@ -380,30 +403,31 @@ def report(symbols: list[str] | None = None, days: int = DAYS, out: Path | None 
 
     # ---- settings
     w(f"## 4. What the settings change ({RECOMMENDED.name} and {EXAMPLE.name}, the same 30 days)\n")
-    w(f"| Setting | {RECOMMENDED.name}: $200 became | traded | early closes | {EXAMPLE.name}: $200 became | traded | "
-      "early closes |")
+    w(f"| Setting | {RECOMMENDED.name}: $200 became | traded | stops + guard closes | {EXAMPLE.name}: $200 became | "
+      "traded | stops + guard closes |")
     w("|---|---|---|---|---|---|---|")
     for name, kw in SETTINGS_SHOWN:
         st = replace(base, **kw)
         a = run_pair(RECOMMENDED, mks, costs, st, start, end)
         b = run_pair(EXAMPLE, mks, costs, st, start, end)
-        w(f"| {name} | {money(a.total)} | {fmt_k(a.volume)} | {a.guards + a.liquidations} | {money(b.total)} | "
-          f"{fmt_k(b.volume)} | {b.guards + b.liquidations} |")
+        w(f"| {name} | {money(a.total)} | {fmt_k(a.volume)} | {early(a)} | {money(b.total)} | {fmt_k(b.volume)} | "
+          f"{early(b)} |")
     tape = C.tape()
     tape.fill = costs.fill
     dear = C.Costs(costs.table, 2.0, costs.top_usd, costs.fill)
     for name, cc in (("fills as dear as on Arcus's late-September books", tape), ("every fill twice as dear", dear)):
         a = BT.run(RECOMMENDED, mks[RECOMMENDED.x], mks[RECOMMENDED.y], cc, base, start, end)
         b = BT.run(EXAMPLE, mks[EXAMPLE.x], mks[EXAMPLE.y], cc, base, start, end)
-        w(f"| {name} | {money(a.total)} | {fmt_k(a.volume)} | {a.guards + a.liquidations} | {money(b.total)} | "
-          f"{fmt_k(b.volume)} | {b.guards + b.liquidations} |")
+        w(f"| {name} | {money(a.total)} | {fmt_k(a.volume)} | {early(a)} | {money(b.total)} | {fmt_k(b.volume)} | "
+          f"{early(b)} |")
     w("\nThe defaults are the rows that lose least for the same volume. Cutting at the stock market's close is what "
       "you described (Lighter's legs follow Arcus's smaller size); it only adds fills, because Arcus does not cut a "
       "position at its close: its docs say maintenance margin does not change off-hours, only opening and adding "
       "need 1.5 times the margin. So the bot keeps the position, opens smaller when a cycle starts with the market "
       "closed, and Lighter always mirrors whatever Arcus holds (`offhours cut` is there if you want it). Weekdays "
       "only and 5x lose less only because they trade less. Holding 72 hours is about break-even: the fills, not "
-      "the markets, are what loses.\n")
+      "the markets, are what loses. The stops resting on the venues change the result little: they are there for "
+      "when the bot is not (a crash, a lost connection).\n")
 
     # ---- costs
     w("## 5. The transfers\n")
@@ -419,12 +443,13 @@ def report(symbols: list[str] | None = None, days: int = DAYS, out: Path | None 
     w("Arcus's books on these markets narrowed in October, when its trading grew about tenfold (AMD: about 800 trades "
       "a day in September, 5,000-7,000 in October). Measured on 16 Oct (`deltaneutral costs`), taking $500 costs "
       "0.3-1.5 bp from the mid on Arcus plus its 2.25 bp fee, and 0.8-2.7 bp on Lighter, which charges no fee. The "
-      "Arcus bot's recorded books from late September were 3-4 bp (COIN 9-13 bp). The share of Arcus limit orders "
-      "that fill within 10 minutes comes from Arcus's own trades of the last 7 days and the size waiting at the best "
-      "price (costs.maker_fills): while the stock market is open 60-82% for six of the eight, COIN 46% and USO 15% "
-      "(about $25,000 waits at USO's best price), less while it is closed. Lighter's book has not been recorded: "
-      "it was measured only while the stock market was closed; run `deltaneutral costs` during New York hours to "
-      "add that session.\n")
+      "Arcus bot's recorded books from late September were 3-4 bp (COIN 9-13 bp). The share of limit orders that "
+      "fill within 10 minutes comes from each venue's own trades of the last 7 days and the size waiting at its best "
+      "price (costs.maker_fills; section 1): a resting fill costs 0.5 bp in the replay (what prices that run on take "
+      "back), the rest is taken. While one venue's order waits for the other's a leg is unhedged, by at most "
+      "$150 and for at most a minute (`max_gap_usd`, `catchup_s`); that adds noise, not an expected cost, and is "
+      "not in the replay. Lighter's book has not been recorded: it was measured only while the stock market was "
+      "closed; run `deltaneutral costs` during New York hours to add that session.\n")
     w("## 7. Limits\n")
     w("- 30 days of the venues' own data: a calm month for these markets. Section 3 is the longer view.")
     w("- Fills are estimated from books measured on one day and applied to the whole month.")

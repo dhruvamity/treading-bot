@@ -45,11 +45,13 @@ class Costs:
     table: dict[str, dict[str, dict[str, tuple[float, float]]]] = field(default_factory=dict)
     scale: float = 1.0               # every cost times this (a sensitivity: 1.5 = half again as dear)
     top_usd: dict[str, dict[str, dict[str, float]]] = field(default_factory=dict)   # dollars at the best price
-    fill: dict[str, dict[str, float]] = field(default_factory=dict)  # Arcus: share of resting orders filled in time
+    fill: dict[str, dict[str, dict[str, float]]] = field(default_factory=dict)   # venue -> symbol -> session ->
+                                     # the share of resting orders that fill before the bot gives up on them
 
-    def maker_fill(self, symbol: str, session: str) -> float:
-        """The share of Arcus resting orders that fill before the bot takes the rest (1 when not measured)."""
-        return self.fill.get(symbol, {}).get(session, 1.0)
+    def maker_fill(self, symbol: str, session: str, venue: str = "arcus") -> float:
+        """The share of resting orders on `venue` that fill in time (1 when not measured)."""
+        by = self.fill.get(venue, {}).get(symbol, {})
+        return by.get(session, next(iter(by.values()), 1.0) if by else 1.0)
 
     def take_bp(self, venue: str, symbol: str, session: str, usd: float) -> float:
         row = self.table.get(venue, {}).get(symbol, {}).get(session)
@@ -84,7 +86,8 @@ def load(root: Path | None = None, scale: float = 1.0) -> Costs:
                 c.table.setdefault(v, {}).setdefault(s, {}).update({k: (float(x[0]), float(x[1]))
                                                                     for k, x in sess.items()})
         c.top_usd = saved.get("top_usd", {})
-        c.fill = saved.get("maker_fill", {})
+        mf = saved.get("maker_fill", {})
+        c.fill = mf if set(mf) <= {"arcus", "lighter"} else {"arcus": mf}       # older files: Arcus's alone
         # a session not measured live yet takes a measured one's figure (the recorded tape is from before Arcus's
         # books narrowed in October, and would overstate it): the stock market's own hours first, then the others
         for v, syms in saved.get("table", {}).items():
@@ -148,13 +151,14 @@ def arcus_tape(symbol: str, tape: Path) -> dict[str, tuple[float, float]]:
             for s, v in got.items() if v}
 
 
-def maker_fills(symbols: list[str], usd: float = 500.0, wait_s: float = 600.0, days: float = 7.0,
-                root: Path | None = None) -> dict[str, dict[str, float]]:
-    """Estimate, per market and session, the share of Arcus resting orders of `usd` at the best price that fill
-    within `wait_s`: from the Arcus perp's trades by the minute over the last `days` days (data/arcus_<SYM>_perp1m)
-    and the dollars measured at the best price (`top_usd`). An order fills when half of what trades in the next
-    `wait_s` (the takers on its side) reaches what waits ahead of it plus its own size. Rough: it does not know
-    which side each trade took, nor the queue at each minute. Saved into data/costs.json under "maker_fill"."""
+def maker_fills(symbols: list[str], venue: str = "arcus", usd: float = 500.0, wait_s: float = 600.0,
+                days: float = 7.0, root: Path | None = None) -> dict[str, dict[str, float]]:
+    """Estimate, per market and session, the share of resting orders of `usd` at the best price that fill within
+    `wait_s` on `venue`: from its trades over the last `days` days (Arcus: data/arcus_<SYM>_perp1m, by the minute;
+    Lighter: data/lighter_<SYM>_5m, five minutes) and the dollars measured at its best price (`top_usd`). An order
+    fills when half of what trades in the next `wait_s` (the takers on its side) reaches what waits ahead of it plus
+    its own size. Rough: it does not know which side each trade took, nor the queue at each moment. Saved into
+    data/costs.json under "maker_fill"."""
     from .series import read
 
     p = (root or DATA) / "costs.json"
@@ -162,27 +166,32 @@ def maker_fills(symbols: list[str], usd: float = 500.0, wait_s: float = 600.0, d
         saved = json.loads(p.read_text())
     except (OSError, ValueError):
         saved = {}
-    top = saved.get("top_usd", {}).get("arcus", {})
+    top = saved.get("top_usd", {}).get(venue, {})
+    name, bar, col = (("arcus_{}_perp1m", 60, 5) if venue == "arcus" else ("lighter_{}_5m", 300, 5))
     out: dict[str, dict[str, float]] = {}
-    w = int(wait_s // 60)
+    w = max(1, int(wait_s // bar))
     for s in symbols:
-        rows = read(f"arcus_{s}_perp1m", root)
+        rows = read(name.format(s), root)
         if len(rows) == 0:
             continue
         t0 = int(rows[-1, 0]) - int(days * 86_400)
         rows = rows[rows[:, 0] >= t0]
-        minutes = np.arange(t0 // 60 * 60, int(rows[-1, 0]) + 60, 60)
-        dollars = np.zeros(len(minutes))
-        dollars[np.searchsorted(minutes, rows[:, 0].astype(np.int64))] = rows[:, 5]
+        slots = np.arange(t0 // bar * bar, int(rows[-1, 0]) + bar, bar)
+        dollars = np.zeros(len(slots))
+        dollars[np.searchsorted(slots, rows[:, 0].astype(np.int64))] = rows[:, col]
         ahead = np.cumsum(np.concatenate([[0.0], dollars]))
         nxt = ahead[w:] - ahead[:-w]                          # dollars traded in the next wait_s
         got: dict[str, list[bool]] = {}
-        for i in range(0, len(nxt), 5):
-            sess = cash_session(float(minutes[i]))
+        for i in range(0, len(nxt), max(1, 300 // bar)):
+            sess = cash_session(float(slots[i]))
             queue = float(top.get(s, {}).get(sess) or next(iter(top.get(s, {}).values()), usd))
             got.setdefault(sess, []).append(nxt[i] / 2 >= queue + usd)
         out[s] = {k: float(np.mean(v)) for k, v in got.items() if v}
-    saved["maker_fill"] = {**saved.get("maker_fill", {}), **out}
+    mf = saved.get("maker_fill", {})
+    if not set(mf) <= {"arcus", "lighter"}:
+        mf = {"arcus": mf}
+    mf[venue] = {**mf.get(venue, {}), **out}
+    saved["maker_fill"] = mf
     p.write_text(json.dumps(saved, indent=1))
     return out
 

@@ -349,10 +349,10 @@ async def test_delta_neutral_answers_with_its_own_label_and_starts_only_paper(tm
     await bot.handle(msg("/dn_pair amd intc"))
     await bot.handle(msg("/dn_skip 2026-10-22"))
     assert "2026-10-22" in api.sent[-1][1]
-    await bot.handle(msg("/dn_set guard 0.4"))
+    await bot.handle(msg("/dn_set stop_share 0.6"))
     settings = json.loads((dn_home / "settings.json").read_text())
     assert settings["x"] == "AMD" and settings["y"] == "INTC" and settings["skip"] == ["2026-10-22"]
-    assert settings["guard"] == 0.4
+    assert settings["stop_share"] == 0.6
     await bot.handle(msg("/dn_start live"))
     assert "only from a terminal" in api.sent[-1][1]
     started: list[str] = []
@@ -368,5 +368,5 @@ async def test_a_read_only_bot_reads_delta_neutral_but_changes_nothing(tmp_path:
     bot, api, _ = _bot(tmp_path, _app(tmp_path), read_only=True)
     await bot.handle(msg("/dn_settings"))
     assert "DELTA NEUTRAL · SETTINGS" in api.sent[-1][1] and "USO" in api.sent[-1][1]
-    await bot.handle(msg("/dn_set guard 0.4"))
+    await bot.handle(msg("/dn_set stop_share 0.6"))
     assert "READ-ONLY" in api.sent[-1][1] and not (dn_home / "settings.json").exists()

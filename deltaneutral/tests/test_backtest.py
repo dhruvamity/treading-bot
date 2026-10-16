@@ -30,7 +30,7 @@ def clock(days: int) -> np.ndarray:
 
 def test_flat_prices_cost_only_the_fills_and_every_day_is_a_cycle():
     t = clock(6)
-    st = BT.Settings(arcus_maker=False, weekends=True)
+    st = BT.Settings(execution="take", weekends=True)
     costs = Costs({v: {s: {k: (1.0, 1.0) for k in ("rth", "ext", "off")} for s in ("X", "Y")}
                    for v in (ARCUS, LIGHTER)})
     r = BT.run(Pair("X", "Y"), market("X", t, 100), market("Y", t, 50), costs, st, int(t[0]), int(t[-1]))
@@ -60,10 +60,10 @@ def test_the_guard_closes_before_the_losing_venue_is_liquidated():
     k = int((MON + 86_400 + 3 * 3600 - t[0]) // FIVE)     # a day in, X runs up 12% over two hours
     x[k:k + 24] = np.linspace(100, 112, 24)
     x[k + 24:] = 112
-    st = BT.Settings(way="-1", arcus_maker=False)          # Arcus short X: Arcus loses
+    st = BT.Settings(way="-1", execution="take", venue_stops=False)   # Arcus short X: Arcus loses
     guarded = BT.run(Pair("X", "Y"), market("X", t, x), market("Y", t, 50), FREE, st, int(t[0]), int(t[-1]))
     assert guarded.guards == 1 and guarded.liquidations == 0
-    bare = BT.run(Pair("X", "Y"), market("X", t, x), market("Y", t, 50), FREE, BT.Settings(way="-1", guard=0),
+    bare = BT.run(Pair("X", "Y"), market("X", t, x), market("Y", t, 50), FREE, BT.Settings(way="-1", stop_share=0),
                   int(t[0]), int(t[-1]))
     assert bare.liquidations == 1 and bare.total < guarded.total      # the venue's 1% fee
     assert any(c.end == "liquidated arcus" for c in bare.cycles)
@@ -87,3 +87,19 @@ def test_skip_dates_hold_nothing_from_the_close_before_to_the_close_after():
         assert c.closed <= a or c.opened >= b
     opened = [dt.datetime.fromtimestamp(c.opened, dt.UTC).strftime("%a") for c in r.cycles]
     assert opened == ["Mon", "Fri"] and r.cycles[1].opened == next_open(b, 10.0)
+
+
+def test_a_leg_past_its_stop_closes_the_market_on_both_venues_before_any_liquidation():
+    t = clock(3)
+    x = np.full(len(t), 100.0)
+    k = int((MON + 86_400 + 3 * 3600 - t[0]) // FIVE)     # a day in, X jumps 8% in five minutes
+    x[k:] = 108.0
+    st = BT.Settings(way="-1", execution="take")
+    r = BT.run(Pair("X", "Y"), market("X", t, x), market("Y", t, 50), FREE, st, int(t[0]), int(t[-1]))
+    # Arcus's room is $40 of its $450 leg (8.9%): the stops sit 6.7% away, at the same prices on both venues
+    assert r.stops == 1 and r.liquidations == 0
+    assert any(c.end == "stop X" for c in r.cycles)
+    off = BT.run(Pair("X", "Y"), market("X", t, x), market("Y", t, 50), FREE, BT.Settings(way="-1", execution="take",
+                                                                                          venue_stops=False),
+                 int(t[0]), int(t[-1]))
+    assert off.stops == 0 and off.guards == 1                # without them the bot's own guard closes it

@@ -77,7 +77,8 @@ def c_research(a: argparse.Namespace) -> None:
 def backtest_settings(a: argparse.Namespace) -> BT.Settings:
     return BT.Settings(open_ny=a.hour, hold_h=a.hold, margin_use=a.margin, max_leverage=a.lev,
                        ratio="beta" if a.beta else "equal", way=a.way, offhours="cut" if a.cut else "keep",
-                       guard=a.guard, arcus_maker=not a.taker, maker_bp=a.maker_bp, maker_fill=a.maker_fill,
+                       stop_share=a.stop_share, venue_stops=not a.no_venue_stops, execution=a.execution,
+                       maker_bp=a.maker_bp, maker_fill=a.maker_fill,
                        transfers="never" if a.no_transfers else "each", weekends=not a.weekdays)
 
 
@@ -97,7 +98,7 @@ def c_backtest(a: argparse.Namespace) -> None:
           f"{_usd(r.total)} ({r.pnl / sum(r.start_equity.values()) * 100:+.1f}%)")
     print(f"  the two venues' prices {_usd(parts['price'])}, funding {_usd(parts['funding'])}, fills "
           f"{_usd(parts['costs'])}")
-    print(f"  {len(r.cycles)} cycles, {r.liquidations} liquidations, {r.guards} early closes; traded "
+    print(f"  {len(r.cycles)} cycles, {r.liquidations} liquidations, {r.guards} guard closes, {r.stops} stops; traded "
           f"${r.volume:,.0f}; open interest held ${r.avg_oi:,.0f} on average (both venues, both markets)")
     print(f"  {len(r.transfers)} transfers, ${sum(t[1] for t in r.transfers):,.2f} moved in all, the largest "
           f"${max((t[1] for t in r.transfers), default=0):,.2f}")
@@ -315,8 +316,11 @@ def parser() -> argparse.ArgumentParser:
     b.add_argument("--beta", action="store_true", help="Y's dollars = beta x X's (default: the same dollars)")
     b.add_argument("--way", default="auto", choices=["auto", "+1", "-1"])
     b.add_argument("--cut", action="store_true", help="cut to Arcus's off-hours size at the stock market's close")
-    b.add_argument("--guard", type=float, default=0.25, help="close early under this room (0 = never)")
-    b.add_argument("--taker", action="store_true", help="Arcus's legs take (default: they rest limit orders)")
+    b.add_argument("--stop-share", type=float, default=0.75,
+                   help="close at this share of the way to liquidation (0 = only the venues' liquidation)")
+    b.add_argument("--no-venue-stops", action="store_true", help="no stop and take-profit resting on the venues")
+    b.add_argument("--execution", default="chase", choices=["chase", "arcus", "take"],
+                   help="chase: both venues rest limit orders; arcus: only Arcus does; take: both take")
     b.add_argument("--maker-bp", type=float, default=0.5, help="what a resting Arcus fill costs (bp)")
     b.add_argument("--maker-fill", type=float, default=-1.0,
                    help="share of resting Arcus orders that fill in time (default: measured)")
